@@ -1,0 +1,188 @@
+{
+  "schema_version": "1.0.0",
+  "fingerprints": {
+    "Nginx": {
+      "cats": [22],
+      "headers": {"Server": "nginx(?:/([\\d.]+))?\\;version:\\1"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Apache": {
+      "cats": [22],
+      "headers": {"Server": "Apache(?:/([\\d.]+))?\\;version:\\1"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Microsoft IIS": {
+      "cats": [22],
+      "headers": {"Server": "(?:Microsoft-)?IIS(?:/([\\d.]+))?\\;version:\\1"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "LiteSpeed": {
+      "cats": [22],
+      "headers": {"Server": "LiteSpeed(?:/([\\d.]+))?\\;version:\\1"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "OpenResty": {
+      "cats": [22],
+      "headers": {"Server": "openresty(?:/([\\d.]+))?\\;version:\\1"},
+      "implies": ["Nginx"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "PHP": {
+      "cats": [27],
+      "headers": {"X-Powered-By": "PHP(?:/([\\d.]+))?\\;version:\\1"},
+      "cookies": {"PHPSESSID": ""},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Microsoft ASP.NET": {
+      "cats": [18],
+      "headers": {
+        "X-Powered-By": "ASP\\.NET",
+        "X-AspNet-Version": "([\\d.]+)\\;version:\\1"
+      },
+      "cookies": {"ASP.NET_SessionId": ""},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Python": {
+      "cats": [27],
+      "headers": {"Server": "(?:Python|Werkzeug|gunicorn)(?:/([\\d.]+))?\\;version:\\1"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Node.js": {
+      "cats": [27],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Express": {
+      "cats": [18],
+      "headers": {"X-Powered-By": "Express"},
+      "implies": ["Node.js"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Ruby": {
+      "cats": [27],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Phusion Passenger": {
+      "cats": [22],
+      "headers": {
+        "X-Powered-By": "Phusion Passenger(?:\\(R\\))?(?: ([\\d.]+))?\\;version:\\1",
+        "Server": "Phusion[_ ]Passenger(?:/([\\d.]+))?\\;version:\\1"
+      },
+      "implies": ["Ruby"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "WordPress": {
+      "cats": [1, 11],
+      "headers": {"X-Pingback": "/?xmlrpc\\.php$"},
+      "meta": {"generator": "WordPress ?([\\d.]+)?\\;version:\\1"},
+      "html": ["/wp-content/", "/wp-includes/"],
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Drupal": {
+      "cats": [1],
+      "headers": {
+        "X-Generator": "Drupal ?([\\d.]+)?\\;version:\\1",
+        "X-Drupal-Cache": ""
+      },
+      "meta": {"generator": "Drupal ?([\\d.]+)?\\;version:\\1"},
+      "html": ["Drupal.settings", "/sites/default/files/", "/sites/all/"],
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Joomla": {
+      "cats": [1],
+      "meta": {"generator": "Joomla"},
+      "html": ["/media/jui/", "option=com_content"],
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Magento": {
+      "cats": [6],
+      "cookies": {"X-Magento-Vary": ""},
+      "html": ["/skin/frontend/", "/static/version"],
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Laravel": {
+      "cats": [18],
+      "cookies": {"laravel_session": ""},
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Ghost": {
+      "cats": [1, 11],
+      "meta": {"generator": "Ghost ?([\\d.]+)?\\;version:\\1"},
+      "implies": ["Node.js"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "jQuery": {
+      "cats": [59],
+      "scriptSrc": ["jquery(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "React": {
+      "cats": [12],
+      "scriptSrc": ["react(?:-dom)?[.-]([\\d.]+)(?:\\.min)?\\.js\\;version:\\1"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Vue.js": {
+      "cats": [12],
+      "scriptSrc": [
+        "vue(?:@|[.-])([\\d.]+)(?:\\.min)?\\.js\\;version:\\1",
+        "vue(?:\\.min)?\\.js"
+      ],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Angular": {
+      "cats": [12],
+      "scriptSrc": ["angular(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Bootstrap": {
+      "cats": [66],
+      "scriptSrc": ["bootstrap(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Cloudflare": {
+      "cats": [31],
+      "headers": {"CF-RAY": "", "CF-Cache-Status": "", "Server": "cloudflare"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Akamai": {
+      "cats": [31],
+      "headers": {"X-Akamai-Transformed": "", "Server": "AkamaiGHost"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Fastly": {
+      "cats": [31],
+      "headers": {"Fastly-Restarts": "", "X-Fastly-Request-Id": ""},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    }
+  }
+}

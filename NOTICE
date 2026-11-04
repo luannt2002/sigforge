@@ -1,0 +1,13 @@
+sigforge
+Copyright 2026 The sigforge authors
+
+This product includes software developed as part of the sigforge project
+(https://github.com/luannt2002/sigforge), licensed under the Apache License,
+Version 2.0.
+
+The curated fingerprint baseline in modules/intel/baseline/data/baseline.json is
+authored from public, observable facts (HTTP response headers, cookie names, URL
+paths, meta generator strings) and is released under the same Apache-2.0 license.
+It is not derived from, and does not incorporate, any third-party fingerprint
+dataset. Third-party sources are fetched by the operator at runtime under their
+own licenses and are never vendored into this repository.
