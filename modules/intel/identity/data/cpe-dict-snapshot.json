@@ -1,0 +1,19 @@
+{
+  "resultsPerPage": 9,
+  "startIndex": 0,
+  "totalResults": 9,
+  "format": "NVD_CPE",
+  "version": "2.0",
+  "_note": "sigforge embedded public-domain sample of the NVD CPE dictionary (official-cpe-dictionary). A U.S. Government work in the public domain. Air-gap baseline only; the full dictionary is operator-fetched via SIGFORGE_SOURCE_CPE_DICT_URL.",
+  "products": [
+    {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:nginx:nginx:1.21.0:*:*:*:*:*:*:*", "titles": [{"title": "nginx", "lang": "en"}]}},
+    {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:nginx:nginx:1.20.0:*:*:*:*:*:*:*", "titles": [{"title": "nginx", "lang": "en"}]}},
+    {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:apache:http_server:2.4.57:*:*:*:*:*:*:*", "titles": [{"title": "Apache HTTP Server 2.4.57", "lang": "en"}]}},
+    {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:openssl:openssl:3.0.0:*:*:*:*:*:*:*", "titles": [{"title": "OpenSSL 3.0.0", "lang": "en"}]}},
+    {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:php:php:8.2.0:*:*:*:*:*:*:*", "titles": [{"title": "PHP 8.2.0", "lang": "en"}]}},
+    {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:wordpress:wordpress:6.4:*:*:*:*:*:*:*", "titles": [{"title": "WordPress 6.4", "lang": "en"}]}},
+    {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:jquery:jquery:3.7.1:*:*:*:*:*:*:*", "titles": [{"title": "jQuery 3.7.1", "lang": "en"}]}},
+    {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:microsoft:internet_information_services:10.0:*:*:*:*:*:*:*", "titles": [{"title": "Microsoft Internet Information Services 10.0", "lang": "en"}]}},
+    {"cpe": {"deprecated": true, "cpeName": "cpe:2.3:a:nginx:nginx_old:0.1:*:*:*:*:*:*:*", "titles": [{"title": "nginx old deprecated", "lang": "en"}]}}
+  ]
+}
