@@ -76,7 +76,7 @@ func domAttr(attr, pat, html string, fp schema.Fingerprint, h *hit) {
 		return
 	}
 	if m := re.FindStringSubmatch(html); m != nil {
-		record(h, confOf(conf, fp), ver, m)
+		record(h, confOf(conf, fp), ver, "dom", pat, m[0], m)
 	}
 }
 
@@ -87,7 +87,7 @@ func domRegex(pat, html string, fp schema.Fingerprint, h *hit) {
 		return
 	}
 	if m := re.FindStringSubmatch(html); m != nil {
-		record(h, confOf(conf, fp), ver, m)
+		record(h, confOf(conf, fp), ver, "dom", expr, m[0], m)
 	}
 }
 
@@ -100,7 +100,7 @@ func domPresence(sel, extra, lowHTML string, fp schema.Fingerprint, h *hit) {
 	}
 	_, _, conf := splitPattern(extra)
 	if strings.Contains(lowHTML, tok) {
-		record(h, confOf(conf, fp), "", nil)
+		record(h, confOf(conf, fp), "", "dom", "", tok, nil)
 	}
 }
 

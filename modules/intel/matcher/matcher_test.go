@@ -174,6 +174,104 @@ func TestBaselineApacheNotCoyote(t *testing.T) {
 	}
 }
 
+// TestRequiredLitAlternationSafe guards fix #1: the longest-run pre-filter must not
+// reject a page that matches one branch of an alternation. `(wordpress|joomla)` used
+// to require "wordpress", dropping a joomla-only page the regex matches.
+func TestRequiredLitAlternationSafe(t *testing.T) {
+	d := db(map[string]schema.Fingerprint{
+		"CMS": {HTML: schema.StringList{`(wordpress|joomla)`}},
+	})
+	// positive: a page with only the second branch must detect
+	if got := Match(d, Page{HTML: `<meta content="Powered by joomla">`}); func() bool { _, ok := find(got, "CMS"); return !ok }() {
+		t.Fatal("joomla-only page must detect CMS")
+	}
+	// positive: the first branch still detects
+	if got := Match(d, Page{HTML: `<div>wordpress site</div>`}); func() bool { _, ok := find(got, "CMS"); return !ok }() {
+		t.Fatal("wordpress page must detect CMS")
+	}
+	// negative: a page with neither branch must not detect
+	if got := Match(d, Page{HTML: `<div>plain drupal page</div>`}); func() bool { _, ok := find(got, "CMS"); return ok }() {
+		t.Fatal("page with neither branch must not detect CMS")
+	}
+}
+
+// TestRequiredLitUnit pins the pre-filter directly: a mandatory top-level literal is
+// kept (optimization), an alternation branch literal is not required, and a letter
+// made optional by a trailing quantifier is trimmed.
+func TestRequiredLitUnit(t *testing.T) {
+	cases := []struct {
+		expr string
+		want string
+	}{
+		{`/wp-content/`, "content"},    // plain literal: longest required run
+		{`(wordpress|joomla)`, ""},     // alternation branch is not required
+		{`wordpress|joomla`, ""},       // top-level alternation: nothing required
+		{`word(?:press)?`, "word"},     // optional group content is not required
+		{`caches?`, "cache"},           // trailing ? makes the last letter optional
+		{`apple(x|y)banana`, "banana"}, // literals around a group stay required
+		{`abc`, ""},                    // shorter than the 4-char floor
+	}
+	for _, c := range cases {
+		if got := requiredLit(c.expr); got != c.want {
+			t.Errorf("requiredLit(%q) = %q, want %q", c.expr, got, c.want)
+		}
+	}
+}
+
+// TestRecordKeepsFirstVersion guards fix #7: a second, differently-shaped version
+// string must not overwrite the first. The old len-based rule let "9.5" replace "10".
+func TestRecordKeepsFirstVersion(t *testing.T) {
+	h := &hit{}
+	record(h, 50, "10", "html", "x", "x", []string{"x"})
+	if h.version != "10" { // positive: first version captured
+		t.Fatalf("after first record, version = %q, want %q", h.version, "10")
+	}
+	record(h, 50, "9.5", "html", "x", "x", []string{"x"})
+	if h.version != "10" { // negative: longer-but-different string must not win
+		t.Fatalf("after second record, version = %q, want %q", h.version, "10")
+	}
+}
+
+// TestEvidenceTracesTheLead checks the explain flow: a header detection carries one
+// MatchEvidence naming the field, the pattern that fired and the actual matched
+// string; an implied technology carries none (it has no direct signal, so inventing
+// evidence would be a lie).
+func TestEvidenceTracesTheLead(t *testing.T) {
+	d := db(map[string]schema.Fingerprint{
+		"WordPress": {Meta: map[string]schema.StringList{"generator": {`WordPress ?([\d.]+)?\;version:\1`}}, Implies: schema.StringList{"PHP"}},
+		"PHP":       {Cats: []int{27}},
+		"Nginx":     {Headers: map[string]schema.StringList{"Server": {`nginx(?:/([\d.]+))?\;version:\1`}}},
+	})
+	got := Match(d, Page{
+		Headers: map[string][]string{"server": {"nginx/1.18.0"}},
+		HTML:    `<meta name="generator" content="WordPress 6.5.2">`,
+	})
+
+	n, ok := find(got, "Nginx")
+	if !ok || len(n.Evidence) != 1 {
+		t.Fatalf("Nginx evidence = %+v ok=%v", n.Evidence, ok)
+	}
+	ev := n.Evidence[0]
+	if ev.Field != "header" || ev.Pattern == "" || ev.Matched != "nginx/1.18.0" {
+		t.Fatalf("evidence = %+v, want field=header, non-empty pattern, matched=nginx/1.18.0", ev)
+	}
+
+	// positive: the HTML/meta detection also records its field
+	w, ok := find(got, "WordPress")
+	if !ok || len(w.Evidence) == 0 || w.Evidence[0].Field != "meta" {
+		t.Fatalf("WordPress evidence = %+v ok=%v", w.Evidence, ok)
+	}
+
+	// negative: an implied technology has no direct evidence — none must be fabricated
+	p, ok := find(got, "PHP")
+	if !ok {
+		t.Fatal("PHP should be implied")
+	}
+	if len(p.Evidence) != 0 {
+		t.Fatalf("implied PHP must carry no evidence, got %+v", p.Evidence)
+	}
+}
+
 func TestConfidenceSuffixLowersAndSums(t *testing.T) {
 	d := db(map[string]schema.Fingerprint{
 		"Weak": {HTML: schema.StringList{`data-weak-marker\;confidence:50`}},

@@ -28,31 +28,43 @@ import (
 // case-insensitively; cookies are "name=value" strings (a whole Set-Cookie line is
 // fine, only the first pair is read).
 type Page struct {
-	Headers    map[string][]string
-	Cookies    []string
-	HTML       string
-	ScriptSrcs []string
+	Headers    map[string][]string `json:"headers,omitempty"`
+	Cookies    []string            `json:"cookies,omitempty"`
+	HTML       string              `json:"html,omitempty"`
+	ScriptSrcs []string            `json:"scriptSrcs,omitempty"`
 }
 
 // Detection is one recognized technology and the metadata a consumer needs to
 // judge the lead: the confidence it accumulated, and the provenance+license of the
 // data that produced it (so the operator knows the license posture of the hit).
 type Detection struct {
-	Tech       string `json:"tech"`
-	Version    string `json:"version,omitempty"`
-	Confidence int    `json:"confidence"`
-	Categories []int  `json:"categories,omitempty"`
-	Provenance string `json:"provenance,omitempty"`
-	License    string `json:"license,omitempty"`
+	Tech       string          `json:"tech"`
+	Version    string          `json:"version,omitempty"`
+	Confidence int             `json:"confidence"`
+	Categories []int           `json:"categories,omitempty"`
+	Provenance string          `json:"provenance,omitempty"`
+	License    string          `json:"license,omitempty"`
+	Evidence   []MatchEvidence `json:"evidence,omitempty"`
+}
+
+// MatchEvidence records why one detection fired: which field carried the signal,
+// the pattern that matched, and the actual string it matched (truncated if long).
+// It makes a detection traceable back to the raw signal; it is not proof of
+// exploitability, only of the lead. An implied technology carries no evidence.
+type MatchEvidence struct {
+	Field   string `json:"field"`             // header | cookie | meta | html | scriptSrc | dom
+	Pattern string `json:"pattern,omitempty"` // the matched regex; empty for a presence signal
+	Matched string `json:"matched,omitempty"` // the string that actually matched
 }
 
 const maxImplyDepth = 4
 
 type hit struct {
-	conf    int
-	version string
-	fp      schema.Fingerprint
-	implied bool
+	conf     int
+	version  string
+	fp       schema.Fingerprint
+	implied  bool
+	evidence []MatchEvidence
 }
 
 // Match runs every fingerprint in the DB against the page and returns detections
@@ -70,9 +82,9 @@ func Match(db *schema.DB, page Page) []Detection {
 	hits := make(map[string]*hit)
 	for name, fp := range db.Fingerprints {
 		h := &hit{fp: fp}
-		matchNamed(fp.Headers, headers, fp, h)
-		matchNamed(fp.Cookies, cookies, fp, h)
-		matchNamed(fp.Meta, metas, fp, h)
+		matchNamed(fp.Headers, headers, "header", fp, h)
+		matchNamed(fp.Cookies, cookies, "cookie", fp, h)
+		matchNamed(fp.Meta, metas, "meta", fp, h)
 		for _, raw := range fp.HTML {
 			matchHTML(raw, html, lowHTML, fp, h)
 		}
@@ -105,6 +117,7 @@ func Match(db *schema.DB, page Page) []Detection {
 			Categories: h.fp.Cats,
 			Provenance: h.fp.Provenance,
 			License:    h.fp.License,
+			Evidence:   h.evidence,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -116,7 +129,7 @@ func Match(db *schema.DB, page Page) []Detection {
 	return out
 }
 
-func matchNamed(pats map[string]schema.StringList, src map[string][]string, fp schema.Fingerprint, h *hit) {
+func matchNamed(pats map[string]schema.StringList, src map[string][]string, field string, fp schema.Fingerprint, h *hit) {
 	if len(pats) == 0 || len(src) == 0 {
 		return
 	}
@@ -128,7 +141,7 @@ func matchNamed(pats map[string]schema.StringList, src map[string][]string, fp s
 		for _, raw := range raws {
 			expr, ver, conf := splitPattern(raw)
 			if expr == "" { // presence of the name is itself the signal
-				record(h, confOf(conf, fp), ver, nil)
+				record(h, confOf(conf, fp), ver, field, "", name, nil)
 				continue
 			}
 			re := compile(expr)
@@ -137,7 +150,7 @@ func matchNamed(pats map[string]schema.StringList, src map[string][]string, fp s
 			}
 			for _, v := range vals {
 				if m := re.FindStringSubmatch(v); m != nil {
-					record(h, confOf(conf, fp), ver, m)
+					record(h, confOf(conf, fp), ver, field, expr, m[0], m)
 					break
 				}
 			}
@@ -158,7 +171,7 @@ func matchHTML(raw, html, lowHTML string, fp schema.Fingerprint, h *hit) {
 		return
 	}
 	if m := re.FindStringSubmatch(html); m != nil {
-		record(h, confOf(conf, fp), ver, m)
+		record(h, confOf(conf, fp), ver, "html", expr, m[0], m)
 	}
 }
 
@@ -193,7 +206,7 @@ func matchScriptSrc(raw, src string, fp schema.Fingerprint, h *hit) {
 		}
 		m = append(m, src[loc[i]:loc[i+1]])
 	}
-	record(h, confOf(conf, fp), ver, m)
+	record(h, confOf(conf, fp), ver, "scriptSrc", expr, m[0], m)
 }
 
 // refineVersion fills a still-missing version from the entry's alternate
@@ -228,11 +241,26 @@ func refineVersion(fp schema.Fingerprint, html string, headers map[string][]stri
 	}
 }
 
-func record(h *hit, conf int, verTmpl string, m []string) {
+func record(h *hit, conf int, verTmpl, field, pattern, matched string, m []string) {
 	h.conf += conf
-	if v := substitute(verTmpl, m); v != "" && len(v) > len(h.version) {
-		h.version = v
+	// Keep the first version captured. A later pattern's differently-shaped string
+	// must not overwrite it: the old len-based choice wrongly preferred "9.5" over
+	// "10". refineVersion still fills a version only when none was captured.
+	if h.version == "" {
+		h.version = substitute(verTmpl, m)
 	}
+	h.evidence = append(h.evidence, MatchEvidence{Field: field, Pattern: pattern, Matched: redact(matched)})
+}
+
+// redact caps a matched string so a whole inlined script or minified blob does not
+// bloat the evidence; it keeps the lead traceable without dumping the page.
+func redact(s string) string {
+	const max = 120
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // expandImplies propagates the "implies" relation (WordPress ⇒ PHP). An implied
@@ -341,30 +369,63 @@ func compile(expr string) *regexp.Regexp {
 	return re
 }
 
-// requiredLit returns the longest run of plain lowercase letters in the pattern as
-// a cheap pre-filter literal, or "" when none is long enough. It is one-way safe:
-// it may let a non-match through, never reject a real match.
+// requiredLit returns a lowercase literal that every match of expr is guaranteed to
+// contain, usable as a cheap pre-filter, or "" when none qualifies. Only runs at the
+// top level of the regex (outside every group, hence mandatory) count; a top-level
+// alternation makes no literal required across its branches, so such a pattern
+// yields "". A run whose last letter a following `?`, `*` or `{..}` quantifier makes
+// optional has that letter dropped. With these rules the pre-filter is one-way safe:
+// it never rejects a page the full regex would match.
 func requiredLit(expr string) string {
-	best, cur := "", strings.Builder{}
-	flush := func() {
-		if cur.Len() > len(best) {
-			best = cur.String()
-		}
+	best := ""
+	depth := 0
+	cur := strings.Builder{}
+	flush := func(lastOptional bool) {
+		s := cur.String()
 		cur.Reset()
+		if lastOptional && s != "" {
+			s = s[:len(s)-1]
+		}
+		if len(s) > len(best) {
+			best = s
+		}
 	}
 	for i := 0; i < len(expr); i++ {
-		c := expr[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-			cur.WriteByte(c)
+		switch c := expr[i]; {
 		case c == '\\':
-			i++ // skip the escaped byte, breaking the run
-			flush()
+			flush(false)
+			i++ // escaped byte is not part of a literal run
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+			if depth == 0 {
+				cur.WriteByte(c)
+			}
+		case c == '?' || c == '*' || c == '{':
+			flush(true) // the run's last letter is optional
+		case c == '(':
+			flush(false)
+			depth++
+		case c == ')':
+			flush(false)
+			if depth > 0 {
+				depth--
+			}
+		case c == '|':
+			flush(false)
+			if depth == 0 {
+				return "" // top-level alternation: no literal is required
+			}
+		case c == '[':
+			flush(false)
+			for i++; i < len(expr) && expr[i] != ']'; i++ {
+				if expr[i] == '\\' {
+					i++
+				}
+			}
 		default:
-			flush()
+			flush(false)
 		}
 	}
-	flush()
+	flush(false)
 	if len(best) < 4 {
 		return ""
 	}

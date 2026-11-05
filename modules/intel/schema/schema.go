@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -49,6 +50,23 @@ type Fingerprint struct {
 	License           string   `json:"license,omitempty"`            // SPDX id of the source's license, e.g. "Apache-2.0"
 	VersionRegex      []string `json:"version_regex,omitempty"`      // alternate version-capturing patterns kept from lower-precedence sources during merge
 	CPE               []string `json:"cpe,omitempty"`                // Common Platform Enumeration id(s) the source attests, e.g. "cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*" — the bridge to CVE/NVD; populated only from a source's real cpe value, never fabricated
+
+	// VersionRegexProv is the true provenance+license of each VersionRegex alternate,
+	// aligned by index. The entry-level Provenance/License above describe the winning
+	// source, but an alternate kept during merge may come from a lower-precedence
+	// source under a different (e.g. GPL) license; recording it per pattern keeps a
+	// consumer from serving that pattern under the winner's license. Absent or shorter
+	// than VersionRegex ⇒ the unrecorded alternates share the entry's own license.
+	VersionRegexProv []PatternProv `json:"version_regex_prov,omitempty"`
+}
+
+// PatternProv carries the provenance and license of a single pattern, used by
+// VersionRegexProv so a merged-in alternate is never mislabeled under the entry's
+// license. The fields mirror the entry-level provenance trio.
+type PatternProv struct {
+	Provenance        string `json:"provenance,omitempty"`
+	ProvenanceVersion string `json:"provenance_version,omitempty"`
+	License           string `json:"license,omitempty"`
 }
 
 // StringList accepts a JSON string or an array of strings, because a Wappalyzer
@@ -95,9 +113,10 @@ func Parse(b []byte) (*DB, error) {
 	return &db, nil
 }
 
-// Validate checks the envelope and basic shape: a compatible schema version and a
-// non-empty set with non-empty names. It does not compile patterns — a malformed
-// regex is the matcher's concern, which drops it rather than failing the DB.
+// Validate checks the envelope and basic shape: a compatible schema version, a
+// non-empty set with non-empty names, and that every regex pattern compiles — a
+// malformed regex is rejected here, naming the rule, so the matcher never drops it
+// silently at match time.
 func Validate(db *DB) error {
 	if db == nil {
 		return errors.New("schema: nil DB")
@@ -112,9 +131,97 @@ func Validate(db *DB) error {
 	if len(db.Fingerprints) == 0 {
 		return errors.New("schema: no fingerprints")
 	}
-	for name := range db.Fingerprints {
+	for name, fp := range db.Fingerprints {
 		if strings.TrimSpace(name) == "" {
 			return errors.New("schema: fingerprint with empty name")
+		}
+		if err := validatePatterns(name, fp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validatePatterns compiles every regex a matcher would run for this entry, so a
+// malformed pattern is caught here instead of being silently dropped at match time.
+// An empty pattern is a presence signal, not a regex, and is skipped.
+func validatePatterns(name string, fp Fingerprint) error {
+	for key, raws := range fp.Headers {
+		if err := checkPatterns(name, "headers["+key+"]", raws); err != nil {
+			return err
+		}
+	}
+	for key, raws := range fp.Cookies {
+		if err := checkPatterns(name, "cookies["+key+"]", raws); err != nil {
+			return err
+		}
+	}
+	for key, raws := range fp.Meta {
+		if err := checkPatterns(name, "meta["+key+"]", raws); err != nil {
+			return err
+		}
+	}
+	if err := checkPatterns(name, "html", fp.HTML); err != nil {
+		return err
+	}
+	if err := checkPatterns(name, "scriptSrc", fp.ScriptSrc); err != nil {
+		return err
+	}
+	if err := checkPatterns(name, "version_regex", fp.VersionRegex); err != nil {
+		return err
+	}
+	if len(fp.Dom) > 0 {
+		return validateDom(name, fp.Dom)
+	}
+	return nil
+}
+
+func checkPatterns(name, field string, raws []string) error {
+	for _, raw := range raws {
+		expr := patternExpr(raw)
+		if strings.TrimSpace(expr) == "" {
+			continue // presence signal, no regex to compile
+		}
+		if _, err := regexp.Compile("(?i)" + expr); err != nil {
+			return fmt.Errorf("schema: fingerprint %q: invalid %s regex %q: %w", name, field, raw, err)
+		}
+	}
+	return nil
+}
+
+// patternExpr is the regex part of a "regex\;version:..\;confidence:.." pattern.
+func patternExpr(raw string) string {
+	expr, _, _ := strings.Cut(raw, `\;`)
+	return expr
+}
+
+// validateDom compiles the attribute and text regexes of a Wappalyzer `dom` object
+// as the matcher does (an attribute pattern is anchored to `attr=`, see
+// matcher_dom.go). The array and bare-string dom shapes carry only selectors, which
+// are presence tokens, not regexes.
+func validateDom(name string, raw json.RawMessage) error {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	for _, nraw := range obj {
+		var node struct {
+			Text       string            `json:"text"`
+			Attributes map[string]string `json:"attributes"`
+		}
+		if json.Unmarshal(nraw, &node) != nil {
+			continue // bare string/array value → presence selector, no regex
+		}
+		for attr, pat := range node.Attributes {
+			expr := regexp.QuoteMeta(attr) + `\s*=\s*["']?` + patternExpr(pat)
+			if _, err := regexp.Compile("(?i)" + expr); err != nil {
+				return fmt.Errorf("schema: fingerprint %q: invalid dom attribute %q regex %q: %w", name, attr, pat, err)
+			}
+		}
+		if expr := patternExpr(node.Text); strings.TrimSpace(expr) != "" {
+			if _, err := regexp.Compile("(?i)" + expr); err != nil {
+				return fmt.Errorf("schema: fingerprint %q: invalid dom text regex %q: %w", name, node.Text, err)
+			}
 		}
 	}
 	return nil
