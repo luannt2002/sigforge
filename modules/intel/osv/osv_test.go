@@ -1,0 +1,371 @@
+package osv
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/luannt2002/sigforge/framework/fetch"
+)
+
+// Real OSV advisory shapes (trimmed to the fields the reducer reads).
+const (
+	// lodash: a half-open range, fixed in 4.17.21, with a CVE alias and a GHSA text severity.
+	advLodash = `{
+	  "id":"GHSA-35jh-r3h4-6jhm","aliases":["CVE-2021-23337"],
+	  "database_specific":{"severity":"HIGH"},
+	  "affected":[{"package":{"name":"lodash","ecosystem":"npm"},
+	    "ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.17.21"}]}]}]
+	}`
+	// A multi-ecosystem advisory: the npm index must keep the npm package and drop the PyPI one.
+	advMulti = `{
+	  "id":"GHSA-multi-0001","aliases":["CVE-2022-0001"],
+	  "database_specific":{"severity":"CRITICAL"},
+	  "affected":[
+	    {"package":{"name":"minimist","ecosystem":"npm"},
+	      "ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"1.2.6"}]}]},
+	    {"package":{"name":"minimist-py","ecosystem":"PyPI"},
+	      "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"9.9.9"}]}]}]
+	}`
+	// Withdrawn: reporting it would be a pure false positive, so the reducer drops it entirely.
+	advWithdrawn = `{
+	  "id":"GHSA-withdrawn-1","aliases":["CVE-2019-0000"],"withdrawn":"2020-01-01T00:00:00Z",
+	  "database_specific":{"severity":"HIGH"},
+	  "affected":[{"package":{"name":"ghost","ecosystem":"npm"},
+	    "ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"9.9.9"}]}]}]
+	}`
+	// No range at all, only a concrete affected-version list: the matcher must fall back to exact
+	// version matching (reduce.go keeps versions[] only in this case).
+	advConcrete = `{
+	  "id":"GHSA-concrete-1","aliases":["CVE-2023-0002"],
+	  "database_specific":{"severity":"MODERATE"},
+	  "affected":[{"package":{"name":"leftpad","ecosystem":"npm"},
+	    "versions":["1.0.0","1.0.1"]}]
+	}`
+	// A last_affected range (CLOSED upper bound): version <= last_affected is affected. Exercises the
+	// rangesFrom last_affected event path, which the flat VersionInRange test does not reach.
+	advLastAffected = `{
+	  "id":"GHSA-last-1","aliases":["CVE-2023-0003"],
+	  "database_specific":{"severity":"LOW"},
+	  "affected":[{"package":{"name":"tailpkg","ecosystem":"npm"},
+	    "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"1.0.0"},{"last_affected":"1.5.0"}]}]}]
+	}`
+)
+
+// makeZip packs name→json-content into a zip, returning a ReaderAt + its size (no disk, no network).
+func makeZip(t *testing.T, entries map[string]string) (*bytes.Reader, int64) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	b := buf.Bytes()
+	return bytes.NewReader(b), int64(len(b))
+}
+
+func npmIndex(t *testing.T) *Index {
+	t.Helper()
+	r, size := makeZip(t, map[string]string{
+		"npm/GHSA-35jh-r3h4-6jhm.json": advLodash,
+		"npm/GHSA-multi-0001.json":     advMulti,
+		"npm/GHSA-withdrawn-1.json":    advWithdrawn,
+		"npm/not-json.txt":             "ignored",
+		"npm/corrupt.json":             "{ this is not json",
+	})
+	idx, err := BuildIndex(context.Background(), "npm", r, size)
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	return idx
+}
+
+// ---- Ecosystem alias map (pure) ----
+
+func TestEcosystem(t *testing.T) {
+	cases := map[string]string{"yarn": "npm", "pip": "PyPI", "golang": "Go", "cargo": "crates.io", "DOTNET": "NuGet"}
+	for alias, want := range cases {
+		if got, ok := Ecosystem(alias); !ok || got != want {
+			t.Errorf("Ecosystem(%q) = %q,%v; want %q", alias, got, ok, want)
+		}
+	}
+	if _, ok := Ecosystem("cocoapods"); ok {
+		t.Error("an unsupported ecosystem must report ok=false")
+	}
+}
+
+// ---- Version comparison + range (pure) — MUTATION TARGET ----
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.2.3", "1.2.3", 0},
+		{"1.2", "1.2.0", 0},
+		{"v1.2.3", "1.2.3", 0},
+		{"1.2.3", "1.2.4", -1},
+		{"1.10.0", "1.9.0", 1}, // numeric, not lexical
+		{"1.0.0-rc.1", "1.0.0", -1},
+		{"4.17.21+build", "4.17.21", 0},
+		{"20230101120000", "20230101119999", 1}, // long numeric, no int64 overflow
+	}
+	for _, c := range cases {
+		if got := CompareVersions(c.a, c.b); got != c.want {
+			t.Errorf("CompareVersions(%q,%q) = %d; want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// VersionInRange is the matcher a mutation (flip the half-open/closed comparison) must break.
+func TestVersionInRange(t *testing.T) {
+	halfOpen := affectedRange{introduced: "4.0.0", fixed: "4.17.21"} // version < fixed is affected
+	if !VersionInRange("4.17.20", halfOpen) {
+		t.Error("4.17.20 is below the fix and must be in range")
+	}
+	if VersionInRange("4.17.21", halfOpen) {
+		t.Error("4.17.21 is the fixed version and must be OUT of a half-open range")
+	}
+	if VersionInRange("3.0.0", halfOpen) {
+		t.Error("3.0.0 is below introduced and must be out of range")
+	}
+	closed := affectedRange{introduced: "0", lastAffected: "2.0.0"} // version <= last is affected
+	if !VersionInRange("2.0.0", closed) {
+		t.Error("2.0.0 equals last_affected and must be in a closed range")
+	}
+	if VersionInRange("2.0.1", closed) {
+		t.Error("2.0.1 is past last_affected and must be out of range")
+	}
+	openEnded := affectedRange{introduced: "1.0.0"} // introduced, never fixed
+	if !VersionInRange("99.0.0", openEnded) {
+		t.Error("an introduced-but-never-fixed range must cover every later version")
+	}
+}
+
+func TestCleanVersion(t *testing.T) {
+	if CleanVersion("4.17.15") == "" {
+		t.Error("a pinned version must survive CleanVersion")
+	}
+	for _, r := range []string{"^4.17.0", ">=1.2 <2", "", "   "} {
+		if CleanVersion(r) != "" {
+			t.Errorf("a range/empty version %q must clean to \"\"", r)
+		}
+	}
+}
+
+// ---- reduceRecord (pure) ----
+
+func TestReduceRecordWithdrawnDropped(t *testing.T) {
+	var raw rawRecord
+	mustUnmarshal(t, advWithdrawn, &raw)
+	if recs := reduceRecord(&raw, "npm"); recs != nil {
+		t.Fatalf("a withdrawn advisory must reduce to nil, got %+v", recs)
+	}
+}
+
+func TestReduceRecordFiltersForeignEcosystem(t *testing.T) {
+	var raw rawRecord
+	mustUnmarshal(t, advMulti, &raw)
+	recs := reduceRecord(&raw, "npm")
+	if len(recs) != 1 || recs[0].pkg != "minimist" {
+		t.Fatalf("the npm index must keep only the npm package, got %+v", recs)
+	}
+}
+
+// ---- Lookup tri-state over a built index ----
+
+func TestLookupVulnerable(t *testing.T) {
+	res := npmIndex(t).Lookup("lodash", "4.17.20")
+	if res.Status != StatusVulnerable {
+		t.Fatalf("lodash 4.17.20 must be vulnerable, got %s", res.Status)
+	}
+	if len(res.Vulns) != 1 || res.Vulns[0].CVE != "CVE-2021-23337" || res.Vulns[0].Severity != "high" {
+		t.Fatalf("wrong vuln detail: %+v", res.Vulns)
+	}
+	if res.Vulns[0].Ref() != "CVE-2021-23337" {
+		t.Fatalf("Ref must prefer the CVE, got %q", res.Vulns[0].Ref())
+	}
+}
+
+// version OUTSIDE every affected range, package KNOWN → RESOLVED no-known-vuln (not "unknown", not "vulnerable").
+func TestLookupResolvedVersionOutOfRange(t *testing.T) {
+	res := npmIndex(t).Lookup("lodash", "4.17.21")
+	if res.Status != StatusNoKnownVuln {
+		t.Fatalf("lodash 4.17.21 (fixed) must be no-known-vuln, got %s", res.Status)
+	}
+	if len(res.Vulns) != 0 {
+		t.Fatalf("a resolved lookup must carry no vulns, got %+v", res.Vulns)
+	}
+}
+
+// package NOT in the index → UNKNOWN, never "safe".
+func TestLookupUnknownPackage(t *testing.T) {
+	if res := npmIndex(t).Lookup("totally-unseen-pkg", "1.0.0"); res.Status != StatusUnknown {
+		t.Fatalf("an unseen package must be unknown (not safe), got %s", res.Status)
+	}
+}
+
+// nil index (source off / dump dead) → UNKNOWN, never "safe".
+func TestLookupNilIndexUnknown(t *testing.T) {
+	var idx *Index
+	if res := idx.Lookup("lodash", "4.17.20"); res.Status != StatusUnknown {
+		t.Fatalf("a nil index must be unknown, got %s", res.Status)
+	}
+}
+
+// An unpinnable version (a manifest range) against a known package surfaces every advisory.
+func TestLookupUnpinnedVersionSurfacesAll(t *testing.T) {
+	res := npmIndex(t).Lookup("lodash", "^4.0.0")
+	if res.Status != StatusVulnerable || len(res.Vulns) != 1 {
+		t.Fatalf("an unpinned version must surface the package's advisories, got %s %+v", res.Status, res.Vulns)
+	}
+}
+
+func TestBuildIndexSkipsCorruptAndWithdrawn(t *testing.T) {
+	idx := npmIndex(t)
+	// lodash + minimist survive; the withdrawn ghost, the foreign PyPI pkg, and the corrupt entry do not.
+	if idx.Packages() != 2 {
+		t.Fatalf("want 2 packages (lodash, minimist), got %d", idx.Packages())
+	}
+	if res := idx.Lookup("ghost", "1.0.0"); res.Status != StatusUnknown {
+		t.Fatalf("the withdrawn advisory's package must not be indexed, got %s", res.Status)
+	}
+}
+
+// ---- concrete-version list + last_affected (match paths the flat tests miss) ----
+
+func buildNpm(t *testing.T, name, adv string) *Index {
+	t.Helper()
+	r, size := makeZip(t, map[string]string{"npm/" + name + ".json": adv})
+	idx, err := BuildIndex(context.Background(), "npm", r, size)
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	return idx
+}
+
+// An advisory with NO range matches only via the concrete versions[] list.
+func TestLookupConcreteVersionList(t *testing.T) {
+	idx := buildNpm(t, "GHSA-concrete-1", advConcrete)
+	if res := idx.Lookup("leftpad", "1.0.1"); res.Status != StatusVulnerable || len(res.Vulns) != 1 {
+		t.Fatalf("a listed concrete version must be vulnerable, got %s %+v", res.Status, res.Vulns)
+	}
+	// A version NOT in the list, package known ⇒ resolved no-known-vuln, never "unknown".
+	if res := idx.Lookup("leftpad", "2.0.0"); res.Status != StatusNoKnownVuln {
+		t.Fatalf("a version outside the concrete list must be no-known-vuln, got %s", res.Status)
+	}
+}
+
+// last_affected is a CLOSED upper bound: version <= last_affected is affected, past it is not.
+func TestLookupLastAffectedRange(t *testing.T) {
+	idx := buildNpm(t, "GHSA-last-1", advLastAffected)
+	if res := idx.Lookup("tailpkg", "1.5.0"); res.Status != StatusVulnerable {
+		t.Fatalf("1.5.0 equals last_affected and must be vulnerable, got %s", res.Status)
+	}
+	if res := idx.Lookup("tailpkg", "1.5.1"); res.Status != StatusNoKnownVuln {
+		t.Fatalf("1.5.1 is past last_affected and must be no-known-vuln, got %s", res.Status)
+	}
+	if res := idx.Lookup("tailpkg", "0.9.0"); res.Status != StatusNoKnownVuln {
+		t.Fatalf("0.9.0 is below introduced and must be no-known-vuln, got %s", res.Status)
+	}
+}
+
+// ---- caps / guards ----
+
+// reduceRecord keeps at most maxExactVersions concrete versions so a huge list cannot balloon RAM.
+func TestReduceRecordCapsExactVersions(t *testing.T) {
+	versions := make([]string, maxExactVersions+20)
+	for i := range versions {
+		versions[i] = fmt.Sprintf("1.0.%d", i)
+	}
+	raw := rawRecord{ID: "GHSA-many", Affected: []rawAffected{{Package: rawPackage{Name: "big", Ecosystem: "npm"}, Versions: versions}}}
+	recs := reduceRecord(&raw, "npm")
+	if len(recs) != 1 || len(recs[0].versions) != maxExactVersions {
+		t.Fatalf("exact-version list must cap at %d, got %+v", maxExactVersions, recs)
+	}
+}
+
+// reduceZip reports errEmptyDump for a zero-size dump rather than building a silent empty index.
+func TestReduceZipEmptyDump(t *testing.T) {
+	err := reduceZip(context.Background(), bytes.NewReader(nil), 0, "npm", func(*record) error { return nil })
+	if err != errEmptyDump {
+		t.Fatalf("a zero-size dump must return errEmptyDump, got %v", err)
+	}
+}
+
+// ---- LoadIndex over httptest (no real network) ----
+
+func serveZip(t *testing.T, body []byte) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestLoadIndexDownloadsAndReduces(t *testing.T) {
+	r, _ := makeZip(t, map[string]string{"npm/GHSA-35jh-r3h4-6jhm.json": advLodash})
+	a := New(serveZip(t, mustBytes(r)), fetch.New())
+	idx, err := a.LoadIndex(context.Background(), "npm")
+	if err != nil {
+		t.Fatalf("LoadIndex: %v", err)
+	}
+	if res := idx.Lookup("lodash", "4.17.20"); res.Status != StatusVulnerable {
+		t.Fatalf("downloaded index must find lodash vulnerable, got %s", res.Status)
+	}
+}
+
+// A dead source → an ERROR (so the caller keeps its honest "unknown"), never a silent empty index.
+func TestLoadIndexDeadSourceErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	a := New(srv.URL, fetch.New())
+	if _, err := a.LoadIndex(context.Background(), "npm"); err == nil {
+		t.Fatal("a dead source must return an error, not a silent empty index")
+	}
+}
+
+// Source off (empty env URL) → an error, not a silent "no vuln".
+func TestLoadIndexSourceOff(t *testing.T) {
+	a := New("", fetch.New())
+	if _, err := a.LoadIndex(context.Background(), "npm"); err == nil {
+		t.Fatal("an empty source URL must return an error")
+	}
+}
+
+func TestLoadIndexUnknownEcosystem(t *testing.T) {
+	a := New("http://127.0.0.1:1/should-not-hit", fetch.New())
+	if _, err := a.LoadIndex(context.Background(), "cocoapods"); err == nil {
+		t.Fatal("an unsupported ecosystem must error before any network call")
+	}
+}
+
+func mustBytes(r *bytes.Reader) []byte {
+	b := make([]byte, r.Len())
+	_, _ = r.ReadAt(b, 0)
+	return b
+}
+
+func mustUnmarshal(t *testing.T, s string, v *rawRecord) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(s), v); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+}
