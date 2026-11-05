@@ -23,8 +23,17 @@ scanner's database from cron without any server or infrastructure.
   on a valid, compatible DB; it exits non-zero with a message otherwise.
 - `--out` is required for `merge`; a bad `--source` spelling or an unreadable
   source file is a clear error.
-- No source URL or vendor is hardcoded. No remote fetch happens. No third-party
-  data is vendored.
+- `merge --fetch name[=url]` pulls a third-party source adapter at the operator's
+  command: `webappanalyzer` (GPL-3.0), `nuclei` (MIT), `whatweb` (GPL-2.0-or-later).
+  The URL comes from the flag or the source's env var (`SIGFORGE_SOURCE_<NAME>_URL`)
+  — never hardcoded, and a source with no URL is off and errors. Each fetch stamps
+  its synced version onto the entries and records a row (source, url, version,
+  fetched_at, entry_count, license) in the `--manifest` file (default
+  `SYNC-MANIFEST.json`), the marker a future re-sync diffs against.
+- No source URL or vendor is hardcoded. A remote fetch happens only on an explicit
+  `--fetch`. Fetched third-party data is operator-generated, carries its source's
+  license, and is never vendored into this repo (the merged DB and manifest are
+  gitignored).
 
 ## 4. Definition of Done
 
@@ -41,10 +50,12 @@ scanner's database from cron without any server or infrastructure.
 The CLI is the only place the layers are wired: it reads the embedded baseline
 (`baseline`), loads each normalized source (`schema.LoadFile`), merges
 (`merge.Merge`) with trust assigned by flag order, wraps the result in a
-`schema.DB` envelope, and writes it atomically (`fsio.WriteAtomic`). Remote
-fetch/normalize adapters are a later phase: for now a source is a local file an
-operator-gated adapter produced, keeping the data-only, no-executable-logic
-boundary.
+`schema.DB` envelope, and writes it atomically (`fsio.WriteAtomic`). A `--source`
+is a local normalized file; a `--fetch` runs an operator-gated adapter
+(`modules/intel/source`) that pulls its URL via `framework/fetch`, normalizes to
+the same schema, stamps provenance/license/version and updates the sync manifest.
+Only DATA crosses the wire — no executable logic is pulled or run — keeping the
+supply-chain boundary sigforge itself exists to protect.
 
 ### 5.1 Diagram
 

@@ -27,7 +27,7 @@ license risk, even when no external DB is present.
 
 ## 4. Definition of Done
 
-- 26 technologies authored (see below), embedded and loading.
+- 58 technologies authored (see below), embedded and loading.
 - Tests confirm the set loads, contains the expected key techs, every entry is
   stamped, and an end-to-end `Match` against a realistic page detects the stack.
 
@@ -40,11 +40,18 @@ runtime by merging a licensed external DB over it; on conflict the baseline wins
 because it is curated and anti-FP while the external entry is not trusted to weaken
 it.
 
-Technologies (26): **web servers** — Nginx, Apache, Microsoft IIS, LiteSpeed,
-OpenResty; **languages/runtimes** — PHP, Microsoft ASP.NET, Python, Node.js,
-Express, Ruby, Phusion Passenger; **CMS/e-commerce** — WordPress, Drupal, Joomla,
-Magento, Laravel, Ghost; **JS libraries** — jQuery, React, Vue.js, Angular,
-Bootstrap; **CDN/WAF** — Cloudflare, Akamai, Fastly.
+Technologies (58): **web servers / proxies / app servers** — Nginx, Apache, Apache
+Tomcat, Apache Traffic Server, Caddy, Envoy, Gunicorn, Jetty, LiteSpeed, Microsoft
+IIS, OpenResty, Phusion Passenger, Squid, Varnish; **languages / runtimes /
+frameworks** — PHP, Microsoft ASP.NET, Microsoft ASP.NET Core, Python, Node.js,
+Express, Ruby, Java, Django, Ruby on Rails, Laravel, Symfony, CodeIgniter, Gatsby,
+Next.js, Nuxt.js, Vite; **CMS / e-commerce** — WordPress, Drupal, Joomla, Magento,
+Ghost, TYPO3 CMS, OpenCart, PrestaShop, Shopify, WooCommerce, Sitecore, Elementor;
+**JS libraries** — jQuery, React, Vue.js, Angular, Bootstrap, Lodash; **CDN / WAF /
+analytics** — Cloudflare, Akamai, Fastly, Amazon CloudFront, Google Cloud CDN,
+Imperva Incapsula, Sucuri, Google Analytics, Google Tag Manager. 48 of the 58 carry
+a real application CPE (the CVE/NVD bridge); CDNs and bare JS libraries with no NVD
+product are deliberately left without one.
 
 Version regexes are included where the version is publicly observable (e.g.
 `Server: nginx/1.18.0`, `<meta name=generator content="WordPress 6.5">`). Node.js

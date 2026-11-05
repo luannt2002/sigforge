@@ -50,8 +50,12 @@ then emits sorted `Detection`s carrying each entry's `provenance` and `license` 
 the operator knows the license posture of every lead.
 
 Honesty: a detection is a LEAD. Banner/meta versions are attacker-controllable.
-The schema's `dom` rules are carried through for browser-backed consumers but are
-not evaluated here (raw-HTTP layer).
+The schema's `dom` rules are evaluated passively (see `matcher_dom.go`): with no
+real DOM, a selector's distinguishing token and its attribute/text patterns are
+tested as substrings/regexes over the raw HTML (e.g. `ng-version` → Angular+version,
+`#vite-legacy-polyfill` → Vite). This is an approximation, not a DOM query, so a
+rule depending on element structure or JS runtime `properties` can be missed; a
+browser-backed consumer can still read `Fingerprint.Dom` itself.
 
 ### 5.1 Diagram
 

@@ -27,9 +27,9 @@ framework; the framework may not use the domain. The CLI wires them together.
 ## Data flow
 
 ```
-                 (later phase: operator-run adapters, off by default)
-  source A ──fetch──▶ normalize ──▶ A.norm.json ┐
-  source B ──fetch──▶ normalize ──▶ B.norm.json ┤
+        (operator-gated adapters, OFF by default — modules/intel/source)
+  source A ──fetch──▶ normalize ──▶ A.norm.json ┐   (webappanalyzer / nuclei / whatweb,
+  source B ──fetch──▶ normalize ──▶ B.norm.json ┤    URL via flag/env; writes SYNC-MANIFEST.json)
                                                  │   sigforge merge
   baseline.json (embedded, curated facts) ──────▶├──────────────────▶ merged.json
                                                  │   (dedupe by tech id,
@@ -53,9 +53,12 @@ framework; the framework may not use the domain. The CLI wires them together.
 - **merge is pure and honest about licensing.** It never relicenses: each entry
   carries the provenance and license of the source it came from, and the operator
   chooses which sources to include.
-- **fetch adapters are deliberately out of scope for now.** Pulling executable
-  logic over the wire is exactly the supply-chain risk scanners detect; sigforge
-  moves only data, and that data is normalized to a local file by an
-  operator-gated adapter before `merge` ever sees it.
+- **fetch adapters are operator-gated and data-only.** Each adapter (`source`) is
+  off until the operator supplies its URL (flag/env), and only DATA crosses the
+  wire — never executable logic, which is exactly the supply-chain risk scanners
+  detect. Normalize is pure and fixture-tested; the fetched data carries its
+  source's license, is tagged per entry (provenance/license/version), and is never
+  vendored here. `framework/fetch` is the bounded, honest HTTP client they share.
 
-See the per-feature specs: `matcher.md`, `merge.md`, `baseline.md`, `cli.md`.
+See the per-feature specs: `matcher.md`, `merge.md`, `baseline.md`, `cli.md`,
+`source.md`.

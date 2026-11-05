@@ -80,21 +80,40 @@ extended per-entry fields (`provenance`, `license`, `confidence`,
 ```
 sigforge baseline                              # emit the embedded curated baseline to stdout
 sigforge merge --out merged.json \             # baseline + normalized sources → one DB
-    --source nuclei=nuclei.norm.json \
-    --source whatweb=whatweb.norm.json
+    --source local=local.norm.json \           # a local, already-normalized file
+    --fetch webappanalyzer=<url>               # OR fetch a third-party source at your command
 sigforge validate merged.json                  # check schema version + shape
+sigforge diff old.json new.json                # report techs a re-sync added/removed/changed
+sigforge eol PHP 7.2.34                         # version → end-of-life status (feed off by default)
+sigforge cve <cpe> <version>                    # CPE+version → known CVE leads (feed off by default)
 ```
 
-In `merge`, the baseline always wins a tech-id conflict; among `--source` files an
-earlier flag outranks a later one. A losing entry's version-capturing patterns are
-kept as alternates (`version_regex`) so no version signal is lost, and every entry
-carries the `provenance` and `license` of the source it came from.
+`diff`, `eol` and `cve` are the depth layer: `diff` is pure; `eol` and `cve` query
+an operator-supplied feed (`SIGFORGE_SOURCE_ENDOFLIFE_URL` / `SIGFORGE_SOURCE_CVE_URL`)
+and are **off by default** — unset, they report `unknown`, never "safe".
 
-A `--source` is a **local, already-normalized** DB file in this schema. Remote
-fetch/normalize adapters (enthec/webappanalyzer, nuclei, WhatWeb, …) are a later
-phase: they are operator-configured, off by default, and must write a normalized
-file the operator then passes to `merge` — fetched third-party data is never
-vendored into this repo.
+In `merge`, the baseline always wins a tech-id conflict; among `--source`/`--fetch`
+inputs an earlier flag outranks a later one. A losing entry's version-capturing
+patterns are kept as alternates (`version_regex`) so no version signal is lost, and
+every entry carries the `provenance` and `license` of the source it came from.
+
+A `--source` is a **local, already-normalized** DB file in this schema. A `--fetch`
+runs an **operator-gated adapter** that pulls and normalizes a third-party source at
+your command:
+
+| id | format | license | env var (alternative to `=url`) |
+|---|---|---|---|
+| `webappanalyzer` | Wappalyzer-schema JSON | GPL-3.0 | `SIGFORGE_SOURCE_WEBAPPANALYZER_URL` |
+| `nuclei` | tech-detect templates (YAML) | MIT | `SIGFORGE_SOURCE_NUCLEI_URL` |
+| `whatweb` | plugins (Ruby) | GPL-2.0-or-later | `SIGFORGE_SOURCE_WHATWEB_URL` |
+
+Every adapter is **off by default** — it does nothing, and errors, unless you supply
+its URL. No source URL or vendor is hardcoded. Each fetch stamps the source's synced
+version onto its entries and records it in `SYNC-MANIFEST.json` (one row per source:
+url, version, fetched-at, count, license) — the marker a future re-sync diffs
+against. Fetched third-party data is never vendored into this repo; the merged DB
+and the manifest are operator-generated and gitignored. See `docs/source.md` for the
+per-format mapping limits (`nuclei`/`whatweb` are best-effort).
 
 ## License policy
 
@@ -114,12 +133,19 @@ vendored into this repo.
 framework/   infrastructure that knows nothing about fingerprints
   define/      shared constants (service name)
   fsio/        file read + atomic write
+  fetch/       bounded, honest HTTP GET client (no hardcoded URL)
 modules/     the domain
   intel/
     schema/     the versioned on-disk contract + loader (Parse/Validate/LoadFile)
-    matcher/    apply a fingerprint set to a page → detections
+    matcher/    apply a fingerprint set to a page → detections (incl. passive dom rules)
     merge/      baseline + sources → one deduped, precedence-ordered set
-    baseline/   the embedded curated-facts fingerprint set
+    baseline/   the embedded curated-facts fingerprint set (58 public-fact techs)
+    source/     operator-gated fetch+normalize adapters + sync manifest
+    diff/       set-difference between two DBs (what a re-sync moved)
+    lifecycle/  version → end-of-life LEAD via an operator-supplied endoflife feed
+    cve/        CPE+version → known-CVE LEADs via an operator-supplied NVD-shaped feed
+    enrich/     compose breadth (matcher) + depth (cve/lifecycle) into one result
+    accuracy/   precision/recall + oracle + adversarial harness (correctness proof)
 cmd/sigforge/  the CLI
 docs/          architecture + per-feature specs
 ```
