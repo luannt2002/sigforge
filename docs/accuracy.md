@@ -29,8 +29,14 @@ Run `go test ./modules/intel/accuracy/... -v` to see them printed.
 
   | metric | measured | gate |
   |---|---|---|
-  | precision | **1.000** (TP=7, FP=0) | **must be 1.0** — a false positive is a correctness bug |
+  | precision | **1.000** (TP=42, FP=0) | **must be 1.0** — a false positive is a correctness bug |
   | recall | **1.000** (FN=0) | **must be ≥ 0.90** (documented floor `recallFloor`) |
+
+  Measured over **24 positive fixtures + 6 hard-negatives**, reported **per technology**
+  with an explicit coverage line (currently **29 / 58 baseline techs have a fixture**;
+  the 29-tech gap is printed, not hidden). The 1.000 figures mean the matcher recognises
+  its own baseline signatures with no cross-firing — they are NOT an estimate of accuracy
+  on live web traffic; read them together with the coverage line.
 
   Precision is held hard at 1.0; recall has a floor so a future fixture that exposes
   a legitimately hard-to-detect tech does not falsely fail the gate.
@@ -41,10 +47,12 @@ Run `go test ./modules/intel/accuracy/... -v` to see them printed.
   - `lifecycle.Classify(php feed, "7.2.34")` → cycle **7.2**, eol **2020-11-30**,
     **StateEOL**.
 
-- **Adversarial negatives** — all three assert NO false detection:
+- **Adversarial negatives** — the 6 hard-negative cases all assert NO false detection:
   - Apache-Coyote banner → **not** detected as Apache HTTP Server (Tomcat is fine).
   - `ng-version` in body text, not an attribute → **not** Angular.
   - `/static/xjquery.js` substring mimic → **not** jQuery.
+  - a clean site, an SPA shell with a hashed bundle, and `Powered by nginx` in a footer
+    (banner outside the `Server` header) → **nothing** fired.
 
 - **Corroboration** — one tech attested by two source fixtures → enriched
   `Provenance` count **≥ 2**.

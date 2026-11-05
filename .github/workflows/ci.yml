@@ -1,0 +1,39 @@
+# CI — sigforge (stdlib-only, không dependency ngoài stdlib)
+# Chạy đúng chuỗi lệnh kiểm tra cục bộ: gofmt → vet → build → test -race.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    env:
+      # GOTOOLCHAIN=local: dùng đúng Go do setup-go cài, không tự tải toolchain khác qua mạng.
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          # cache build/module cache theo go.mod (mặc định true của setup-go; ghi rõ cho minh bạch).
+          cache: true
+
+      # gofmt -l . in ra tệp chưa format; có output ⇒ fail.
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "Các tệp chưa gofmt:"; echo "$out"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test -race
+        run: go test -race ./...

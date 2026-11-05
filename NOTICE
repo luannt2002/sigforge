@@ -11,3 +11,56 @@ paths, meta generator strings) and is released under the same Apache-2.0 license
 It is not derived from, and does not incorporate, any third-party fingerprint
 dataset. Third-party sources are fetched by the operator at runtime under their
 own licenses and are never vendored into this repository.
+
+The embedded sample in modules/intel/kev/data/kev-snapshot.json is a small
+subset of the CISA Catalog of Known Exploited Vulnerabilities
+(https://www.cisa.gov/known-exploited-vulnerabilities-catalog), a work of the
+U.S. Government in the public domain. It is embedded only as an air-gap baseline;
+the full catalog is fetched by the operator at runtime via SIGFORGE_SOURCE_KEV_URL.
+EPSS data (FIRST.org) publishes no permissive reuse license and is therefore
+never vendored or embedded: it is fetched by the operator at runtime via
+SIGFORGE_SOURCE_EPSS_URL under FIRST.org's own terms.
+
+The embedded sample in modules/intel/identity/data/cpe-dict-snapshot.json is a
+small subset of the NVD CPE dictionary (the official-cpe-dictionary / "products"
+feed of the NVD 2.0 API, https://nvd.nist.gov/products/cpe), a work of the U.S.
+Government (NIST) in the public domain. It is embedded only as an air-gap
+baseline; the full dictionary is fetched by the operator at runtime via
+SIGFORGE_SOURCE_CPE_DICT_URL.
+
+The embedded snapshot in modules/intel/takeoverfp/data/fingerprints.json is the
+subdomain-takeover fingerprint table from the can-i-take-over-xyz project by
+EdOverflow and contributors (https://github.com/EdOverflow/can-i-take-over-xyz),
+licensed under Creative Commons Attribution 4.0 International (CC-BY-4.0,
+https://creativecommons.org/licenses/by/4.0/), which permits redistribution with
+attribution. It is embedded as a point-in-time snapshot serving only as an air-gap
+baseline; the live table is fetched by the operator at runtime via
+SIGFORGE_SOURCE_TAKEOVER_URL.
+
+The WordPress plugin/theme vulnerability intelligence in modules/intel/wpcve
+embeds and vendors NO data. The community WordPress vulnerability feed is
+operator-chosen, and the prominent free feed is encumbered by per-record
+attribution and hyperlink-back conditions (with a separate MITRE license on CVE
+rows) that cannot be satisfied by a static vendored snapshot, so both this feed
+and the WordPress.org plugins/themes directory API are fetched by the operator
+at runtime under their own terms via SIGFORGE_SOURCE_WPVULN_URL and
+SIGFORGE_SOURCE_WPORG_URL respectively, and neither is ever vendored or embedded.
+
+The embedded sample in modules/intel/jslib/data/retirejs-snapshot.json is a small
+subset of the Retire.js JavaScript library vulnerability repository by the RetireJS
+project and contributors (https://github.com/RetireJS/retire.js), licensed under
+the Apache License, Version 2.0, which permits redistribution. Only the
+vulnerability records (library + version range → known CVEs) are reproduced; the
+project's fingerprint extractors are not. It is embedded as a point-in-time
+snapshot serving only as an air-gap baseline; the full live repository is fetched
+by the operator at runtime via SIGFORGE_SOURCE_RETIREJS_URL.
+
+The ecosystem/package vulnerability intelligence in modules/intel/osv embeds and
+vendors NO data. The OSV.dev aggregate (https://osv.dev) merges many source
+databases under mixed licenses — including CC-BY-4.0, CC0-1.0, MIT, Apache-2.0,
+CC-BY-SA-4.0 and CC-BY-NC-ND-4.0 (NonCommercial-NoDerivatives). A
+NonCommercial-NoDerivatives record cannot be redistributed in a modified vendored
+snapshot, and the per-ecosystem bulk dumps are large regardless, so OSV data is
+operator-fetch-only: the per-ecosystem all.zip dumps are fetched by the operator
+at runtime via SIGFORGE_SOURCE_OSV_URL under OSV's and the underlying sources' own
+terms, and are never vendored or embedded. The operator owns the fetched output.
