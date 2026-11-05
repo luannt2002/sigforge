@@ -3,12 +3,23 @@
 // network-shaped path (cve.Lookup) is driven over an httptest loopback serving a
 // recorded fixture, exactly as the cve/lifecycle package tests do. See docs/accuracy.md
 // for the measured numbers and the periodic LIVE-spot-check procedure.
+//
+// It reports PER-TECHNOLOGY, not just an aggregate: a 1.0 micro-average over a handful
+// of techs is not 1.0 over the whole baseline, so the harness prints each tech's score
+// AND the coverage gap (baseline techs no fixture exercises). It never claims a
+// population estimate from hand-built fixtures.
 package accuracy
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +52,12 @@ type goldenCase struct {
 	truth []string // includes techs reached via `implies`
 }
 
-// goldenSet: recorded responses whose true technologies are known by construction.
+// goldenSet: hand-built responses whose true technologies are known by construction —
+// each is derived from a real baseline signature (a Server banner, a cookie name, a
+// generator meta, a library script path) so the matcher is exercised on the canonical
+// signal, not a toy. The truth list is what the signature legitimately supports,
+// implied techs included. These are regression-and-correctness fixtures, NOT a sample
+// of real web traffic; growth comes from producerFixtures (see below).
 func goldenSet() []goldenCase {
 	return []goldenCase{
 		{
@@ -54,14 +70,9 @@ func goldenSet() []goldenCase {
 			truth: []string{"Nginx", "WordPress", "jQuery", "PHP"}, // PHP via WordPress implies
 		},
 		{
-			name:  "clean-minimal-site",
-			page:  matcher.Page{HTML: `<html><head><title>Hello</title></head><body><h1>Welcome</h1><p>Hello world</p></body></html>`},
-			truth: nil, // nothing here — any detection would be a false positive
-		},
-		{
-			name:  "apache-coyote-negative",
+			name:  "apache-coyote",
 			page:  matcher.Page{Headers: map[string][]string{"Server": {"Apache-Coyote/1.1"}}},
-			truth: []string{"Apache Tomcat", "Java"}, // Tomcat yes, Java implied — but NOT "Apache"
+			truth: []string{"Apache Tomcat", "Java"}, // Tomcat yes, Java implied — but NOT "Apache" (a false-positive guard, see TestHardNegatives)
 		},
 		{
 			name: "php-site",
@@ -71,32 +82,295 @@ func goldenSet() []goldenCase {
 			},
 			truth: []string{"PHP"},
 		},
+		{
+			name:  "apache-httpd",
+			page:  matcher.Page{Headers: map[string][]string{"Server": {"Apache/2.4.52 (Ubuntu)"}}},
+			truth: []string{"Apache"},
+		},
+		{
+			name: "iis-aspnet",
+			page: matcher.Page{
+				Headers: map[string][]string{"Server": {"Microsoft-IIS/10.0"}, "X-Powered-By": {"ASP.NET"}, "X-AspNet-Version": {"4.0.30319"}},
+				Cookies: []string{"ASP.NET_SessionId=xyz; path=/"},
+			},
+			truth: []string{"Microsoft IIS", "Microsoft ASP.NET"},
+		},
+		{
+			name:  "aspnet-core-kestrel",
+			page:  matcher.Page{Headers: map[string][]string{"Server": {"Kestrel"}}},
+			truth: []string{"Microsoft ASP.NET Core"},
+		},
+		{
+			name:  "python-werkzeug",
+			page:  matcher.Page{Headers: map[string][]string{"Server": {"Werkzeug/2.0.3 Python/3.9.7"}}},
+			truth: []string{"Python"},
+		},
+		{
+			name:  "gunicorn",
+			page:  matcher.Page{Headers: map[string][]string{"Server": {"gunicorn/20.1.0"}}},
+			truth: []string{"Gunicorn", "Python"}, // Python implied
+		},
+		{
+			name:  "express-node",
+			page:  matcher.Page{Headers: map[string][]string{"X-Powered-By": {"Express"}}},
+			truth: []string{"Express", "Node.js"}, // Node.js implied
+		},
+		{
+			name: "django",
+			page: matcher.Page{
+				Cookies: []string{"csrftoken=abcd; path=/"},
+				HTML:    `<form method="post"><input type="hidden" name="csrfmiddlewaretoken" value="x"></form>`,
+			},
+			truth: []string{"Django", "Python"}, // Python implied
+		},
+		{
+			name:  "laravel",
+			page:  matcher.Page{Cookies: []string{"laravel_session=eyJ; path=/; HttpOnly"}},
+			truth: []string{"Laravel", "PHP"}, // PHP implied
+		},
+		{
+			name:  "drupal",
+			page:  matcher.Page{Headers: map[string][]string{"X-Generator": {"Drupal 9 (https://www.drupal.org)"}}},
+			truth: []string{"Drupal", "PHP"}, // PHP implied
+		},
+		{
+			name:  "joomla",
+			page:  matcher.Page{HTML: `<meta name="generator" content="Joomla! - Open Source Content Management">`},
+			truth: []string{"Joomla", "PHP"}, // PHP implied
+		},
+		{
+			name: "woocommerce",
+			page: matcher.Page{HTML: `<meta name="generator" content="WooCommerce 8.2.1"><link href="/wp-content/plugins/woocommerce/assets/css/x.css">`},
+			// WooCommerce ⇒ WordPress ⇒ PHP; the /wp-content/ path also fires WordPress directly.
+			truth: []string{"WooCommerce", "WordPress", "PHP"},
+		},
+		{
+			name: "magento",
+			page: matcher.Page{
+				Cookies: []string{"X-Magento-Vary=abc; path=/"},
+				HTML:    `<script src="/static/version1700000000/frontend/base/theme.js"></script>`,
+			},
+			truth: []string{"Magento", "PHP"}, // PHP implied
+		},
+		{
+			name:  "shopify",
+			page:  matcher.Page{Headers: map[string][]string{"X-ShopId": {"12345678"}}},
+			truth: []string{"Shopify"},
+		},
+		{
+			name:  "ghost",
+			page:  matcher.Page{HTML: `<meta name="generator" content="Ghost 5.75">`},
+			truth: []string{"Ghost", "Node.js"}, // Node.js implied
+		},
+		{
+			name: "nextjs",
+			page: matcher.Page{
+				HTML:       `<div id="__next"></div><script id="__NEXT_DATA__" type="application/json">{}</script><link href="/_next/static/css/x.css">`,
+				ScriptSrcs: []string{"/_next/static/chunks/main-abc123.js"},
+			},
+			truth: []string{"Next.js", "React", "Node.js"}, // React + Node.js implied
+		},
+		{
+			name:  "react-spa",
+			page:  matcher.Page{ScriptSrcs: []string{"/static/js/react-dom.18.2.0.min.js"}},
+			truth: []string{"React"},
+		},
+		{
+			name:  "vue-cdn",
+			page:  matcher.Page{ScriptSrcs: []string{"/js/vue.min.js"}},
+			truth: []string{"Vue.js"},
+		},
+		{
+			name:  "angular-dom",
+			page:  matcher.Page{HTML: `<body><app-root ng-version="16.2.0"></app-root></body>`},
+			truth: []string{"Angular"},
+		},
+		{
+			name:  "bootstrap+jquery",
+			page:  matcher.Page{ScriptSrcs: []string{"/js/jquery-3.6.0.min.js", "/js/bootstrap.min.js"}},
+			truth: []string{"jQuery", "Bootstrap"},
+		},
+		{
+			name:  "cloudflare-edge",
+			page:  matcher.Page{Headers: map[string][]string{"CF-RAY": {"7d1a2b3c4d5e-SJC"}}},
+			truth: []string{"Cloudflare"},
+		},
+		{
+			name:  "google-analytics",
+			page:  matcher.Page{ScriptSrcs: []string{"https://www.googletagmanager.com/gtag/js?id=G-ABC123"}},
+			truth: []string{"Google Analytics"},
+		},
 	}
 }
 
-// TestGoldenSetPrecisionRecall runs the real baseline matcher over the golden set
-// and asserts precision == 1.0 (no false positive) and recall >= the documented
-// floor. It PRINTS the measured numbers.
-func TestGoldenSetPrecisionRecall(t *testing.T) {
+// negativeCase is a hard-negative: a page that must produce NO detection. Each carries
+// the reason it is a trap, so a future failure reads as a story, not a bare diff. Folded
+// into the per-tech Report with truth=nil, so ANY detection becomes a measured false
+// positive and trips the precision gate — a stronger check than naming one forbidden tech.
+type negativeCase struct {
+	name   string
+	reason string
+	page   matcher.Page
+}
+
+// hardNegatives: the FP corpus. These are the mistakes substring/banner matchers are
+// known to make (Apache-Coyote read as Apache httpd has a real repo precedent), plus
+// SPA shells, marketing text and mis-placed generators.
+func hardNegatives() []negativeCase {
+	return []negativeCase{
+		{
+			name:   "clean-minimal-site",
+			reason: "plain HTML with no technology marker — any detection is invented",
+			page:   matcher.Page{HTML: `<html><head><title>Hello</title></head><body><h1>Welcome</h1><p>Hello world</p></body></html>`},
+		},
+		{
+			name:   "spa-shell-hashed-bundle",
+			reason: "framework-less SPA shell; a hashed bundle name must not be read as a named library",
+			page:   matcher.Page{HTML: `<div id="root"></div>`, ScriptSrcs: []string{"/assets/index-4f3a2b1c.js"}},
+		},
+		{
+			name:   "substring-mimic-script",
+			reason: "/static/xjquery.js embeds 'jquery' mid-token; the token-boundary guard must reject it",
+			page:   matcher.Page{ScriptSrcs: []string{"/static/xjquery.js"}},
+		},
+		{
+			name:   "ng-version-in-body-text",
+			reason: "'ng-version' sits in prose, not an attribute; the dom rule must not fire Angular",
+			page:   matcher.Page{HTML: `<p>our ng-version is 15.1.2, we love it</p>`},
+		},
+		{
+			name:   "server-name-in-body-text",
+			reason: "a footer brag 'Powered by nginx' is not the Server header; Nginx must not fire from body text",
+			page:   matcher.Page{HTML: `<footer>Powered by nginx and tomcat</footer>`},
+		},
+		{
+			name:   "generator-in-html-comment",
+			reason: "generator sits in an HTML comment, not a <meta> tag, and no /wp-content path is present",
+			page:   matcher.Page{HTML: `<!-- generator: WordPress 6.5.2 --><html><body>hi</body></html>`},
+		},
+	}
+}
+
+// producerFixtureDir holds OPTIONAL producer-real captures the operator drops in: one
+// JSON file per case, {"name":..,"page":{<matcher.Page>},"truth":[..]}. The harness
+// folds any it finds into the golden corpus, so a real-traffic capture grows coverage
+// with zero code change. Empty by default — committing third-party captures would carry
+// their license (CLAUDE.md §4), so the operator owns whatever lands here. This is the
+// seam for loading from a real producer (e.g. replayed scans); it does NOT fabricate.
+const producerFixtureDir = "testdata/golden"
+
+func producerFixtures(t *testing.T) []goldenCase {
+	t.Helper()
+	entries, err := os.ReadDir(producerFixtureDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read producer fixtures: %v", err)
+	}
+	var out []goldenCase
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(producerFixtureDir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		var c struct {
+			Name  string       `json:"name"`
+			Page  matcher.Page `json:"page"`
+			Truth []string     `json:"truth"`
+		}
+		if err := json.Unmarshal(b, &c); err != nil {
+			t.Fatalf("parse %s: %v", e.Name(), err)
+		}
+		if c.Name == "" {
+			c.Name = strings.TrimSuffix(e.Name(), ".json")
+		}
+		out = append(out, goldenCase{name: c.Name, page: c.Page, truth: c.Truth})
+	}
+	return out
+}
+
+func baselineUniverse(db *schema.DB) []string {
+	names := make([]string, 0, len(db.Fingerprints))
+	for n := range db.Fingerprints {
+		names = append(names, n)
+	}
+	return names
+}
+
+// TestGoldenCorpus runs the real baseline matcher over the positive golden set (plus
+// any producer-real captures) and the hard-negative corpus, tallies PER-TECHNOLOGY,
+// prints the per-tech table + coverage gap, and gates on the aggregate: precision must
+// be 1.0 (no false positive) and recall must clear the documented floor.
+func TestGoldenCorpus(t *testing.T) {
 	db, err := baseline.DB()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var score Score
-	for _, c := range goldenSet() {
-		got := detectedNames(matcher.Match(db, c.page))
-		score.Add(got, c.truth)
-		t.Logf("%-24s detected=%v truth=%v", c.name, got, c.truth)
-	}
-	p, r := score.Precision(), score.Recall()
-	t.Logf("GOLDEN SET: precision=%.3f recall=%.3f (TP=%d FP=%d FN=%d)",
-		p, r, score.TruePositive, score.FalsePositive, score.FalseNegative)
+
+	positives := append(goldenSet(), producerFixtures(t)...)
+	negatives := hardNegatives()
+
+	rep := accuracyReport(db, positives, negatives, t)
+
+	t.Logf("fixtures: %d positive (%d built-in + %d producer-real), %d hard-negative",
+		len(positives), len(goldenSet()), len(positives)-len(goldenSet()), len(negatives))
+	t.Logf("\n%s", rep.Render(baselineUniverse(db)))
+
+	tot := rep.Total()
+	p, r := tot.Precision(), tot.Recall()
+	t.Logf("TOTAL: precision=%.3f recall=%.3f (TP=%d FP=%d FN=%d)",
+		p, r, tot.TruePositive, tot.FalsePositive, tot.FalseNegative)
 	if p != 1.0 {
 		t.Errorf("precision = %.3f, want 1.0 (a false positive is a correctness bug)", p)
 	}
 	if r < recallFloor {
 		t.Errorf("recall = %.3f, below documented floor %.2f", r, recallFloor)
 	}
+}
+
+// accuracyReport folds the positive and negative corpora into one per-tech Report.
+func accuracyReport(db *schema.DB, positives []goldenCase, negatives []negativeCase, t *testing.T) *Report {
+	rep := NewReport()
+	for _, c := range positives {
+		got := detectedNames(matcher.Match(db, c.page))
+		rep.Add(got, c.truth)
+		t.Logf("+ %-24s detected=%v truth=%v", c.name, got, c.truth)
+	}
+	for _, c := range negatives {
+		got := detectedNames(matcher.Match(db, c.page))
+		rep.Add(got, nil) // nothing is true here: any detection is a false positive
+		t.Logf("- %-24s detected=%v (want none — %s)", c.name, got, c.reason)
+	}
+	return rep
+}
+
+// TestHardNegatives asserts each hard-negative fires NOTHING, with a named message, and
+// that the Apache-Coyote banner (which legitimately fires Tomcat) never leaks "Apache"
+// HTTP Server — the classic over-match this corpus exists to catch.
+func TestHardNegatives(t *testing.T) {
+	db, err := baseline.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range hardNegatives() {
+		t.Run(c.name, func(t *testing.T) {
+			if got := detectedNames(matcher.Match(db, c.page)); len(got) != 0 {
+				t.Errorf("false positive %v on %q (%s)", got, c.name, c.reason)
+			}
+		})
+	}
+	t.Run("coyote-not-apache-httpd", func(t *testing.T) {
+		got := detectedNames(matcher.Match(db, matcher.Page{Headers: map[string][]string{"Server": {"Apache-Coyote/1.1"}}}))
+		for _, d := range got {
+			if d == "Apache" {
+				t.Errorf("Apache-Coyote leaked a false 'Apache' HTTP Server detection (got %v)", got)
+			}
+		}
+	})
 }
 
 // oracle fixtures — MINIMAL recorded excerpts of the real authoritative shapes, kept
@@ -151,38 +425,6 @@ func TestOraclePairs(t *testing.T) {
 	cycle, eolDate, state := lifecycle.Classify(cycles, "7.2.34", now)
 	if cycle != "7.2" || eolDate != "2020-11-30" || state != lifecycle.StateEOL {
 		t.Errorf("oracle EOL = (%q, %q, %v), want (7.2, 2020-11-30, eol)", cycle, eolDate, state)
-	}
-}
-
-// TestAdversarialNegatives: three mimics that must NOT produce a false detection.
-func TestAdversarialNegatives(t *testing.T) {
-	db, err := baseline.DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	has := func(dets []matcher.Detection, tech string) bool {
-		for _, d := range dets {
-			if d.Tech == tech {
-				return true
-			}
-		}
-		return false
-	}
-	cases := []struct {
-		name   string
-		page   matcher.Page
-		absent string // this tech must NOT be detected
-	}{
-		{"apache-coyote-mimic", matcher.Page{Headers: map[string][]string{"Server": {"Apache-Coyote/1.1"}}}, "Apache"},
-		{"version-in-body-not-attribute", matcher.Page{HTML: `<p>our ng-version is 15.1.2, we love it</p>`}, "Angular"},
-		{"substring-mimic-script", matcher.Page{ScriptSrcs: []string{"/static/xjquery.js"}}, "jQuery"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if has(matcher.Match(db, c.page), c.absent) {
-				t.Errorf("false positive: %q detected on adversarial input %q", c.absent, c.name)
-			}
-		})
 	}
 }
 
