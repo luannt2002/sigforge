@@ -77,6 +77,51 @@ func TestSourcePrecedenceByTrust(t *testing.T) {
 	}
 }
 
+// TestAlternateKeepsSourceLicenseNotWinnerLicense guards finding #3: when a GPL
+// source's version pattern is pooled as an alternate under an Apache baseline
+// winner, that alternate must carry its own GPL provenance — never be served under
+// the winner's Apache license (the §4 mislabel).
+func TestAlternateKeepsSourceLicenseNotWinnerLicense(t *testing.T) {
+	base := map[string]schema.Fingerprint{
+		"Nginx": {
+			Headers: map[string]schema.StringList{"Server": {`nginx(?:/([\d.]+))?\;version:\1`}},
+			License: "Apache-2.0",
+		},
+	}
+	src := Source{Name: "thirdparty", Trust: 10, Set: map[string]schema.Fingerprint{
+		"Nginx": {
+			Headers: map[string]schema.StringList{"Server": {`Nginx v([\d.]+)\;version:\1`}},
+			License: "GPL-3.0-only",
+		},
+	}}
+	out := Merge(base, src)
+	nginx := out["Nginx"]
+
+	// Baseline wins the entry, so the entry-level license stays Apache.
+	if nginx.Provenance != "baseline" || nginx.License != "Apache-2.0" {
+		t.Fatalf("baseline should win entry: prov=%q license=%q", nginx.Provenance, nginx.License)
+	}
+	if len(nginx.VersionRegex) != len(nginx.VersionRegexProv) {
+		t.Fatalf("VersionRegexProv must align with VersionRegex: %d vs %d", len(nginx.VersionRegex), len(nginx.VersionRegexProv))
+	}
+	// The pooled GPL pattern must carry GPL provenance, not the winner's Apache.
+	want := `Nginx v([\d.]+)\;version:\1`
+	var found bool
+	for i, rx := range nginx.VersionRegex {
+		if rx != want {
+			continue
+		}
+		found = true
+		p := nginx.VersionRegexProv[i]
+		if p.License != "GPL-3.0-only" || p.Provenance != "thirdparty" {
+			t.Fatalf("GPL alternate mislabeled as %q/%q (want thirdparty/GPL-3.0-only)", p.Provenance, p.License)
+		}
+	}
+	if !found {
+		t.Fatalf("GPL alternate not kept: %v", nginx.VersionRegex)
+	}
+}
+
 func TestMergeDoesNotMutateInputs(t *testing.T) {
 	base := map[string]schema.Fingerprint{"Nginx": {}}
 	_ = Merge(base)

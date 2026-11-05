@@ -43,7 +43,10 @@ func Merge(baseline map[string]schema.Fingerprint, sources ...Source) map[string
 		for name, fp := range src.Set {
 			incoming := stamp(fp, src.Name, fp.License)
 			if winner, ok := out[name]; ok {
-				winner.VersionRegex = mergeVersionRegex(winner.VersionRegex, versionPatterns(incoming))
+				winner.VersionRegex, winner.VersionRegexProv = mergeAlternates(
+					zipAlts(winner.VersionRegex, winner.VersionRegexProv, provOf(winner)),
+					versionAlts(incoming),
+				)
 				if len(winner.CPE) == 0 && len(incoming.CPE) > 0 {
 					winner.CPE = incoming.CPE // the winner lacked a CVE id; keep the losing source's as info
 				}
@@ -67,14 +70,30 @@ func stamp(fp schema.Fingerprint, provenance, license string) schema.Fingerprint
 	return fp
 }
 
-// versionPatterns collects every version-capturing pattern in an entry: the
-// inline `\;version:` patterns across its fields plus any already-stashed
-// alternates.
-func versionPatterns(fp schema.Fingerprint) []string {
-	var out []string
+// versionAlt is one alternate version pattern paired with the provenance+license
+// of the source it truly came from, so a GPL pattern pooled under an Apache winner
+// keeps its own license.
+type versionAlt struct {
+	rx   string
+	prov schema.PatternProv
+}
+
+// provOf is the entry's own provenance trio, used as the license of patterns that
+// originated in this entry (its inline `\;version:` fields and any alternates it
+// carried without a recorded provenance).
+func provOf(fp schema.Fingerprint) schema.PatternProv {
+	return schema.PatternProv{Provenance: fp.Provenance, ProvenanceVersion: fp.ProvenanceVersion, License: fp.License}
+}
+
+// versionAlts collects every version-capturing pattern in an entry tagged with its
+// true provenance: the inline `\;version:` patterns belong to the entry's own
+// source, while already-stashed alternates keep the provenance recorded for them.
+func versionAlts(fp schema.Fingerprint) []versionAlt {
+	own := provOf(fp)
+	var out []versionAlt
 	add := func(raw string) {
 		if strings.Contains(raw, `\;version:`) {
-			out = append(out, raw)
+			out = append(out, versionAlt{rx: raw, prov: own})
 		}
 	}
 	for _, m := range []map[string]schema.StringList{fp.Headers, fp.Cookies, fp.Meta} {
@@ -90,29 +109,52 @@ func versionPatterns(fp schema.Fingerprint) []string {
 	for _, raw := range fp.ScriptSrc {
 		add(raw)
 	}
-	out = append(out, fp.VersionRegex...)
+	return append(out, zipAlts(fp.VersionRegex, fp.VersionRegexProv, own)...)
+}
+
+// zipAlts pairs each VersionRegex pattern with its recorded provenance, padding any
+// unrecorded tail with own (those patterns originated in this entry).
+func zipAlts(rx []string, prov []schema.PatternProv, own schema.PatternProv) []versionAlt {
+	out := make([]versionAlt, len(rx))
+	for i, r := range rx {
+		p := own
+		if i < len(prov) {
+			p = prov[i]
+		}
+		out[i] = versionAlt{rx: r, prov: p}
+	}
 	return out
 }
 
-// mergeVersionRegex appends new alternates to existing ones, de-duplicated and
-// ordered so the result is stable.
-func mergeVersionRegex(existing, incoming []string) []string {
+// mergeAlternates unions existing and incoming alternates, de-duplicated by pattern
+// (first provenance seen wins) and ordered so the result is stable, then splits the
+// aligned pattern/provenance slices back out.
+func mergeAlternates(existing, incoming []versionAlt) ([]string, []schema.PatternProv) {
 	seen := make(map[string]bool, len(existing)+len(incoming))
-	var out []string
-	for _, s := range existing {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
+	all := make([]versionAlt, 0, len(existing)+len(incoming))
+	for _, a := range existing {
+		if !seen[a.rx] {
+			seen[a.rx] = true
+			all = append(all, a)
 		}
 	}
-	for _, s := range incoming {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
+	for _, a := range incoming {
+		if !seen[a.rx] {
+			seen[a.rx] = true
+			all = append(all, a)
 		}
 	}
-	if len(out) > 1 {
-		sort.Strings(out)
+	if len(all) == 0 {
+		return nil, nil
 	}
-	return out
+	if len(all) > 1 {
+		sort.Slice(all, func(i, j int) bool { return all[i].rx < all[j].rx })
+	}
+	rx := make([]string, len(all))
+	prov := make([]schema.PatternProv, len(all))
+	for i, a := range all {
+		rx[i] = a.rx
+		prov[i] = a.prov
+	}
+	return rx, prov
 }
