@@ -11,6 +11,13 @@
 *.merged.json
 .cache/
 
+# Per-source sync marker written by `merge --fetch` — operator-generated metadata about third-party fetches
+# (URLs, versions, counts), never committed
+SYNC-MANIFEST.json
+
+# Local Claude operating-rules — NOT part of the public product
+/CLAUDE.md
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
