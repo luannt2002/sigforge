@@ -115,6 +115,70 @@ http:
 	}
 }
 
+// A template whose strictness comes from matchers-condition: and must NOT be
+// emitted as a weak OR-set; it is quarantined. A plain OR template beside it still
+// emits, so one lossy doc never poisons the rest of the batch.
+func TestNucleiQuarantineAndCondition(t *testing.T) {
+	raw := []byte(`id: strict-and
+info:
+  name: StrictAnd
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "foo"
+      - type: word
+        part: body
+        words:
+          - "bar"
+---
+id: simple-or
+info:
+  name: SimpleOr
+http:
+  - method: GET
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "baz"
+`)
+	set, err := (&nuclei{}).Normalize(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, bad := set["StrictAnd"]; bad {
+		t.Fatalf("matchers-condition=and template must be quarantined, not emitted as OR: %v", keys(set))
+	}
+	if _, ok := set["SimpleOr"]; !ok {
+		t.Fatalf("simple OR template must still emit: %v", keys(set))
+	}
+}
+
+func TestNucleiUnsupportedReasons(t *testing.T) {
+	cases := []struct {
+		doc  string
+		want string
+	}{
+		{"matchers-condition: and\nmatchers:\n  - type: word", "unsupported: matchers-condition=and"},
+		{"matchers:\n  - type: word\n    condition: and", "unsupported: condition=and"},
+		{"matchers:\n  - type: word\n    negative: true", "unsupported: negative"},
+		{"http:\n  - method: GET\n  - method: POST", "unsupported: multi-request"},
+		{"matchers:\n  - type: word\n    condition: or\n    words:\n      - a", ""},
+		{"matchers-condition: or\nmatchers:\n  - type: word", ""},
+	}
+	for _, c := range cases {
+		if got := nucleiUnsupported(c.doc); got != c.want {
+			t.Errorf("nucleiUnsupported(%q) = %q, want %q", c.doc, got, c.want)
+		}
+	}
+}
+
 func TestWhatwebNormalize(t *testing.T) {
 	raw := []byte(`Plugin.define do
   name "Nginx"

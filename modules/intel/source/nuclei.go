@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"log"
 	"regexp"
 	"strings"
 
@@ -17,12 +18,18 @@ import (
 // MAPPING LIMITS (honest): only `word` and `regex` matchers on `part: header` and
 // `part: body` are mapped — a header word of the form "Name: value" becomes a
 // header pattern, everything else becomes an HTML substring (word, regex-escaped)
-// or HTML regex. NOT represented: `status`/`dsl`/`binary`/`favicon` matchers,
-// extractors, `matchers-condition: and`, `negative: true`, and multi-request flow.
-// Because AND/negative conditions are dropped, a normalized entry is an OR-set of
-// markers and may fire where the strict template would not — which is exactly the
-// "a detection is a LEAD" contract the matcher already assumes. Multiple templates
-// in one document (separated by `---`) are each normalized and merged.
+// or HTML regex. NOT represented: `status`/`dsl`/`binary`/`favicon` matchers and
+// extractors (a template with none of the mappable markers is skipped).
+//
+// CAPABILITY CHECK: the matcher treats every marker in a Fingerprint as an OR-set
+// (any single hit is a lead). So a template whose strictness comes from
+// `matchers-condition: and`, a per-matcher `condition: and`, `negative: true`, or
+// multi-request flow would, if flattened, become an OR rule that fires where the
+// strict template never would — a mass false positive. The adapter cannot translate
+// those semantics faithfully, so instead of silently down-grading them it
+// QUARANTINES such templates: they are not emitted, and the count is logged. Only
+// templates that map FULLY to an OR-set are emitted. Multiple templates in one
+// document (separated by `---`) are each checked and normalized.
 //
 // FIELDS CARRIED beyond markers: `info.classification.cpe` is extracted into CPE
 // (the CVE bridge). Nuclei templates carry NO Wappalyzer numeric category ids —
@@ -44,7 +51,12 @@ func (n *nuclei) Fetch(ctx context.Context) ([]byte, error) {
 
 func (n *nuclei) Normalize(raw []byte) (map[string]schema.Fingerprint, error) {
 	out := make(map[string]schema.Fingerprint)
+	var quarantined []string
 	for _, doc := range splitYAMLDocs(string(raw)) {
+		if reason := nucleiUnsupported(doc); reason != "" {
+			quarantined = append(quarantined, reason)
+			continue
+		}
 		name, fp, ok := normalizeNucleiTemplate(doc)
 		if !ok {
 			continue
@@ -53,10 +65,52 @@ func (n *nuclei) Normalize(raw []byte) (map[string]schema.Fingerprint, error) {
 		fp.License = n.License()
 		out[name] = fp
 	}
-	if len(out) == 0 {
+	if len(quarantined) > 0 {
+		log.Printf("nuclei: quarantined %d template(s) with untranslatable semantics (not emitted, would cause false positives): %v", len(quarantined), quarantined)
+	}
+	if len(out) == 0 && len(quarantined) == 0 {
 		return nil, errors.New("nuclei: no mappable technology template in input")
 	}
 	return out, nil
+}
+
+// nucleiUnsupported reports the first lossy semantic the adapter cannot translate
+// to the matcher's OR-set faithfully, or "" when the template maps cleanly. An
+// AND / per-matcher-AND / negative / multi-request template flattened to an OR-set
+// would fire where the strict template never would, so it is quarantined, not
+// down-graded. `matchers-condition:`/`condition:` default to `or` (fine); only an
+// explicit `and`, `negative: true`, or more than one request block is lossy.
+func nucleiUnsupported(doc string) string {
+	requests := 0
+	for _, line := range strings.Split(doc, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "- method:"), strings.HasPrefix(t, "- raw:"):
+			requests++
+		case strings.HasPrefix(t, "matchers-condition:"):
+			if yamlEq(t[len("matchers-condition:"):], "and") {
+				return "unsupported: matchers-condition=and"
+			}
+		case strings.HasPrefix(t, "condition:"):
+			if yamlEq(t[len("condition:"):], "and") {
+				return "unsupported: condition=and"
+			}
+		case strings.HasPrefix(t, "negative:"):
+			if yamlEq(t[len("negative:"):], "true") {
+				return "unsupported: negative"
+			}
+		}
+	}
+	if requests > 1 {
+		return "unsupported: multi-request"
+	}
+	return ""
+}
+
+// yamlEq reports whether a scalar after its key equals want, ignoring surrounding
+// quotes, whitespace and case.
+func yamlEq(raw, want string) bool {
+	return strings.EqualFold(unquoteYAML(strings.TrimSpace(raw)), want)
 }
 
 // splitYAMLDocs splits a multi-document YAML stream on lines that are exactly `---`.
