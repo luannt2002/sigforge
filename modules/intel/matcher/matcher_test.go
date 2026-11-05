@@ -1,8 +1,10 @@
 package matcher
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/luannt2002/sigforge/modules/intel/baseline"
 	"github.com/luannt2002/sigforge/modules/intel/schema"
 )
 
@@ -111,6 +113,64 @@ func TestVersionRegexRefinesLeadOnly(t *testing.T) {
 	d2 := db(map[string]schema.Fingerprint{"PHP": {VersionRegex: []string{`PHP/([\d.]+)\;version:\1`}}})
 	if got := Match(d2, Page{HTML: "PHP/8.2.1"}); len(got) != 0 {
 		t.Fatalf("version_regex alone must not detect, got %+v", got)
+	}
+}
+
+func TestDomRules(t *testing.T) {
+	ng := db(map[string]schema.Fingerprint{
+		"Angular": {Dom: json.RawMessage(`{"[ng-version]":{"attributes":{"ng-version":"([\\d.]+)\\;version:\\1"}}}`)},
+	})
+	vite := db(map[string]schema.Fingerprint{
+		"Vite": {Dom: json.RawMessage(`{"#vite-legacy-polyfill":{"exists":""}}`)},
+	})
+	cases := []struct {
+		name    string
+		db      *schema.DB
+		html    string
+		tech    string
+		want    bool
+		version string
+	}{
+		{"ng-version attribute → Angular+version", ng, `<app-root ng-version="15.1.2"></app-root>`, "Angular", true, "15.1.2"},
+		{"ng-version in body text only → no detect", ng, `<p>talking about ng-version here</p>`, "Angular", false, ""},
+		{"no ng-version at all → no detect", ng, `<html><body>hi</body></html>`, "Angular", false, ""},
+		{"vite-legacy-polyfill id present → Vite", vite, `<script type="module" id="vite-legacy-polyfill"></script>`, "Vite", true, ""},
+		{"no vite marker → no detect", vite, `<div>plain page</div>`, "Vite", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Match(c.db, Page{HTML: c.html})
+			d, ok := find(got, c.tech)
+			if ok != c.want {
+				t.Fatalf("detected=%v want=%v (got %+v)", ok, c.want, got)
+			}
+			if ok && d.Version != c.version {
+				t.Fatalf("version=%q want=%q", d.Version, c.version)
+			}
+		})
+	}
+}
+
+// TestBaselineApacheNotCoyote guards the real baseline Apache marker: it must
+// detect Apache HTTP Server but never fire on Tomcat's "Apache-Coyote" banner
+// (which is a distinct tech), matching how the upstream webappanalyzer data anchors
+// the pattern. Regression for the over-broad "(?:Apache)(?:/...)?" that matched the
+// "Apache" inside "Apache-Coyote/1.1".
+func TestBaselineApacheNotCoyote(t *testing.T) {
+	b, err := baseline.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Match(b, Page{Headers: map[string][]string{"Server": {"Apache/2.4.57 (Debian)"}}})
+	if d, ok := find(got, "Apache"); !ok || d.Version != "2.4.57" {
+		t.Fatalf("real Apache = %+v ok=%v", d, ok)
+	}
+	got = Match(b, Page{Headers: map[string][]string{"Server": {"Apache-Coyote/1.1"}}})
+	if _, ok := find(got, "Apache"); ok {
+		t.Fatal("Apache-Coyote (Tomcat) must not be detected as Apache HTTP Server")
+	}
+	if _, ok := find(got, "Apache Tomcat"); !ok {
+		t.Fatal("Apache-Coyote should still detect Apache Tomcat")
 	}
 }
 

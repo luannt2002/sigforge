@@ -43,10 +43,12 @@ type Fingerprint struct {
 	Implies   StringList            `json:"implies,omitempty"`
 	Dom       json.RawMessage       `json:"dom,omitempty"` // carried through for consumers with a DOM; this repo's reference matcher does not evaluate it
 
-	Confidence   int      `json:"confidence,omitempty"`    // declared confidence (1..100) when a pattern carries no `\;confidence:N`; absent = 100
-	Provenance   string   `json:"provenance,omitempty"`    // source id the entry came from, e.g. "baseline"
-	License      string   `json:"license,omitempty"`       // SPDX id of the source's license, e.g. "Apache-2.0"
-	VersionRegex []string `json:"version_regex,omitempty"` // alternate version-capturing patterns kept from lower-precedence sources during merge
+	Confidence        int      `json:"confidence,omitempty"`         // declared confidence (1..100) when a pattern carries no `\;confidence:N`; absent = 100
+	Provenance        string   `json:"provenance,omitempty"`         // source id the entry came from, e.g. "baseline"
+	ProvenanceVersion string   `json:"provenance_version,omitempty"` // the synced version of the source: a git SHA / release tag when the fetch URL pinned one, else "unversioned@<RFC3339>"
+	License           string   `json:"license,omitempty"`            // SPDX id of the source's license, e.g. "Apache-2.0"
+	VersionRegex      []string `json:"version_regex,omitempty"`      // alternate version-capturing patterns kept from lower-precedence sources during merge
+	CPE               []string `json:"cpe,omitempty"`                // Common Platform Enumeration id(s) the source attests, e.g. "cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*" — the bridge to CVE/NVD; populated only from a source's real cpe value, never fabricated
 }
 
 // StringList accepts a JSON string or an array of strings, because a Wappalyzer

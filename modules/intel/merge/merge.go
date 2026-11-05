@@ -5,9 +5,11 @@
 // Trust wins, ties resolve to the order given. On a tech-id conflict the
 // higher-precedence entry is kept whole, and the losing entry's version-capturing
 // patterns are preserved as alternates in the winner's version_regex so no
-// version signal is silently dropped. Every entry carries the provenance and
-// license of the source it came from, so the operator — who chose which sources to
-// include — owns the license posture of the output.
+// version signal is silently dropped. Likewise a CPE (the CVE bridge) is carried
+// through: the winner keeps its own, but if it has none the losing source's CPE is
+// kept as info so a CVE id is never silently dropped. Every entry carries the
+// provenance and license of the source it came from, so the operator — who chose
+// which sources to include — owns the license posture of the output.
 package merge
 
 import (
@@ -42,6 +44,9 @@ func Merge(baseline map[string]schema.Fingerprint, sources ...Source) map[string
 			incoming := stamp(fp, src.Name, fp.License)
 			if winner, ok := out[name]; ok {
 				winner.VersionRegex = mergeVersionRegex(winner.VersionRegex, versionPatterns(incoming))
+				if len(winner.CPE) == 0 && len(incoming.CPE) > 0 {
+					winner.CPE = incoming.CPE // the winner lacked a CVE id; keep the losing source's as info
+				}
 				out[name] = winner
 				continue
 			}

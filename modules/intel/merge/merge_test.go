@@ -34,6 +34,24 @@ func TestBaselineWinsOnConflictAndKeepsAlternateVersion(t *testing.T) {
 	}
 }
 
+func TestConflictCarriesSourceCPEWhenBaselineHasNone(t *testing.T) {
+	base := map[string]schema.Fingerprint{
+		"Nginx":     {Headers: map[string]schema.StringList{"Server": {"nginx"}}}, // no CPE
+		"WordPress": {CPE: []string{"cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*:*"}},
+	}
+	src := Source{Name: "webappanalyzer", Trust: 5, Set: map[string]schema.Fingerprint{
+		"Nginx":     {CPE: []string{"cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"}},
+		"WordPress": {CPE: []string{"cpe:2.3:a:other:other:*:*:*:*:*:*:*:*"}}, // must NOT override baseline's
+	}}
+	out := Merge(base, src)
+	if got := out["Nginx"].CPE; len(got) != 1 || got[0] != "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" {
+		t.Fatalf("baseline-without-CPE should adopt source CPE, got %v", got)
+	}
+	if got := out["WordPress"].CPE; len(got) != 1 || got[0] != "cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*:*" {
+		t.Fatalf("baseline CPE must win over source, got %v", got)
+	}
+}
+
 func TestNewTechFromSourceIsStamped(t *testing.T) {
 	base := map[string]schema.Fingerprint{"Nginx": {}}
 	src := Source{Name: "nuclei", Trust: 1, Set: map[string]schema.Fingerprint{

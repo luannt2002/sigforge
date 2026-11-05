@@ -2,65 +2,136 @@
   "schema_version": "1.0.0",
   "fingerprints": {
     "Nginx": {
+      "cpe": ["cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"],
       "cats": [22],
       "headers": {"Server": "nginx(?:/([\\d.]+))?\\;version:\\1"},
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "Apache": {
+      "cpe": ["cpe:2.3:a:apache:http_server:*:*:*:*:*:*:*:*"],
       "cats": [22],
-      "headers": {"Server": "Apache(?:/([\\d.]+))?\\;version:\\1"},
+      "headers": {"Server": "Apache(?:$|/([\\d.]+)|[^/-])\\;version:\\1"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Apache Tomcat": {
+      "cpe": ["cpe:2.3:a:apache:tomcat:*:*:*:*:*:*:*:*"],
+      "cats": [22],
+      "headers": {"Server": "Apache-Coyote(?:/([\\d.]+))?\\;version:\\1"},
+      "implies": ["Java"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Jetty": {
+      "cpe": ["cpe:2.3:a:eclipse:jetty:*:*:*:*:*:*:*:*"],
+      "cats": [22],
+      "headers": {"Server": "Jetty(?:\\(([\\d.]+))?\\;version:\\1"},
+      "implies": ["Java"],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "Microsoft IIS": {
+      "cpe": ["cpe:2.3:a:microsoft:internet_information_services:*:*:*:*:*:*:*:*"],
       "cats": [22],
       "headers": {"Server": "(?:Microsoft-)?IIS(?:/([\\d.]+))?\\;version:\\1"},
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "LiteSpeed": {
+      "cpe": ["cpe:2.3:a:litespeedtech:litespeed_web_server:*:*:*:*:*:*:*:*"],
       "cats": [22],
       "headers": {"Server": "LiteSpeed(?:/([\\d.]+))?\\;version:\\1"},
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "OpenResty": {
+      "cpe": ["cpe:2.3:a:openresty:openresty:*:*:*:*:*:*:*:*"],
       "cats": [22],
       "headers": {"Server": "openresty(?:/([\\d.]+))?\\;version:\\1"},
       "implies": ["Nginx"],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
+    "Caddy": {
+      "cpe": ["cpe:2.3:a:caddyserver:caddy:*:*:*:*:*:*:*:*"],
+      "cats": [22],
+      "headers": {"Server": "Caddy"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Gunicorn": {
+      "cpe": ["cpe:2.3:a:gunicorn:gunicorn:*:*:*:*:*:*:*:*"],
+      "cats": [22],
+      "headers": {"Server": "gunicorn(?:/([\\d.]+))?\\;version:\\1"},
+      "implies": ["Python"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Varnish": {
+      "cpe": ["cpe:2.3:a:varnish-software:varnish_cache:*:*:*:*:*:*:*:*"],
+      "cats": [23],
+      "headers": {
+        "X-Varnish": "",
+        "Via": "varnish(?:[/ ]\\(Varnish/([\\d.]+)\\))?\\;version:\\1"
+      },
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Squid": {
+      "cpe": ["cpe:2.3:a:squid-cache:squid:*:*:*:*:*:*:*:*"],
+      "cats": [64, 23],
+      "headers": {
+        "Via": "squid(?:/([\\d.]+))?\\;version:\\1",
+        "X-Squid-Error": ""
+      },
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Apache Traffic Server": {
+      "cpe": ["cpe:2.3:a:apache:traffic_server:*:*:*:*:*:*:*:*"],
+      "cats": [22, 23],
+      "headers": {"Server": "ATS(?:/([\\d.]+))?\\;version:\\1"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Envoy": {
+      "cpe": ["cpe:2.3:a:envoyproxy:envoy:*:*:*:*:*:*:*:*"],
+      "cats": [64],
+      "headers": {"Server": "^envoy$", "X-Envoy-Upstream-Service-Time": ""},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
     "PHP": {
+      "cpe": ["cpe:2.3:a:php:php:*:*:*:*:*:*:*:*"],
       "cats": [27],
       "headers": {"X-Powered-By": "PHP(?:/([\\d.]+))?\\;version:\\1"},
       "cookies": {"PHPSESSID": ""},
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
-    "Microsoft ASP.NET": {
-      "cats": [18],
-      "headers": {
-        "X-Powered-By": "ASP\\.NET",
-        "X-AspNet-Version": "([\\d.]+)\\;version:\\1"
-      },
-      "cookies": {"ASP.NET_SessionId": ""},
+    "Java": {
+      "cpe": ["cpe:2.3:a:oracle:jre:*:*:*:*:*:*:*:*"],
+      "cats": [27],
+      "cookies": {"JSESSIONID": ""},
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "Python": {
+      "cpe": ["cpe:2.3:a:python:python:*:*:*:*:*:*:*:*"],
       "cats": [27],
-      "headers": {"Server": "(?:Python|Werkzeug|gunicorn)(?:/([\\d.]+))?\\;version:\\1"},
+      "headers": {"Server": "(?:Python|Werkzeug)(?:/([\\d.]+))?\\;version:\\1"},
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "Node.js": {
+      "cpe": ["cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*"],
       "cats": [27],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "Express": {
+      "cpe": ["cpe:2.3:a:expressjs:express:*:*:*:*:*:*:*:*"],
       "cats": [18],
       "headers": {"X-Powered-By": "Express"},
       "implies": ["Node.js"],
@@ -68,11 +139,13 @@
       "license": "Apache-2.0"
     },
     "Ruby": {
+      "cpe": ["cpe:2.3:a:ruby-lang:ruby:*:*:*:*:*:*:*:*"],
       "cats": [27],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "Phusion Passenger": {
+      "cpe": ["cpe:2.3:a:phusionpassenger:phusion_passenger:*:*:*:*:*:*:*:*"],
       "cats": [22],
       "headers": {
         "X-Powered-By": "Phusion Passenger(?:\\(R\\))?(?: ([\\d.]+))?\\;version:\\1",
@@ -82,7 +155,68 @@
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
+    "Microsoft ASP.NET": {
+      "cpe": ["cpe:2.3:a:microsoft:asp.net:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "headers": {
+        "X-Powered-By": "ASP\\.NET",
+        "X-AspNet-Version": "([\\d.]+)\\;version:\\1"
+      },
+      "cookies": {"ASP.NET_SessionId": ""},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Microsoft ASP.NET Core": {
+      "cpe": ["cpe:2.3:a:microsoft:asp.net_core:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "headers": {"Server": "Kestrel"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Django": {
+      "cpe": ["cpe:2.3:a:djangoproject:django:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "cookies": {"csrftoken": ""},
+      "html": ["name=\"csrfmiddlewaretoken\"", "/static/admin/css/base"],
+      "implies": ["Python"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Ruby on Rails": {
+      "cpe": ["cpe:2.3:a:rubyonrails:rails:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "meta": {"csrf-param": "authenticity_token"},
+      "implies": ["Ruby"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Laravel": {
+      "cpe": ["cpe:2.3:a:laravel:laravel:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "cookies": {"laravel_session": ""},
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Symfony": {
+      "cpe": ["cpe:2.3:a:sensiolabs:symfony:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "headers": {"X-Debug-Token": ""},
+      "cookies": {"symfony": ""},
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "CodeIgniter": {
+      "cpe": ["cpe:2.3:a:codeigniter:codeigniter:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "cookies": {"ci_session": ""},
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
     "WordPress": {
+      "cpe": ["cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*:*"],
       "cats": [1, 11],
       "headers": {"X-Pingback": "/?xmlrpc\\.php$"},
       "meta": {"generator": "WordPress ?([\\d.]+)?\\;version:\\1"},
@@ -91,7 +225,25 @@
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
+    "WooCommerce": {
+      "cpe": ["cpe:2.3:a:woocommerce:woocommerce:*:*:*:*:*:wordpress:*:*"],
+      "cats": [6],
+      "meta": {"generator": "WooCommerce ?([\\d.]+)?\\;version:\\1"},
+      "html": ["/wp-content/plugins/woocommerce/"],
+      "implies": ["WordPress"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Elementor": {
+      "cats": [87],
+      "meta": {"generator": "Elementor ([\\d.]+)\\;version:\\1"},
+      "html": ["/wp-content/plugins/elementor/"],
+      "implies": ["WordPress"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
     "Drupal": {
+      "cpe": ["cpe:2.3:a:drupal:drupal:*:*:*:*:*:*:*:*"],
       "cats": [1],
       "headers": {
         "X-Generator": "Drupal ?([\\d.]+)?\\;version:\\1",
@@ -104,6 +256,7 @@
       "license": "Apache-2.0"
     },
     "Joomla": {
+      "cpe": ["cpe:2.3:a:joomla:joomla\\!:*:*:*:*:*:*:*:*"],
       "cats": [1],
       "meta": {"generator": "Joomla"},
       "html": ["/media/jui/", "option=com_content"],
@@ -111,7 +264,17 @@
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
+    "TYPO3 CMS": {
+      "cpe": ["cpe:2.3:a:typo3:typo3:*:*:*:*:*:*:*:*"],
+      "cats": [1],
+      "meta": {"generator": "TYPO3 ?([\\d.]+)?\\;version:\\1"},
+      "html": ["/typo3temp/", "/typo3conf/"],
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
     "Magento": {
+      "cpe": ["cpe:2.3:a:magento:magento:*:*:*:*:*:*:*:*"],
       "cats": [6],
       "cookies": {"X-Magento-Vary": ""},
       "html": ["/skin/frontend/", "/static/version"],
@@ -119,27 +282,89 @@
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
-    "Laravel": {
-      "cats": [18],
-      "cookies": {"laravel_session": ""},
+    "PrestaShop": {
+      "cpe": ["cpe:2.3:a:prestashop:prestashop:*:*:*:*:*:*:*:*"],
+      "cats": [6],
+      "meta": {"generator": "PrestaShop"},
+      "html": ["var prestashop", "/modules/ps_"],
       "implies": ["PHP"],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
+    "OpenCart": {
+      "cpe": ["cpe:2.3:a:opencart:opencart:*:*:*:*:*:*:*:*"],
+      "cats": [6],
+      "html": ["catalog/view/theme/", "index.php?route=common"],
+      "implies": ["PHP"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Shopify": {
+      "cats": [6],
+      "headers": {"X-ShopId": "", "X-Shopify-Stage": ""},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Sitecore": {
+      "cpe": ["cpe:2.3:a:sitecore:*:*:*:*:*:*:*:*:*"],
+      "cats": [1],
+      "cookies": {"SC_ANALYTICS_GLOBAL_COOKIE": ""},
+      "html": ["/sitecore/", "/-/media/"],
+      "implies": ["Microsoft ASP.NET"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
     "Ghost": {
+      "cpe": ["cpe:2.3:a:ghost:ghost:*:*:*:*:*:node.js:*:*"],
       "cats": [1, 11],
       "meta": {"generator": "Ghost ?([\\d.]+)?\\;version:\\1"},
       "implies": ["Node.js"],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
+    "Next.js": {
+      "cpe": ["cpe:2.3:a:vercel:next.js:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "html": ["/_next/static/", "__NEXT_DATA__"],
+      "scriptSrc": ["/_next/static/"],
+      "implies": ["React", "Node.js"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Nuxt.js": {
+      "cpe": ["cpe:2.3:a:nuxt:nuxt:*:*:*:*:*:*:*:*"],
+      "cats": [18],
+      "html": ["window.__NUXT__", "/_nuxt/"],
+      "scriptSrc": ["/_nuxt/"],
+      "implies": ["Vue.js", "Node.js"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Gatsby": {
+      "cpe": ["cpe:2.3:a:gatsbyjs:gatsby:*:*:*:*:*:node.js:*:*"],
+      "cats": [18],
+      "meta": {"generator": "Gatsby ?([\\d.]+)?\\;version:\\1"},
+      "html": ["id=\"___gatsby\"", "id=\"gatsby-inlined-css\""],
+      "implies": ["React", "Node.js"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
     "jQuery": {
+      "cpe": ["cpe:2.3:a:jquery:jquery:*:*:*:*:*:*:*:*"],
       "cats": [59],
       "scriptSrc": ["jquery(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
+    "Lodash": {
+      "cpe": ["cpe:2.3:a:lodash:lodash:*:*:*:*:*:*:*:*"],
+      "cats": [59],
+      "scriptSrc": ["lodash(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
     "React": {
+      "cpe": ["cpe:2.3:a:facebook:react:*:*:*:*:*:*:*:*"],
       "cats": [12],
       "scriptSrc": ["react(?:-dom)?[.-]([\\d.]+)(?:\\.min)?\\.js\\;version:\\1"],
       "provenance": "baseline",
@@ -155,18 +380,30 @@
       "license": "Apache-2.0"
     },
     "Angular": {
+      "cpe": ["cpe:2.3:a:angular:angular:*:*:*:*:*:*:*:*"],
       "cats": [12],
       "scriptSrc": ["angular(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
+      "dom": {"[ng-version]": {"attributes": {"ng-version": "([\\d.]+)\\;version:\\1"}}},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Vite": {
+      "cpe": ["cpe:2.3:a:vitejs:vite:*:*:*:*:*:*:*:*"],
+      "cats": [19],
+      "scriptSrc": ["/@vite/"],
+      "dom": {"#vite-legacy-polyfill": {"exists": ""}},
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "Bootstrap": {
+      "cpe": ["cpe:2.3:a:getbootstrap:bootstrap:*:*:*:*:*:*:*:*"],
       "cats": [66],
       "scriptSrc": ["bootstrap(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
     "Cloudflare": {
+      "cpe": ["cpe:2.3:a:cloudflare:cloudflare:*:*:*:*:*:*:*:*"],
       "cats": [31],
       "headers": {"CF-RAY": "", "CF-Cache-Status": "", "Server": "cloudflare"},
       "provenance": "baseline",
@@ -179,8 +416,49 @@
       "license": "Apache-2.0"
     },
     "Fastly": {
+      "cpe": ["cpe:2.3:a:fastly:fastly:*:*:*:*:*:*:*:*"],
       "cats": [31],
       "headers": {"Fastly-Restarts": "", "X-Fastly-Request-Id": ""},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Amazon CloudFront": {
+      "cats": [31],
+      "headers": {"X-Amz-Cf-Id": "", "Via": "CloudFront"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Google Cloud CDN": {
+      "cats": [31],
+      "headers": {"Via": "\\bgoogle\\b\\;confidence:50", "Server": "Google Frontend"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Sucuri": {
+      "cats": [31],
+      "headers": {"X-Sucuri-ID": "", "X-Sucuri-Cache": "", "Server": "Sucuri"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Imperva Incapsula": {
+      "cats": [31],
+      "headers": {"X-Iinfo": "", "X-CDN": "Incapsula"},
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Google Tag Manager": {
+      "cats": [42],
+      "scriptSrc": ["googletagmanager\\.com/gtm\\.js"],
+      "html": ["googletagmanager\\.com/ns\\.html"],
+      "provenance": "baseline",
+      "license": "Apache-2.0"
+    },
+    "Google Analytics": {
+      "cats": [10],
+      "scriptSrc": [
+        "google-analytics\\.com/(?:ga|urchin|analytics)\\.js",
+        "googletagmanager\\.com/gtag/js"
+      ],
       "provenance": "baseline",
       "license": "Apache-2.0"
     }
