@@ -34,21 +34,47 @@ func TestBaselineWinsOnConflictAndKeepsAlternateVersion(t *testing.T) {
 	}
 }
 
-func TestConflictCarriesSourceCPEWhenBaselineHasNone(t *testing.T) {
+// TestConflictKeepsSourceCPEAsUnverifiedCandidate guards the CPE identity-contamination
+// fix: when the winner lacks a CPE and a losing entry of the same tech name carries one
+// (possibly a DIFFERENT edition/fork — f5:nginx vs the winner's unknown identity), the
+// source CPE must NOT be promoted to the winner's verified CPE. It is kept as an
+// unverified cpe_candidate, tagged with the source's own provenance+license, so a CVE
+// lookup (which reads only CPE) never silently trusts an identity from another entry.
+func TestConflictKeepsSourceCPEAsUnverifiedCandidate(t *testing.T) {
 	base := map[string]schema.Fingerprint{
 		"Nginx":     {Headers: map[string]schema.StringList{"Server": {"nginx"}}}, // no CPE
 		"WordPress": {CPE: []string{"cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*:*"}},
 	}
 	src := Source{Name: "webappanalyzer", Trust: 5, Set: map[string]schema.Fingerprint{
-		"Nginx":     {CPE: []string{"cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"}},
-		"WordPress": {CPE: []string{"cpe:2.3:a:other:other:*:*:*:*:*:*:*:*"}}, // must NOT override baseline's
+		"Nginx":     {CPE: []string{"cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"}, License: "GPL-3.0-only"}, // a DIFFERENT edition's CPE
+		"WordPress": {CPE: []string{"cpe:2.3:a:other:other:*:*:*:*:*:*:*:*"}},                       // must NOT override baseline's
 	}}
 	out := Merge(base, src)
-	if got := out["Nginx"].CPE; len(got) != 1 || got[0] != "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" {
-		t.Fatalf("baseline-without-CPE should adopt source CPE, got %v", got)
+
+	// The borrowed CPE must NOT become the winner's verified CPE (identity contamination).
+	if got := out["Nginx"].CPE; len(got) != 0 {
+		t.Fatalf("source CPE must NOT be promoted to the winner's verified CPE, got %v", got)
 	}
+	// It is kept as an unverified candidate lead instead.
+	cand := out["Nginx"].CPECandidate
+	if len(cand) != 1 || cand[0] != "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*" {
+		t.Fatalf("source CPE should be kept as an unverified candidate, got %v", cand)
+	}
+	// Tagged with the SOURCE's provenance+license, not the winner's.
+	prov := out["Nginx"].CPECandidateProv
+	if len(prov) != len(cand) {
+		t.Fatalf("CPECandidateProv must align with CPECandidate: %d vs %d", len(prov), len(cand))
+	}
+	if prov[0].Provenance != "webappanalyzer" || prov[0].License != "GPL-3.0-only" {
+		t.Fatalf("candidate CPE must carry the source's provenance+license, got %q/%q", prov[0].Provenance, prov[0].License)
+	}
+
+	// A baseline that HAS its own CPE keeps it and borrows no candidate.
 	if got := out["WordPress"].CPE; len(got) != 1 || got[0] != "cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*:*" {
 		t.Fatalf("baseline CPE must win over source, got %v", got)
+	}
+	if got := out["WordPress"].CPECandidate; len(got) != 0 {
+		t.Fatalf("a winner with its own CPE must borrow no candidate, got %v", got)
 	}
 }
 

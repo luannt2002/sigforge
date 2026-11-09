@@ -218,17 +218,61 @@ func TestRequiredLitUnit(t *testing.T) {
 	}
 }
 
-// TestRecordKeepsFirstVersion guards fix #7: a second, differently-shaped version
-// string must not overwrite the first. The old len-based rule let "9.5" replace "10".
-func TestRecordKeepsFirstVersion(t *testing.T) {
-	h := &hit{}
-	record(h, 50, "10", "html", "x", "x", []string{"x"})
-	if h.version != "10" { // positive: first version captured
-		t.Fatalf("after first record, version = %q, want %q", h.version, "10")
+// TestResolveVersionDeterministic pins the resolution: the more specific version
+// (more numeric components) wins, and the result does not depend on the order claims
+// were recorded in — the old keep-first rule made the winner depend on map order.
+func TestResolveVersionDeterministic(t *testing.T) {
+	// "1.18.0" (3 components) beats "1.18" (2); they are a refinement, not a conflict
+	v, conflict := resolveVersion([]VersionClaim{{Version: "1.18"}, {Version: "1.18.0"}})
+	if v != "1.18.0" || conflict {
+		t.Fatalf("refine: version=%q conflict=%v, want 1.18.0/false", v, conflict)
 	}
-	record(h, 50, "9.5", "html", "x", "x", []string{"x"})
-	if h.version != "10" { // negative: longer-but-different string must not win
-		t.Fatalf("after second record, version = %q, want %q", h.version, "10")
+	// order of claims must not change the outcome
+	v2, _ := resolveVersion([]VersionClaim{{Version: "1.18.0"}, {Version: "1.18"}})
+	if v2 != v {
+		t.Fatalf("order dependence: %q vs %q", v, v2)
+	}
+	// genuinely incompatible versions: pick is deterministic and conflict is flagged
+	v, conflict = resolveVersion([]VersionClaim{{Version: "10"}, {Version: "9.5"}})
+	if v != "9.5" || !conflict { // "9.5" has more numeric components than "10"
+		t.Fatalf("conflict: version=%q conflict=%v, want 9.5/true", v, conflict)
+	}
+}
+
+// TestVersionConflictDeterministic is the core regression: two headers of the same
+// tech capture different, incompatible versions. Map iteration over the header
+// patterns used to decide which version survived, so the output flapped between runs.
+// Running Match 100 times must yield an identical Detection every time, and the
+// conflict must be surfaced honestly.
+func TestVersionConflictDeterministic(t *testing.T) {
+	d := db(map[string]schema.Fingerprint{
+		"Acme": {Headers: map[string]schema.StringList{
+			"X-Acme-A": {`v([\d.]+)\;version:\1`},
+			"X-Acme-B": {`v([\d.]+)\;version:\1`},
+		}},
+	})
+	page := Page{Headers: map[string][]string{
+		"x-acme-a": {"v10"},
+		"x-acme-b": {"v9.5"},
+	}}
+
+	first := Match(d, page)
+	want, _ := json.Marshal(first)
+	for i := 0; i < 100; i++ {
+		got, _ := json.Marshal(Match(d, page))
+		if string(got) != string(want) {
+			t.Fatalf("run %d differs:\n first=%s\n got  =%s", i, want, got)
+		}
+	}
+	a, ok := find(first, "Acme")
+	if !ok {
+		t.Fatal("Acme not detected")
+	}
+	if !a.VersionConflict {
+		t.Fatalf("expected VersionConflict=true, got %+v", a)
+	}
+	if len(a.VersionClaims) != 2 {
+		t.Fatalf("expected 2 distinct claims, got %+v", a.VersionClaims)
 	}
 }
 

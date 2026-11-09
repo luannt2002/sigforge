@@ -58,6 +58,46 @@ type Fingerprint struct {
 	// consumer from serving that pattern under the winner's license. Absent or shorter
 	// than VersionRegex ⇒ the unrecorded alternates share the entry's own license.
 	VersionRegexProv []PatternProv `json:"version_regex_prov,omitempty"`
+
+	// CPECandidate holds CPE id(s) that a lower-precedence entry of the SAME technology
+	// name attested but this (winning) entry did not. The two entries may be different
+	// editions/forks/distributions, so a borrowed CPE is NOT attested for this entry's
+	// identity — it is an UNVERIFIED lead for a consumer to cross-verify (the identity
+	// package resolves a verified CPE separately), never a CPE for direct CVE lookup.
+	// Being here rather than in CPE is the "unverified, from another entry" flag; kept
+	// rather than dropped so no CVE signal is lost silently.
+	CPECandidate []string `json:"cpe_candidate,omitempty"`
+
+	// CPECandidateProv is the true provenance+license of each CPECandidate, aligned by
+	// index, since a borrowed CPE belongs to its lower-precedence source, not this
+	// entry (mirrors VersionRegexProv — same license-posture guard).
+	CPECandidateProv []PatternProv `json:"cpe_candidate_prov,omitempty"`
+}
+
+// CapturesVersion reports whether the entry can extract a version: a version_regex
+// alternate, or any Wappalyzer pattern carrying the `\;version:` suffix. One definition
+// shared by the refresh regression gate and the coverage report, so they cannot drift.
+func (fp Fingerprint) CapturesVersion() bool {
+	if len(fp.VersionRegex) > 0 {
+		return true
+	}
+	for _, m := range []map[string]StringList{fp.Headers, fp.Cookies, fp.Meta} {
+		for _, raws := range m {
+			if hasVersionSuffix(raws) {
+				return true
+			}
+		}
+	}
+	return hasVersionSuffix(fp.HTML) || hasVersionSuffix(fp.ScriptSrc)
+}
+
+func hasVersionSuffix(raws []string) bool {
+	for _, raw := range raws {
+		if strings.Contains(raw, `\;version:`) {
+			return true
+		}
+	}
+	return false
 }
 
 // PatternProv carries the provenance and license of a single pattern, used by

@@ -5,9 +5,11 @@
 // Trust wins, ties resolve to the order given. On a tech-id conflict the
 // higher-precedence entry is kept whole, and the losing entry's version-capturing
 // patterns are preserved as alternates in the winner's version_regex so no
-// version signal is silently dropped. Likewise a CPE (the CVE bridge) is carried
-// through: the winner keeps its own, but if it has none the losing source's CPE is
-// kept as info so a CVE id is never silently dropped. Every entry carries the
+// version signal is silently dropped. A CPE (the CVE bridge) is identity-bound: the
+// winner keeps its own verified CPE, but a losing entry of the same name may be a
+// different edition/fork, so its CPE is kept only as an unverified cpe_candidate
+// (never promoted to the winner's CPE) — a lead to cross-verify, not a CVE a
+// consumer may trust silently. Every entry carries the
 // provenance and license of the source it came from, so the operator — who chose
 // which sources to include — owns the license posture of the output.
 package merge
@@ -47,8 +49,11 @@ func Merge(baseline map[string]schema.Fingerprint, sources ...Source) map[string
 					zipAlts(winner.VersionRegex, winner.VersionRegexProv, provOf(winner)),
 					versionAlts(incoming),
 				)
-				if len(winner.CPE) == 0 && len(incoming.CPE) > 0 {
-					winner.CPE = incoming.CPE // the winner lacked a CVE id; keep the losing source's as info
+				if len(winner.CPE) == 0 && len(winner.CPECandidate) == 0 && len(incoming.CPE) > 0 {
+					// incoming is a different entry of the same tech name (maybe a different
+					// edition/fork); its CPE is an unverified lead, never promoted to winner.CPE.
+					winner.CPECandidate = incoming.CPE
+					winner.CPECandidateProv = repeatProv(provOf(incoming), len(incoming.CPE))
 				}
 				out[name] = winner
 				continue
@@ -68,6 +73,16 @@ func stamp(fp schema.Fingerprint, provenance, license string) schema.Fingerprint
 		fp.License = license
 	}
 	return fp
+}
+
+// repeatProv builds an n-long provenance slice, all p, to align a borrowed CPE set
+// with the single source entry it came from (mirrors how VersionRegexProv aligns).
+func repeatProv(p schema.PatternProv, n int) []schema.PatternProv {
+	out := make([]schema.PatternProv, n)
+	for i := range out {
+		out[i] = p
+	}
+	return out
 }
 
 // versionAlt is one alternate version pattern paired with the provenance+license

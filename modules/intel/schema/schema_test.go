@@ -87,3 +87,29 @@ func TestJSONRoundTrip(t *testing.T) {
 		t.Fatalf("re-parse rendered DB: %v", err)
 	}
 }
+
+// TestCapturesVersion locks the one definition of "can extract a version" that the
+// refresh gate and the coverage report share: each pattern field counts, a pattern
+// without the version suffix does not.
+func TestCapturesVersion(t *testing.T) {
+	v := `x/([\d.]+)\;version:\1`
+	cases := []struct {
+		name string
+		fp   Fingerprint
+		want bool
+	}{
+		{"version_regex alternate", Fingerprint{VersionRegex: []string{v}}, true},
+		{"header suffix", Fingerprint{Headers: map[string]StringList{"Server": {v}}}, true},
+		{"cookie suffix", Fingerprint{Cookies: map[string]StringList{"sid": {v}}}, true},
+		{"meta suffix", Fingerprint{Meta: map[string]StringList{"generator": {v}}}, true},
+		{"html suffix", Fingerprint{HTML: StringList{v}}, true},
+		{"scriptSrc suffix", Fingerprint{ScriptSrc: StringList{v}}, true},
+		{"detection only", Fingerprint{HTML: StringList{"marker"}, Headers: map[string]StringList{"Server": {"x"}}}, false},
+		{"empty", Fingerprint{}, false},
+	}
+	for _, c := range cases {
+		if got := c.fp.CapturesVersion(); got != c.want {
+			t.Errorf("%s: CapturesVersion = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

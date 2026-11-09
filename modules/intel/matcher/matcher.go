@@ -45,6 +45,20 @@ type Detection struct {
 	Provenance string          `json:"provenance,omitempty"`
 	License    string          `json:"license,omitempty"`
 	Evidence   []MatchEvidence `json:"evidence,omitempty"`
+	// VersionConflict is set when two or more incompatible versions were captured for
+	// this tech (e.g. "9.5" vs "10"); Version then holds the deterministically-resolved
+	// pick but the consumer should treat it as uncertain. VersionClaims lists the
+	// distinct claims behind a conflict so the operator can judge them.
+	VersionConflict bool           `json:"versionConflict,omitempty"`
+	VersionClaims   []VersionClaim `json:"versionClaims,omitempty"`
+}
+
+// VersionClaim is one version string a pattern captured, kept with its field and
+// pattern so a conflict can be traced back to the signals that disagreed.
+type VersionClaim struct {
+	Version string `json:"version"`
+	Field   string `json:"field"`
+	Pattern string `json:"pattern,omitempty"`
 }
 
 // MatchEvidence records why one detection fired: which field carried the signal,
@@ -61,7 +75,9 @@ const maxImplyDepth = 4
 
 type hit struct {
 	conf     int
-	version  string
+	version  string // resolved version, filled once matching for this tech is done
+	conflict bool
+	claims   []VersionClaim // every version a pattern captured, pre-resolution
 	fp       schema.Fingerprint
 	implied  bool
 	evidence []MatchEvidence
@@ -97,7 +113,9 @@ func Match(db *schema.DB, page Page) []Detection {
 			matchDom(fp.Dom, html, lowHTML, fp, h)
 		}
 		if h.conf > 0 {
-			refineVersion(fp, html, headers, h)
+			h.version, h.conflict = resolveVersion(h.claims)
+			refineVersion(fp, html, headers, h) // fills only when no claim captured a version
+			sortEvidence(h.evidence)            // map iteration order must not leak into output
 			hits[name] = h
 		}
 	}
@@ -110,7 +128,7 @@ func Match(db *schema.DB, page Page) []Detection {
 		if conf > 100 {
 			conf = 100
 		}
-		out = append(out, Detection{
+		d := Detection{
 			Tech:       name,
 			Version:    h.version,
 			Confidence: conf,
@@ -118,7 +136,12 @@ func Match(db *schema.DB, page Page) []Detection {
 			Provenance: h.fp.Provenance,
 			License:    h.fp.License,
 			Evidence:   h.evidence,
-		})
+		}
+		if h.conflict {
+			d.VersionConflict = true
+			d.VersionClaims = distinctClaims(h.claims)
+		}
+		out = append(out, d)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Confidence != out[j].Confidence {
@@ -243,13 +266,120 @@ func refineVersion(fp schema.Fingerprint, html string, headers map[string][]stri
 
 func record(h *hit, conf int, verTmpl, field, pattern, matched string, m []string) {
 	h.conf += conf
-	// Keep the first version captured. A later pattern's differently-shaped string
-	// must not overwrite it: the old len-based choice wrongly preferred "9.5" over
-	// "10". refineVersion still fills a version only when none was captured.
-	if h.version == "" {
-		h.version = substitute(verTmpl, m)
+	// Collect every version a pattern captures; map-iteration order must not decide
+	// which one survives, so resolveVersion picks the winner deterministically later.
+	if v := substitute(verTmpl, m); v != "" {
+		h.claims = append(h.claims, VersionClaim{Version: v, Field: field, Pattern: pattern})
 	}
 	h.evidence = append(h.evidence, MatchEvidence{Field: field, Pattern: pattern, Matched: redact(matched)})
+}
+
+// resolveVersion picks a deterministic version from all captured claims and reports
+// whether they genuinely disagree. Precedence among distinct versions, highest first:
+// (1) more numeric components (the more specific version wins, e.g. "1.18.0" over
+// "1.18"); (2) a fixed field order (header, cookie, meta, html, scriptSrc, dom) for a
+// stable source preference; (3) the lexically smaller string. The final tier is a
+// total order, so the same claims always resolve to the same version regardless of
+// map-iteration order. conflict is set when any captured version is not a dotted
+// refinement of the winner (e.g. "9.5" vs "10"): the pick is still deterministic but
+// the consumer is told the version is uncertain.
+func resolveVersion(claims []VersionClaim) (version string, conflict bool) {
+	if len(claims) == 0 {
+		return "", false
+	}
+	best := claims[0]
+	for _, c := range claims[1:] {
+		if betterClaim(c, best) {
+			best = c
+		}
+	}
+	for _, c := range claims {
+		if !versionCompatible(c.Version, best.Version) {
+			conflict = true
+			break
+		}
+	}
+	return best.Version, conflict
+}
+
+func betterClaim(a, b VersionClaim) bool {
+	if na, nb := numComponents(a.Version), numComponents(b.Version); na != nb {
+		return na > nb
+	}
+	if ra, rb := fieldRank(a.Field), fieldRank(b.Field); ra != rb {
+		return ra < rb
+	}
+	return a.Version < b.Version
+}
+
+func numComponents(v string) int {
+	n := 0
+	for _, p := range strings.Split(v, ".") {
+		if strings.IndexFunc(p, func(r rune) bool { return r >= '0' && r <= '9' }) >= 0 {
+			n++
+		}
+	}
+	return n
+}
+
+func fieldRank(field string) int {
+	switch field {
+	case "header":
+		return 0
+	case "cookie":
+		return 1
+	case "meta":
+		return 2
+	case "html":
+		return 3
+	case "scriptSrc":
+		return 4
+	case "dom":
+		return 5
+	}
+	return 6
+}
+
+// versionCompatible reports whether a and b are the same version or one is a dotted
+// refinement of the other ("1.18" vs "1.18.0"). The trailing dot stops "1.1" from
+// counting as a prefix of "1.18".
+func versionCompatible(a, b string) bool {
+	return a == b || strings.HasPrefix(a+".", b+".") || strings.HasPrefix(b+".", a+".")
+}
+
+// distinctClaims returns the claims with distinct version strings, sorted so the
+// conflict report is reproducible; the first field/pattern seen for a version is kept.
+func distinctClaims(claims []VersionClaim) []VersionClaim {
+	seen := make(map[string]bool, len(claims))
+	out := make([]VersionClaim, 0, len(claims))
+	for _, c := range claims {
+		if !seen[c.Version] {
+			seen[c.Version] = true
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Version != out[j].Version {
+			return out[i].Version < out[j].Version
+		}
+		return fieldRank(out[i].Field) < fieldRank(out[j].Field)
+	})
+	return out
+}
+
+// sortEvidence orders evidence by field, pattern then matched string so a page's
+// detections are byte-identical across runs (map iteration would otherwise reorder
+// header/cookie/meta evidence).
+func sortEvidence(ev []MatchEvidence) {
+	sort.Slice(ev, func(i, j int) bool {
+		if ev[i].Field != ev[j].Field {
+			return ev[i].Field < ev[j].Field
+		}
+		if ev[i].Pattern != ev[j].Pattern {
+			return ev[i].Pattern < ev[j].Pattern
+		}
+		return ev[i].Matched < ev[j].Matched
+	})
 }
 
 // redact caps a matched string so a whole inlined script or minified blob does not
