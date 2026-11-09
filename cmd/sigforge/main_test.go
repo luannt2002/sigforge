@@ -1,17 +1,27 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/luannt2002/sigforge/framework/fetch"
 	"github.com/luannt2002/sigforge/modules/intel/cve"
+	"github.com/luannt2002/sigforge/modules/intel/enrich"
+	"github.com/luannt2002/sigforge/modules/intel/kev"
 	"github.com/luannt2002/sigforge/modules/intel/lifecycle"
 	"github.com/luannt2002/sigforge/modules/intel/merge"
+	"github.com/luannt2002/sigforge/modules/intel/osv"
+	"github.com/luannt2002/sigforge/modules/intel/schema"
 )
 
 // TestMergeChecksumVerifyRoundTrip proves the supply-chain integrity path end to end:
@@ -86,6 +96,140 @@ func TestVerifyRejectsBrokenRegexWithValidChecksum(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("verify error missing %q: %v", want, err)
 		}
+	}
+}
+
+// TestMergeManifestVerifyCompat proves merge writes a governance manifest, verify accepts
+// a compatible one (and says so), and a manifest whose engine MAJOR differs is refused as
+// INCOMPATIBLE even though its content hash is honest — the compat gate, not the hash, is
+// what rejects it. A missing manifest is a warning, not a clean OK.
+func TestMergeManifestVerifyCompat(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "db.json")
+	if err := cmdMerge([]string{"--out", db, "--manifest", filepath.Join(dir, "m.json")}); err != nil {
+		t.Fatal(err)
+	}
+	manPath := merge.ManifestPath(db)
+	manBytes, err := os.ReadFile(manPath)
+	if err != nil {
+		t.Fatalf("manifest not written: %v", err)
+	}
+	man, err := merge.ParseManifest(manBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbBytes, _ := os.ReadFile(db)
+	if man.ContentSHA256 != merge.Checksum(dbBytes) || man.EngineVersion != merge.EngineVersion {
+		t.Fatalf("manifest does not describe the DB: %+v", man)
+	}
+
+	out := captureStdout(t, func() {
+		if err := cmdVerify([]string{db}); err != nil {
+			t.Fatalf("verify of a compatible snapshot failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "manifest compatible") {
+		t.Errorf("verify output missing compat line:\n%s", out)
+	}
+
+	// Fake an incompatible engine major, keeping the honest content hash, so only the
+	// compat gate can reject it.
+	man.EngineVersion = "99.0.0"
+	bad, _ := man.JSON()
+	if err := os.WriteFile(manPath, bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = cmdVerify([]string{db})
+	if err == nil || !strings.Contains(err.Error(), "INCOMPATIBLE") {
+		t.Fatalf("incompatible manifest must fail verify with INCOMPATIBLE, got: %v", err)
+	}
+
+	// No manifest → warning, still checks integrity, never a clean OK.
+	if err := os.Remove(manPath); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdVerify([]string{db}); err != nil {
+			t.Fatalf("verify without manifest should warn, not fail: %v", err)
+		}
+	})
+	if !strings.Contains(out, "no manifest") {
+		t.Errorf("verify without manifest missing warning:\n%s", out)
+	}
+}
+
+// TestMergeArchivesPrevAndRollback proves an overwriting merge archives the prior snapshot
+// to <out>.prev*, that rollback restores exactly that snapshot (checksum + schema verified,
+// the newer entry gone), and that rollback refuses when there is no .prev and when the
+// .prev checksum does not match (no blind rollback).
+func TestMergeArchivesPrevAndRollback(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "db.json")
+
+	// v1: baseline only.
+	if err := cmdMerge([]string{"--out", db, "--manifest", filepath.Join(dir, "m.json")}); err != nil {
+		t.Fatal(err)
+	}
+	v1Bytes, _ := os.ReadFile(db)
+	v1, _ := schema.LoadFile(db)
+	const extraTech = "RollbackProbeTech"
+	if _, present := v1.Fingerprints[extraTech]; present {
+		t.Fatalf("baseline unexpectedly contains %q", extraTech)
+	}
+
+	// Rollback with no .prev must refuse.
+	if err := cmdRollback([]string{db}); err == nil || !strings.Contains(err.Error(), "nothing to roll back") {
+		t.Fatalf("rollback without .prev must refuse, got: %v", err)
+	}
+
+	// v2: add a source so the new snapshot differs from v1, triggering the .prev archive.
+	srcPath := filepath.Join(dir, "src.json")
+	src := `{"schema_version":"1.0.0","fingerprints":{"` + extraTech + `":{"html":["probe-marker"]}}}`
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdMerge([]string{"--out", db, "--source", "probe=" + srcPath, "--manifest", filepath.Join(dir, "m.json")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{db + ".prev", db + ".prev.sha256", db + ".prev.manifest.json"} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("archive %q missing after overwriting merge: %v", f, err)
+		}
+	}
+	v2, _ := schema.LoadFile(db)
+	if _, present := v2.Fingerprints[extraTech]; !present {
+		t.Fatalf("v2 should contain %q from the source", extraTech)
+	}
+
+	// Rollback restores v1 exactly.
+	out := captureStdout(t, func() {
+		if err := cmdRollback([]string{db}); err != nil {
+			t.Fatalf("rollback of a valid .prev failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "rolled back") {
+		t.Errorf("rollback output missing confirmation:\n%s", out)
+	}
+	gotBytes, _ := os.ReadFile(db)
+	if merge.Checksum(gotBytes) != merge.Checksum(v1Bytes) {
+		t.Fatal("rollback did not restore the v1 bytes")
+	}
+	restored, _ := schema.LoadFile(db)
+	if _, present := restored.Fingerprints[extraTech]; present {
+		t.Fatalf("rollback left the v2 entry %q in place", extraTech)
+	}
+
+	// Corrupt the .prev DB (its archived sidecar still records the true hash) → refuse.
+	if err := cmdMerge([]string{"--out", db, "--source", "probe=" + srcPath, "--manifest", filepath.Join(dir, "m.json")}); err != nil {
+		t.Fatal(err)
+	}
+	prevBytes, _ := os.ReadFile(db + ".prev")
+	prevBytes[len(prevBytes)/2] ^= 0x20
+	if err := os.WriteFile(db+".prev", prevBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdRollback([]string{db}); err == nil || !strings.Contains(err.Error(), "CORRUPT") {
+		t.Fatalf("corrupt .prev must refuse rollback, got: %v", err)
 	}
 }
 
@@ -182,5 +326,124 @@ func TestExplainEOL(t *testing.T) {
 	// only when a real status is known, and always credit the feed.
 	if got := explainEOL(lifecycle.Status{Product: "php", Version: "7.2.34", Cycle: "7.2", EOLDate: "2020-11-30", IsEOL: lifecycle.StateEOL}, "PHP"); !strings.Contains(got, "endoflife.date (license MIT)") {
 		t.Errorf("matched explain missing feed attribution: %q", got)
+	}
+}
+
+func TestRequestsNote(t *testing.T) {
+	if got := requestsNote(nil); got != "" {
+		t.Errorf("no requests must print nothing, got %q", got)
+	}
+	got := requestsNote(map[string]fetch.HostStats{"b.example": {Sent: 1, HeldOff: 3}, "a.example": {Sent: 4}})
+	want := "requests: a.example=4 sent, b.example=1 sent (3 held off after a 429)"
+	if got := requestsNote(map[string]fetch.HostStats{"c.example": {Cached: 2}}); got != "requests: c.example=0 sent (2 served from the local store)" {
+		t.Errorf("store hits must be shown, got %q", got)
+	}
+	if got != want {
+		t.Errorf("requestsNote = %q, want %q", got, want)
+	}
+}
+
+// sync refuses without a store, refuses with nothing configured, and reports a failed
+// source (non-zero) while still storing the sources that worked.
+func TestSync(t *testing.T) {
+	for _, s := range syncSources {
+		t.Setenv(s.env, "")
+	}
+	t.Setenv(EnvCacheDir, "")
+	if err := cmdSync(nil); err == nil || !strings.Contains(err.Error(), EnvCacheDir) {
+		t.Fatalf("sync without a store must say which variable to set, got %v", err)
+	}
+	store := t.TempDir()
+	t.Setenv(EnvCacheDir, store)
+	if err := cmdSync(nil); err == nil || !strings.Contains(err.Error(), "no catalog source") {
+		t.Fatalf("sync with nothing configured must say so, got %v", err)
+	}
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"vulnerabilities":[]}`)) }))
+	defer ok.Close()
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", http.StatusInternalServerError) }))
+	defer down.Close()
+	t.Setenv(kev.EnvKEVURL, ok.URL)
+	t.Setenv(lifecycle.EnvBundleURL, down.URL)
+	var err error
+	captureStdout(t, func() { err = cmdSync(nil) })
+	if err == nil || !strings.Contains(err.Error(), "1 of 2") {
+		t.Fatalf("one failed source of two must fail the sync and say so, got %v", err)
+	}
+	if entries, _ := os.ReadDir(store); len(entries) == 0 {
+		t.Fatal("the source that worked must still be in the store")
+	}
+}
+
+// Every identity the flags name — packages of any ecosystem, an SBOM's components, WP
+// plugins/themes, JS libraries — reaches the input once; a bad package is refused.
+func TestBuildEnrichInput(t *testing.T) {
+	sbom := filepath.Join(t.TempDir(), "bom.json")
+	writeFile(t, sbom, `{"bomFormat":"CycloneDX","components":[{"purl":"pkg:pypi/django@3.2.0"},{"purl":"pkg:npm/lodash@4.17.20"},{"name":"no-purl"}]}`)
+	inp, skipped, err := buildEnrichInput(
+		[]string{"pkg:npm/lodash@4.17.20", "maven:org.apache.logging.log4j:log4j-core@2.14.1"}, sbom,
+		[]string{"contact-form-7@5.0"}, []string{"astra@3.0"}, []string{"jquery@3.4.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPkgs := []enrich.PkgRef{
+		{Ecosystem: "npm", Name: "lodash", Version: "4.17.20"},
+		{Ecosystem: "maven", Name: "org.apache.logging.log4j:log4j-core", Version: "2.14.1"},
+		{Ecosystem: "pypi", Name: "django", Version: "3.2.0"},
+	}
+	if !reflect.DeepEqual(inp.Packages, wantPkgs) || skipped != 1 {
+		t.Fatalf("packages = %+v (skipped %d), want %+v (skipped 1)", inp.Packages, skipped, wantPkgs)
+	}
+	wantWP := []enrich.WPRef{{Slug: "contact-form-7", Version: "5.0", Kind: "plugin"}, {Slug: "astra", Version: "3.0", Kind: "theme"}}
+	if !reflect.DeepEqual(inp.WPSlugs, wantWP) || !reflect.DeepEqual(inp.JSLibs, []enrich.LibRef{{Name: "jquery", Version: "3.4.0"}}) {
+		t.Fatalf("wp = %+v, js = %+v", inp.WPSlugs, inp.JSLibs)
+	}
+	if _, _, err := buildEnrichInput([]string{"lodash@1.0"}, "", nil, nil, nil); err == nil {
+		t.Fatal("a package without an ecosystem must be refused")
+	}
+}
+
+// sync --osv keeps an ecosystem's dump in the store and always asks the source — even with a
+// MaxAge set — so an unchanged dump costs one 304, never a second download.
+func TestSyncOSVDump(t *testing.T) {
+	for _, s := range syncSources {
+		t.Setenv(s.env, "")
+	}
+	t.Setenv(EnvCacheDir, t.TempDir())
+	t.Setenv(EnvCacheMaxAge, "24h")
+	var zbuf bytes.Buffer
+	zw := zip.NewWriter(&zbuf)
+	f, _ := zw.Create("npm/GHSA-1.json")
+	_, _ = f.Write([]byte(`{"id":"GHSA-1","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.17.21"}]}]}]}`))
+	_ = zw.Close()
+	dump := zbuf.Bytes()
+	var hits, bodies atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path != "/npm/all.zip" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("If-None-Match") == `"d1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		bodies.Add(1)
+		w.Header().Set("ETag", `"d1"`)
+		_, _ = w.Write(dump)
+	}))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	for i := 0; i < 2; i++ {
+		var err error
+		out := captureStdout(t, func() { err = cmdSync([]string{"--osv", "npm"}) })
+		if err != nil || !strings.Contains(out, "OSV npm") || !strings.Contains(out, fmt.Sprintf("%d bytes", len(dump))) {
+			t.Fatalf("run %d: err=%v out=%q", i, err, out)
+		}
+	}
+	if hits.Load() != 2 || bodies.Load() != 1 {
+		t.Fatalf("want 2 requests and 1 download, got %d and %d", hits.Load(), bodies.Load())
+	}
+	if idx, _ := filepath.Glob(filepath.Join(os.Getenv(EnvCacheDir), "*.idx.gz")); len(idx) != 1 {
+		t.Fatalf("sync must leave the dump's index file for scans to read, found %v", idx)
 	}
 }
