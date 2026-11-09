@@ -1,5 +1,9 @@
 # Feature: Enrich (compose breadth + depth into one result)
 
+> This is the original `Enrich` → `[]EnrichedDetection` flavour (CVE + EOL per detection), unchanged.
+> The v0.4 pipeline that answers every source on the honest unified contract — packages, SBOMs, purls,
+> WordPress, JS libraries, OSV, KEV/EPSS — is `EnrichUnified`: see [`enrich-pipeline.md`](enrich-pipeline.md).
+
 Package `modules/intel/enrich`.
 
 ## 1. User story

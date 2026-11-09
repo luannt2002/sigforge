@@ -86,6 +86,18 @@ sigforge validate merged.json                  # check schema version + shape
 sigforge diff old.json new.json                # report techs a re-sync added/removed/changed
 sigforge eol PHP 7.2.34                         # version → end-of-life status (feed off by default)
 sigforge cve <cpe> <version>                    # CPE+version → known CVE leads (feed off by default)
+sigforge inspect Nginx                          # data-only facts for one tech (no match, no network)
+sigforge match < page.json                      # match a JSON Page from stdin → detections
+sigforge enrich [--json] < page.json            # match → full unified CVE/EOL/KEV intel (feeds off by default); JS libraries the page reveals → Retire.js
+sigforge enrich --sbom bom.json --package pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1 \
+               --wp-plugin contact-form-7@5.0 --jslib jquery@3.4.0 < /dev/null   # any ecosystem (purl / CycloneDX SBOM), WordPress, JS — OSV dump loaded once per ecosystem
+sigforge enrich --sbom image.cdx.json < /dev/null  # container SBOM (Trivy/Syft): OS packages by distro release (Debian, Ubuntu, Alpine, Rocky, Alma, …)
+sigforge verify merged.json                     # prove a merged DB against its sidecar + schema + manifest
+sigforge rollback merged.json                   # restore the one prior snapshot from <DB>.prev*
+sigforge refresh --out merged.json --fetch webappanalyzer  # re-sync; publish only if nothing regresses (else keep current, exit 1)
+sigforge coverage [--db merged.json] [--json]   # how much of a DB can reach a CVE lookup / extract a version; names detection-only entries
+sigforge sync                                   # refresh every configured catalog into SIGFORGE_CACHE_DIR; with SIGFORGE_CACHE_MAX_AGE later runs use it with no request (labelled snapshot)
+sigforge sync --osv Debian --osv npm            # also keep those OSV dumps in the store, reduced once into an index file each scan reads (Ubuntu: 807MB dump → 19MB index)
 ```
 
 `diff`, `eol` and `cve` are the depth layer: `diff` is pure; `eol` and `cve` query
@@ -115,6 +127,57 @@ against. Fetched third-party data is never vendored into this repo; the merged D
 and the manifest are operator-generated and gitignored. See `docs/source.md` for the
 per-format mapping limits (`nuclei`/`whatweb` are best-effort).
 
+## Unified intelligence (v0.4)
+
+The depth layers used to each speak their own result type. v0.4 adds **one result
+shape** every intelligence source emits — `modules/intel/unified.Result` — so a
+consumer (ASIE, a report, the `enrich` CLI) handles ONE contract instead of six
+per-provider types. It is fully **additive**: each provider keeps its own typed API;
+a thin `ToUnified` adapter maps that output into a `unified.Result`.
+
+**Honesty is the contract.** `unified.State` has **seven** values that a consumer
+must never collapse:
+
+| state | meaning |
+|---|---|
+| `not_checked` | the source was off / not invoked (no env URL), or nothing matched (the reason says which: part of the data, or `NoteNoClearance` for the whole) — **not** "clean" |
+| `source_unavailable` | the source errored or was unreachable — **not** "clean" |
+| `unknown_product` | the source does not recognise this identity |
+| `unknown_version` | the version could not be determined or compared |
+| `potentially_affected` | an advisory exists but the version can't be pinned (a LEAD) |
+| `affected_by_advisory` | the version falls in an advisory range (a LEAD, never proof) |
+| `not_affected_by_advisory` | the version resolved, no advisory matched — clean **for this source only**. **v0.4 issues none**: a real source's data can read as whole and still be wrong (cut RPM epochs, a release no longer tracked), so "nothing matched" is `not_checked` with the reason |
+
+`unknown*` / `source_unavailable` / `not_checked` are **never** "safe". An
+`affected_by_advisory` result is an advisory-range match on a (spoofable) version — a
+**lead** ASIE cross-verifies against a real asset, not a proven exploit. A
+`Result.Freshness` (`live` / `snapshot` / `stale`) travels with every result so a
+stale snapshot is never read as live truth, and each `Lead` carries `Score` (CVSS) and
+`EPSS` as separate `*float64` fields that stay `nil` when the feed gave no metric (a
+missing score is never the real `0.0`, and the two scales never share a field). See
+`docs/unified-contract.md`.
+
+### The enrich pipeline
+
+`sigforge enrich` (and `enrich.EnrichUnified` / `EnrichUnifiedExt`) runs the full
+breadth→depth pipeline over a page: `matcher.Match` → identity-verified CPE →
+CVE / EOL / KEV-EPSS lookups → `[]unified.Result`. `EnrichUnifiedExt` also dispatches
+operator-supplied identities that do not come from the page — ecosystem packages to
+OSV, WordPress slugs to wpcve, JS libraries to jslib. Every feed is **injected and
+operator-gated**: with no env URL set, every feed is off and the output is honest
+`not_checked`, with no network touched — an embedded sample may still report a hit, never
+a "not affected". See `docs/enrich-pipeline.md`.
+
+### Snapshot governance
+
+A merged DB is a point-in-time snapshot. `merge` now writes a **governance manifest**
+(`<DB>.manifest.json`) beside the SHA-256 sidecar: which build produced the snapshot,
+over which sources (with license posture), when, and the content hash it must still
+match. `verify` refuses a DB whose manifest records an incompatible schema/engine
+**major** version or whose hash does not describe the bytes on disk. `merge` also
+archives the prior snapshot to `<DB>.prev*`, so `rollback` restores it in one step
+(a single generation — not a versioned history). See `docs/snapshot-governance.md`.
+
 ## License policy
 
 - sigforge's **own code** is **Apache-2.0** (see `LICENSE`).
@@ -133,7 +196,7 @@ per-format mapping limits (`nuclei`/`whatweb` are best-effort).
 framework/   infrastructure that knows nothing about fingerprints
   define/      shared constants (service name)
   fsio/        file read + atomic write
-  fetch/       bounded, honest HTTP GET client (no hardcoded URL)
+  fetch/       the one outbound client (no hardcoded URL): store with ETag, max age, stale-if-error, 429 hold-off
 modules/     the domain
   intel/
     schema/     the versioned on-disk contract + loader (Parse/Validate/LoadFile)
@@ -142,9 +205,20 @@ modules/     the domain
     baseline/   the embedded curated-facts fingerprint set (58 public-fact techs)
     source/     operator-gated fetch+normalize adapters + sync manifest
     diff/       set-difference between two DBs (what a re-sync moved)
+    refresh/    regression gate before a re-synced DB replaces the live one
+    coverage/   counts what a DB or a run could not answer instead of hiding it
     lifecycle/  version → end-of-life LEAD via an operator-supplied endoflife feed
     cve/        CPE+version → known-CVE LEADs via an operator-supplied NVD-shaped feed
-    enrich/     compose breadth (matcher) + depth (cve/lifecycle) into one result
+    osv/        ecosystem+package → advisory LEADs via an operator-supplied OSV dump
+    jslib/      JS library+version → Retire.js LEADs (embedded snapshot or live feed)
+    wpcve/      WordPress plugin/theme slug+version → advisory LEADs
+    kev/        CVE → exploitation signal (CISA KEV membership + FIRST.org EPSS)
+    takeoverfp/ dangling-subdomain fingerprints (operator data upgrading an embedded CC-BY-4.0 snapshot)
+    identity/   tech → dictionary-VERIFIED CPE (NVD CPE dictionary); candidate ≠ verified
+    unified/    the one result shape every source emits (7 honest states + freshness)
+    versioncmp/ compare two versions under an ecosystem's rules (PEP 440, SemVer, dpkg, rpm, apk, Maven, Composer, …)
+    enrich/     compose breadth (matcher) + depth (all sources) into []unified.Result
+    feedset/    one run's sources from the SIGFORGE_* environment — shared by the CLI and importing scanners
     accuracy/   precision/recall + oracle + adversarial harness (correctness proof)
 cmd/sigforge/  the CLI
 docs/          architecture + per-feature specs

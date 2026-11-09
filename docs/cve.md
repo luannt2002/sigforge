@@ -34,7 +34,14 @@ a detection like "nginx 1.18.0 (cpe f5:nginx)" becomes an actionable risk lead
   with only the version component filled in — never a guessed `vendor:product`.
 - CVSS and Severity are taken verbatim from the feed, never fabricated.
 - `Parse(raw)` is PURE (no network) and fixture-tested against a recorded NVD CVE API
-  2.0 sample; the feed URL is operator-supplied, off by default.
+  2.0 sample; the feed URL is operator-supplied, off by default. A body without
+  `totalResults` is not an NVD CVE API answer (`{}`, `null`, an error object): it is a
+  failed lookup, never an empty one. When `totalResults` exceeds the CVEs returned,
+  the result says "partial: N of M" (one page of a paged feed).
+- `ToUnified` maps a result onto the unified contract: CVEs → `affected_by_advisory`
+  leads (`potentially_affected` without a version); **no CVE → `not_checked` with
+  the reason** — a paged per-query API cannot prove a miss complete, so it is never a
+  clearance (see `docs/unified-contract.md`).
 - `sigforge cve CPE VERSION` prints the leads (or the honest not-checked / no-known
   line); unset env errors with a hint.
 
@@ -43,9 +50,9 @@ a detection like "nginx 1.18.0 (cpe f5:nginx)" becomes an actionable risk lead
 - `modules/intel/cve` implemented and wired into `sigforge cve`.
 - Unit tests use fixtures only (no internet); adapter wiring is tested over an
   `httptest` loopback, matching how the repo's fetch adapters are tested.
-- No feed data is persisted — `cve` prints to stdout and writes nothing — so there is
-  no third-party CVE data to commit (and `.gitignore` already excludes `.cache/` and
-  `*.merged.json`).
+- No feed data is committed: `cve` prints to stdout; with `SIGFORGE_CACHE_DIR` set each
+  query's response is kept in the operator's local store (gitignored, never pruned —
+  a known limit), and `.gitignore` excludes `.cache/` and `*.merged.json`.
 - `go test ./...` green; consumer API (`baseline.DB`, `matcher.Match`,
   `schema.LoadFile`, `merge.Merge`) unchanged — this feature is purely additive.
 
@@ -69,7 +76,8 @@ The detected version is spoofable and a CPE tracks only the vendor:product the s
 attested, so the verdict is a LEAD tied to a claim, never a fact. Absence is never
 upgraded to "safe": `StateUnknown` (zero value) means *not checked*; `StateNoKnownCVE`
 means *the feed listed nothing, which is still not a guarantee* — CPE mapping, NVD
-coverage and the version claim are all fallible. The CLI spells this out on every
+coverage and the version claim are all fallible — and on the unified contract it is
+`not_checked`, never `not_affected_by_advisory`. The CLI spells this out on every
 line it prints.
 
 ### 5.2 Why NVD-by-CPE, not OSV

@@ -6,7 +6,9 @@ Command `cmd/sigforge`.
 
 As an operator, I want a small command to emit the baseline, merge it with my
 normalized sources into one DB, and validate a DB file — so I can regenerate my
-scanner's database from cron without any server or infrastructure.
+scanner's database from cron without any server or infrastructure — and to look up
+the intel behind a detection (CVE, end-of-life, OSV, KEV) the same way a scanner
+importing sigforge does.
 
 ## 2. Pre-condition
 
@@ -34,6 +36,24 @@ scanner's database from cron without any server or infrastructure.
   `--fetch`. Fetched third-party data is operator-generated, carries its source's
   license, and is never vendored into this repo (the merged DB and manifest are
   gitignored).
+
+### 3.1 The other subcommands
+
+`sigforge --help` prints the full usage; in short:
+
+| command | what it does |
+|---|---|
+| `refresh --out DB …` | `merge` behind a regression gate: re-syncs only if no entry is lost beyond `--allow-removed N`, else keeps the current DB and exits non-zero |
+| `sync [--osv ECOSYSTEM …]` | refreshes every configured catalog (KEV, endoflife bundle, CPE dictionary, Retire.js) and the named OSV dumps into `SIGFORGE_CACHE_DIR`, cutting each dump's index once; with `SIGFORGE_CACHE_MAX_AGE` later runs read the store with no request |
+| `verify FILE` / `rollback FILE` | checks a DB against its `.sha256` sidecar, schema and manifest / restores the prior valid snapshot |
+| `diff OLD NEW` | what a re-sync added, removed or changed |
+| `eol [--explain] TECH VERSION` · `cve [--explain] CPE VERSION` | one end-of-life / CVE lookup, with the reasoning on `--explain` |
+| `inspect [--db FILE] TECH` · `match [--db FILE] [--explain]` | one fingerprint entry / match a JSON page from stdin |
+| `enrich [--db FILE] [--json] [--package REF …] [--sbom FILE] [--wp-plugin slug@ver …] [--wp-theme slug@ver …] [--jslib name@ver …]` | match a page (stdin) and look up every detection and given identity (purl or `ecosystem:name@version`, CycloneDX SBOM, WordPress plugin/theme, JS library) → unified results ([`enrich-pipeline.md`](enrich-pipeline.md), [`unified-contract.md`](unified-contract.md)) |
+| `coverage [--db FILE] [--json]` | how much of a DB can reach a CVE lookup or extract a version |
+
+Every intel source is off until its `SIGFORGE_SOURCE_*_URL` is set (see
+`.env.example`); an off source answers `not_checked`, never "clean".
 
 ## 4. Definition of Done
 

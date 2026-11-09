@@ -8,18 +8,34 @@ domain, and a `cmd/` entry point.
 ## Layers
 
 ```
-cmd/sigforge ─────────────┐  the CLI: baseline | merge | validate
-                          │
-modules/intel/            │  the domain (fingerprint knowledge)
+cmd/sigforge ─────────────┐  the CLI (see cli.md): baseline | merge | refresh | sync | validate | verify |
+                          │  rollback | diff | eol | cve | inspect | match | enrich | coverage
+modules/intel/            │  the domain
+ breadth — which technologies a page runs
   baseline  ──────────────┤    embedded curated-facts set  (go:embed data/baseline.json)
   schema    ──────────────┤    the versioned on-disk contract + loader
   matcher   ──────────────┤    apply a set to a page → detections
-  merge     ──────────────┘    baseline + sources → one set, precedence + provenance
-                          │
+  source    ──────────────┤    operator-gated fetch adapters (webappanalyzer / nuclei / whatweb)
+  merge, refresh, diff ───┤    baseline + sources → one set; regression-gated re-sync; what changed
+  coverage  ──────────────┤    how much of a set can reach a CVE lookup / capture a version
+ depth — what is known about a detection or a package
+  unified   ──────────────┤    the one result shape: 7 honest states; unified.Clean is the only door
+                          │    to "not affected" (see unified-contract.md)
+  identity  ──────────────┤    tech → dictionary-verified CPE
+  cve, lifecycle ─────────┤    CVE leads by CPE · end-of-life by product or CPE
+  osv, versioncmp ────────┤    ecosystem and OS-distro advisories from stored dumps · per-ecosystem ordering
+  wpcve, jslib ───────────┤    WordPress plugin/theme · client-side JS library advisories
+  kev, takeoverfp ────────┤    KEV/EPSS on CVE leads · dangling-subdomain fingerprints
+  enrich, feedset ────────┘    detections + packages/SBOM/purl → unified results · the env wiring the
+                          │    CLI and an importing scanner share
 framework/                │  infrastructure, knows nothing about fingerprints
   define                  │    shared constants (service name)
   fsio                    │    file read + atomic write
+  fetch                   │    the one outbound client: store revalidated with ETag, max age,
+                          │    stale-if-error, 429 hold-off, streamed dump downloads
 ```
+
+Every package and its exported surface: [`CODE-MAP.md`](CODE-MAP.md).
 
 **Dependency rule:** `framework/` never imports `modules/`. The domain may use the
 framework; the framework may not use the domain. The CLI wires them together.
@@ -43,6 +59,23 @@ framework; the framework may not use the domain. The CLI wires them together.
                                               matcher.Match(db, page) ──▶ detections (leads)
 ```
 
+Depth (sources off until the operator sets their `SIGFORGE_SOURCE_*_URL`; with
+`SIGFORGE_CACHE_DIR` each catalog and OSV dump is kept in a local store and read with
+no request while younger than `SIGFORGE_CACHE_MAX_AGE` — see `snapshot-governance.md`):
+
+```
+  detections (tech, version, CPE) ┐
+  packages · SBOM · purl ─────────┼─▶ enrich ─▶ cve · lifecycle · osv · wpcve · jslib
+  WordPress plugins · JS libs ────┘                         │
+                                                            ▼
+                     []unified.Result (7 states, freshness, leads) ◀── kev/EPSS on CVE leads
+                                                            │
+                     consumer (ASIE): affected → lead · unpinned → info lead ·
+                     unanswered → named coverage gap · never "clean" on absence
+```
+
+The pipeline in detail: [`enrich-pipeline.md`](enrich-pipeline.md).
+
 ## Why these boundaries
 
 - **schema is the contract.** It is versioned (`schema_version`) so a consumer can
@@ -61,4 +94,5 @@ framework; the framework may not use the domain. The CLI wires them together.
   vendored here. `framework/fetch` is the bounded, honest HTTP client they share.
 
 See the per-feature specs: `matcher.md`, `merge.md`, `baseline.md`, `cli.md`,
-`source.md`.
+`source.md`, `cve.md`, `lifecycle.md`, `enrich.md`, `diff.md`, `accuracy.md`, and the
+contracts `unified-contract.md`, `enrich-pipeline.md`, `snapshot-governance.md`.
