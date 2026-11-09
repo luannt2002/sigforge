@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
 
 // Real OSV advisory shapes (trimmed to the fields the reducer reads).
@@ -55,7 +57,61 @@ const (
 	  "affected":[{"package":{"name":"tailpkg","ecosystem":"npm"},
 	    "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"1.0.0"},{"last_affected":"1.5.0"}]}]}]
 	}`
+	// Multi-range (OR): one affected package with two disjoint ranges[] — a version is affected if it
+	// falls in EITHER. OSV schema allows several ranges per affected entry (ossf.github.io/osv-schema).
+	advMultiRange = `{
+	  "id":"GHSA-multirange-1","aliases":["CVE-2024-3001"],
+	  "database_specific":{"severity":"HIGH"},
+	  "affected":[{"package":{"name":"multir","ecosystem":"npm"},
+	    "ranges":[
+	      {"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"1.2.0"}]},
+	      {"type":"SEMVER","events":[{"introduced":"2.0.0"},{"fixed":"2.1.0"}]}]}]
+	}`
+	// Two introduced/fixed pairs in ONE range: affected in [0,1.2.0) and [1.5.0,1.6.0), clean in the
+	// gap [1.2.0,1.5.0). OSV events are an ordered timeline that can reopen a range.
+	advTwoPairs = `{
+	  "id":"GHSA-twopairs-1","aliases":["CVE-2024-3002"],
+	  "database_specific":{"severity":"MODERATE"},
+	  "affected":[{"package":{"name":"twopair","ecosystem":"npm"},
+	    "ranges":[{"type":"SEMVER","events":[
+	      {"introduced":"0"},{"fixed":"1.2.0"},
+	      {"introduced":"1.5.0"},{"fixed":"1.6.0"}]}]}]
+	}`
+	// GIT-only range: bounds are commit hashes, not versions. The package must stay indexed and the
+	// lookup must be honestly UNKNOWN (never a silent "no vuln"), since the version cannot be positioned.
+	advGitOnly = `{
+	  "id":"OSV-2021-GIT1","aliases":["CVE-2021-9999"],
+	  "database_specific":{"severity":"HIGH"},
+	  "affected":[{"package":{"name":"gitpkg","ecosystem":"npm"},
+	    "ranges":[{"type":"GIT","events":[
+	      {"introduced":"0"},{"fixed":"6879efc2c1596d11a6a6ce296d1cf3b2f5b4f6ad"}]}]}]
+	}`
+	// Alias dedup: the SAME flaw appears under a GHSA id and a GO id, cross-referencing each other via
+	// aliases (real cross-source overlap in the Go dump). It must fold to ONE vuln, not two.
+	advDupGhsa = `{
+	  "id":"GHSA-dup-aaaa-bbbb-cccc","aliases":["CVE-2024-1111","GO-2024-2222"],
+	  "database_specific":{"severity":"HIGH"},
+	  "affected":[{"package":{"name":"example.com/pkg","ecosystem":"Go"},
+	    "ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"2.0.0"}]}]}]
+	}`
+	advDupGo = `{
+	  "id":"GO-2024-2222","aliases":["CVE-2024-1111","GHSA-dup-aaaa-bbbb-cccc"],
+	  "database_specific":{"severity":"HIGH"},
+	  "affected":[{"package":{"name":"example.com/pkg","ecosystem":"Go"},
+	    "ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"2.0.0"}]}]}]
+	}`
 )
+
+// buildIdx packs name→json entries into a zip and builds an index for eco (no disk, no network).
+func buildIdx(t *testing.T, eco string, entries map[string]string) *Index {
+	t.Helper()
+	r, size := makeZip(t, entries)
+	idx, err := BuildIndex(context.Background(), eco, r, size)
+	if err != nil {
+		t.Fatalf("BuildIndex(%s): %v", eco, err)
+	}
+	return idx
+}
 
 // makeZip packs name→json-content into a zip, returning a ReaderAt + its size (no disk, no network).
 func makeZip(t *testing.T, entries map[string]string) (*bytes.Reader, int64) {
@@ -292,7 +348,7 @@ func TestReduceRecordCapsExactVersions(t *testing.T) {
 	for i := range versions {
 		versions[i] = fmt.Sprintf("1.0.%d", i)
 	}
-	raw := rawRecord{ID: "GHSA-many", Affected: []rawAffected{{Package: rawPackage{Name: "big", Ecosystem: "npm"}, Versions: versions}}}
+	raw := rawRecord{ID: "GHSA-many", Affected: []*rawAffected{{Package: rawPackage{Name: "big", Ecosystem: "npm"}, Versions: versions}}}
 	recs := reduceRecord(&raw, "npm")
 	if len(recs) != 1 || len(recs[0].versions) != maxExactVersions {
 		t.Fatalf("exact-version list must cap at %d, got %+v", maxExactVersions, recs)
@@ -301,7 +357,7 @@ func TestReduceRecordCapsExactVersions(t *testing.T) {
 
 // reduceZip reports errEmptyDump for a zero-size dump rather than building a silent empty index.
 func TestReduceZipEmptyDump(t *testing.T) {
-	err := reduceZip(context.Background(), bytes.NewReader(nil), 0, "npm", func(*record) error { return nil })
+	_, err := reduceZip(context.Background(), bytes.NewReader(nil), 0, "npm", func(*record) error { return nil })
 	if err != errEmptyDump {
 		t.Fatalf("a zero-size dump must return errEmptyDump, got %v", err)
 	}
@@ -367,5 +423,99 @@ func mustUnmarshal(t *testing.T, s string, v *rawRecord) {
 	t.Helper()
 	if err := json.Unmarshal([]byte(s), v); err != nil {
 		t.Fatalf("unmarshal: %v", err)
+	}
+}
+
+// ---- affected-range evaluation (OSV schema correctness) ----
+
+// Multi-range OR: a version is affected if it falls in ANY of the affected entry's ranges[].
+func TestLookupMultiRangeOR(t *testing.T) {
+	idx := buildNpm(t, "GHSA-multirange-1", advMultiRange)
+	for _, v := range []string{"0.5.0", "2.0.5"} {
+		if res := idx.Lookup("multir", v); res.Status != StatusVulnerable {
+			t.Fatalf("%s falls in a range and must be vulnerable, got %s", v, res.Status)
+		}
+	}
+	// 1.5.0 is past the first range's fix and before the second range opens → clean.
+	if res := idx.Lookup("multir", "1.5.0"); res.Status != StatusNoKnownVuln {
+		t.Fatalf("1.5.0 is between the two ranges and must be no-known-vuln, got %s", res.Status)
+	}
+}
+
+// Two introduced/fixed pairs in ONE range: affected in each pair's window, clean in the gap.
+func TestLookupTwoIntroducedFixedPairs(t *testing.T) {
+	idx := buildNpm(t, "GHSA-twopairs-1", advTwoPairs)
+	affected := []string{"1.0.0", "1.5.5"}
+	clean := []string{"1.3.0", "1.6.0"} // the gap, and the second fix (half-open)
+	for _, v := range affected {
+		if res := idx.Lookup("twopair", v); res.Status != StatusVulnerable {
+			t.Fatalf("%s is inside a pair and must be vulnerable, got %s", v, res.Status)
+		}
+	}
+	for _, v := range clean {
+		if res := idx.Lookup("twopair", v); res.Status != StatusNoKnownVuln {
+			t.Fatalf("%s is outside every pair and must be no-known-vuln, got %s", v, res.Status)
+		}
+	}
+}
+
+// GIT range: the version cannot be positioned by a commit hash, so the lookup is honestly UNKNOWN
+// (package known), never a silent "no vuln". The package must still be indexed.
+func TestLookupGitRangeUnknown(t *testing.T) {
+	idx := buildNpm(t, "OSV-2021-GIT1", advGitOnly)
+	if idx.Packages() != 1 {
+		t.Fatalf("a GIT-only advisory must keep the package indexed, got %d packages", idx.Packages())
+	}
+	res := idx.Lookup("gitpkg", "1.0.0")
+	if res.Status != StatusUnknown || !res.PackageKnown {
+		t.Fatalf("a GIT-only range must be unknown+package-known (potentially affected), got %s known=%v", res.Status, res.PackageKnown)
+	}
+}
+
+// Alias dedup: the same flaw under a GHSA id and a GO id (cross-aliased) folds to ONE vuln.
+func TestLookupAliasDedup(t *testing.T) {
+	idx := buildIdx(t, "Go", map[string]string{
+		"Go/GHSA-dup-aaaa-bbbb-cccc.json": advDupGhsa,
+		"Go/GO-2024-2222.json":            advDupGo,
+	})
+	res := idx.Lookup("example.com/pkg", "1.0.0")
+	if res.Status != StatusVulnerable {
+		t.Fatalf("1.0.0 is below the fix and must be vulnerable, got %s", res.Status)
+	}
+	if len(res.Vulns) != 1 {
+		t.Fatalf("a cross-aliased duplicate must dedup to 1 vuln, got %d: %+v", len(res.Vulns), res.Vulns)
+	}
+}
+
+// One run's lookups load each ecosystem's dump once — a dump is the whole ecosystem — and
+// every case the source cannot answer stays unanswered: an unsupported ecosystem and an
+// off source are not_checked, never clean.
+func TestLookuperLoadsEachEcosystemOnce(t *testing.T) {
+	r, _ := makeZip(t, map[string]string{"npm/GHSA-35jh-r3h4-6jhm.json": advLodash})
+	body := mustBytes(r)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	look := New(srv.URL, fetch.New()).Lookuper()
+	vuln := look(ctx, "npm", "lodash", "4.17.20")
+	other := look(ctx, "npm", "left-pad", "1.3.0")
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("two npm packages must load the npm dump once, loaded %d times", n)
+	}
+	if vuln.State != unified.StateAffectedByAdvisory || len(vuln.Leads) == 0 {
+		t.Fatalf("lodash 4.17.20 = %+v, want affected with leads", vuln)
+	}
+	if other.State == unified.StateNotAffectedByAdvisory || other.State.Applicable() {
+		t.Fatalf("a package absent from the dump must stay unknown, got %s", other.State)
+	}
+	if u := look(ctx, "cobol", "x", "1"); u.State != unified.StateNotChecked || u.Err == "" {
+		t.Fatalf("an unsupported ecosystem must be not_checked with a reason, got %+v", u)
+	}
+	if u := New("", fetch.New()).Lookuper()(ctx, "npm", "lodash", "4.17.20"); u.State != unified.StateNotChecked {
+		t.Fatalf("an off source must be not_checked, got %+v", u)
 	}
 }

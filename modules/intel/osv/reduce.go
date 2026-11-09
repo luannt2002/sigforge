@@ -14,23 +14,40 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
+	"time"
+
+	"github.com/luannt2002/sigforge/modules/intel/versioncmp"
 )
 
 const (
 	// maxEntryBytes caps the decompressed size of one JSON entry (blocks a zip bomb). The largest
 	// real OSV record is ~1MB (a long version list); 8MB is generous yet still blocks a forged 4GB file.
 	maxEntryBytes = 8 << 20
-	// maxExactVersions caps the concrete-version list kept for an advisory that has NO range (npm
-	// advisories often enumerate hundreds), so the in-RAM index does not balloon.
+	// maxExactVersions caps the concrete-version list kept for an advisory with no range a version
+	// can be placed in — none, or commit (GIT) ranges only — so the in-RAM index does not balloon
+	// (npm advisories often enumerate hundreds).
 	maxExactVersions = 96
+)
+
+// OSV range types (schema). ECOSYSTEM/default compares under the package ecosystem's rules;
+// SEMVER compares under semver regardless of ecosystem; GIT bounds are commit hashes, so a GIT
+// range cannot position a version string and is kept only as an honest "indeterminate" marker.
+const (
+	rangeSemver = "SEMVER"
+	rangeGit    = "GIT"
+	rangeBroken = "UNREADABLE" // a range with no event that bounds a version: never "not in range"
 )
 
 // affectedRange is one affected range distilled from the OSV event sequence.
 // introduced empty/"0" means from the start; fixed is HALF-OPEN (version < fixed is affected);
-// lastAffected is CLOSED (version <= lastAffected is affected).
+// lastAffected is CLOSED (version <= lastAffected is affected). typ is the OSV range type, which
+// selects the comparison scheme; a GIT typ carries no comparable bounds.
 type affectedRange struct {
+	typ          string
 	introduced   string
 	fixed        string
 	lastAffected string
@@ -44,7 +61,11 @@ type record struct {
 	cve       string // CVE alias if any
 	severity  string // upstream text label mapped to low|medium|high|critical, or "" if unscored
 	ranges    []affectedRange
-	versions  []string // concrete versions, only when the advisory carries no range
+	versions  []string // listed versions no range places (OSV: a listed version is affected)
+	truncated bool     // versions holds only the first maxExactVersions of the advisory's list
+	// vulnKeys is the normalized dedup set (own id + every alias) so one logical vuln reported
+	// under several ids (OSV id + CVE/GHSA aliases) is folded to one lookup result, not counted twice.
+	vulnKeys []string
 }
 
 // rawRecord is the subset of the OSV schema actually read; every other field is dropped at decode.
@@ -53,7 +74,7 @@ type rawRecord struct {
 	Aliases   []string        `json:"aliases"`
 	Withdrawn json.RawMessage `json:"withdrawn"`
 	DBSpec    rawDBSpecific   `json:"database_specific"`
-	Affected  []rawAffected   `json:"affected"`
+	Affected  []*rawAffected  `json:"affected"`
 }
 
 type rawDBSpecific struct {
@@ -92,18 +113,25 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 	if isWithdrawn(raw.Withdrawn) {
 		return nil // reporting a withdrawn advisory would be a pure false positive
 	}
+	// vulnKeys folds every id this advisory is known by (own id + aliases) so a cross-source
+	// duplicate (same flaw as GHSA-… and GO-…/PYSEC-…) is deduped by alias set, not double-counted.
+	vulnKeys := []string{strings.ToUpper(strings.TrimSpace(raw.ID))}
 	cve := ""
 	for _, a := range raw.Aliases {
-		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(a)), "CVE-") {
-			cve = strings.ToUpper(strings.TrimSpace(a))
-			break
+		a = strings.ToUpper(strings.TrimSpace(a))
+		if a == "" {
+			continue
+		}
+		vulnKeys = append(vulnKeys, a)
+		if cve == "" && strings.HasPrefix(a, "CVE-") {
+			cve = a
 		}
 	}
 	base := mapSeverity(raw.DBSpec.Severity)
 
 	out := make([]record, 0, len(raw.Affected))
 	for i := range raw.Affected {
-		af := &raw.Affected[i]
+		af := raw.Affected[i]
 		name := strings.TrimSpace(af.Package.Name)
 		if name == "" {
 			continue
@@ -123,26 +151,25 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 		}
 		r := record{
 			pkg:       name,
-			ecosystem: trimEcosystem(recEco),
+			ecosystem: recEco, // keeps a distro release suffix ("Debian:12") for LookupIn
 			id:        strings.TrimSpace(raw.ID),
 			cve:       cve,
 			severity:  sev,
 			ranges:    rangesFrom(af.Ranges),
+			vulnKeys:  vulnKeys,
 		}
-		if len(r.ranges) == 0 {
-			// No range: the only thing left to match on is the concrete version list, capped.
-			for _, v := range af.Versions {
-				if v = strings.TrimSpace(v); v == "" {
-					continue
-				}
-				r.versions = append(r.versions, v)
-				if len(r.versions) >= maxExactVersions {
-					break
-				}
+		// OSV counts a version affected when a range places it OR the versions list names it
+		// (MAL- records list versions their range does not reach): keep the listed versions
+		// no range places — all of them when only commit ranges exist — capped.
+		for _, v := range af.Versions {
+			if v = strings.TrimSpace(v); v == "" || placedByRange(v, &r) {
+				continue
 			}
-			if len(r.versions) == 0 {
-				continue // no range, no versions: nothing to match, keeping it only wastes RAM
+			if len(r.versions) == maxExactVersions {
+				r.truncated = true // a version past the cut is not known to be outside the list
+				break
 			}
+			r.versions = append(r.versions, v)
 		}
 		out = append(out, r)
 	}
@@ -152,15 +179,20 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 	return out
 }
 
-// rangesFrom collapses the OSV event sequence into introduced→fixed/lastAffected pairs.
-// GIT ranges are dropped: they are commit hashes, not comparable to a lockfile version.
+// rangesFrom collapses each OSV range's event sequence into introduced→fixed/lastAffected pairs,
+// stamping the range type so the matcher picks the right comparison scheme. A GIT range has commit
+// hashes, not versions: it is kept as a single indeterminate marker (so the package stays indexed
+// and the lookup is honestly UNKNOWN) rather than silently dropped into a false "no vuln".
 func rangesFrom(rs []rawRange) []affectedRange {
 	var out []affectedRange
 	for _, r := range rs {
-		if strings.EqualFold(strings.TrimSpace(r.Type), "GIT") {
+		typ := strings.ToUpper(strings.TrimSpace(r.Type))
+		if typ == rangeGit {
+			out = append(out, affectedRange{typ: rangeGit})
 			continue
 		}
-		cur := affectedRange{}
+		n := len(out)
+		cur := affectedRange{typ: typ}
 		open := false
 		for _, ev := range r.Events {
 			switch {
@@ -168,26 +200,61 @@ func rangesFrom(rs []rawRange) []affectedRange {
 				if open {
 					out = append(out, cur) // previous range had no fixed: open to infinity
 				}
-				cur = affectedRange{introduced: strings.TrimSpace(ev.Introduced)}
+				cur = affectedRange{typ: typ, introduced: strings.TrimSpace(ev.Introduced)}
 				open = true
 			case strings.TrimSpace(ev.Fixed) != "":
 				cur.fixed = strings.TrimSpace(ev.Fixed)
 				out = append(out, cur)
-				cur, open = affectedRange{}, false
+				cur, open = affectedRange{typ: typ}, false
 			case strings.TrimSpace(ev.LastAffected) != "":
 				cur.lastAffected = strings.TrimSpace(ev.LastAffected)
 				out = append(out, cur)
-				cur, open = affectedRange{}, false
+				cur, open = affectedRange{typ: typ}, false
 			}
 		}
 		if open {
 			out = append(out, cur)
 		}
+		if len(out) == n {
+			out = append(out, affectedRange{typ: rangeBroken})
+		}
 	}
 	return out
 }
 
-// isWithdrawn reports whether the advisory carries a withdrawal timestamp (null/"" is still in effect).
+// placedByRange reports whether one of the record's ranges determinately holds version.
+func placedByRange(version string, r *record) bool {
+	for _, g := range r.ranges {
+		if in, ok := versionInRange(version, g, r.ecosystem); in && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// onlyCommitRanges reports whether no range can place a version (none, or GIT only).
+func onlyCommitRanges(rs []affectedRange) bool {
+	for _, r := range rs {
+		if r.typ != rangeGit {
+			return false
+		}
+	}
+	return true
+}
+
+// repositoryLevel reports an affected entry made of commit ranges only (its versions list,
+// if any, holds the repository's tags), which no package lookup reads.
+func repositoryLevel(af *rawAffected) bool {
+	for _, g := range af.Ranges {
+		if !strings.EqualFold(strings.TrimSpace(g.Type), rangeGit) {
+			return false
+		}
+	}
+	return len(af.Ranges) > 0
+}
+
+// isWithdrawn reports whether the advisory carries a withdrawal timestamp (null is still in effect;
+// readZipEntry has already refused any other non-timestamp value).
 func isWithdrawn(raw json.RawMessage) bool {
 	s := strings.TrimSpace(string(raw))
 	return s != "" && s != "null" && s != `""`
@@ -212,22 +279,23 @@ func mapSeverity(s string) string {
 // reduceZip streams the zip dump, calling emit for each reduced row. r/size is an io.ReaderAt so
 // archive/zip can read the central directory without loading the whole dump into RAM (the caller
 // passes the downloaded temp file, or a bytes.Reader in tests). emit returning an error stops early.
-func reduceZip(ctx context.Context, r io.ReaderAt, size int64, eco string, emit func(*record) error) error {
+// skipped counts the JSON entries that could not be read (corrupt, or past maxEntryBytes).
+func reduceZip(ctx context.Context, r io.ReaderAt, size int64, eco string, emit func(*record) error) (skipped int, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if r == nil || size <= 0 {
-		return errEmptyDump
+		return 0, errEmptyDump
 	}
 	zr, err := zip.NewReader(r, size)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for i, zf := range zr.File {
 		if i%256 == 0 { // periodic cancel check; every iteration would cost more than it saves
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return skipped, ctx.Err()
 			default:
 			}
 		}
@@ -236,15 +304,16 @@ func reduceZip(ctx context.Context, r io.ReaderAt, size int64, eco string, emit 
 		}
 		recs, err := readZipEntry(zf, eco)
 		if err != nil {
-			continue // a corrupt entry must not kill the whole index
+			skipped++ // a corrupt entry must not kill the whole index, but it is counted
+			continue
 		}
 		for j := range recs {
 			if err := emit(&recs[j]); err != nil {
-				return err
+				return skipped, err
 			}
 		}
 	}
-	return nil
+	return skipped, nil
 }
 
 // readZipEntry opens and decodes one entry. Split out so defer Close runs each iteration rather than
@@ -256,149 +325,117 @@ func readZipEntry(zf *zip.File, eco string) ([]record, error) {
 	}
 	defer rc.Close()
 	var raw rawRecord
-	if err := json.NewDecoder(io.LimitReader(rc, maxEntryBytes)).Decode(&raw); err != nil {
+	dec := json.NewDecoder(io.LimitReader(rc, maxEntryBytes))
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("osv: entry holds more than one JSON value")
+	}
+	if err := checkRecord(&raw); err != nil {
 		return nil, err
 	}
 	return reduceRecord(&raw, eco), nil
 }
 
+// checkRecord rejects an entry the OSV schema does not allow — null, no id, a withdrawn
+// that is not a timestamp, a null affected entry, or one that places versions without
+// naming its package — so it is counted unreadable instead of read as "no advisory". An
+// affected entry with commit ranges only and no package is repository-level.
+func checkRecord(raw *rawRecord) error {
+	if strings.TrimSpace(raw.ID) == "" {
+		return errors.New("osv: entry has no id")
+	}
+	for _, af := range raw.Affected {
+		if af == nil {
+			return fmt.Errorf("osv: %s: an affected entry is null", raw.ID)
+		}
+		if strings.TrimSpace(af.Package.Name) == "" && !repositoryLevel(af) {
+			return fmt.Errorf("osv: %s: an affected entry names no package and is not repository-level", raw.ID)
+		}
+	}
+	if w := strings.TrimSpace(string(raw.Withdrawn)); w != "" && w != "null" {
+		var at string
+		if err := json.Unmarshal(raw.Withdrawn, &at); err != nil {
+			return fmt.Errorf("osv: %s: withdrawn is not a timestamp: %s", raw.ID, w)
+		}
+		if _, err := time.Parse(time.RFC3339, at); err != nil {
+			return fmt.Errorf("osv: %s: withdrawn: %w", raw.ID, err)
+		}
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
-// Version comparison — semver-ish, stdlib only. Tolerates 1.2.3, 1.2, v1.2.3,
-// 1.2.3-beta.1, 4.17.21+build, 2.0.0.RELEASE, 1.2.3-1ubuntu2.
+// Version comparison — delegated to versioncmp so each ecosystem is sorted by its OWN
+// rules (PEP 440 for PyPI, semver for npm/Go/crates.io, …). The internal matcher passes
+// the record's ecosystem; the exported helpers below keep their old signatures for
+// external callers and compare under the semver default.
 // ---------------------------------------------------------------------------
 
-// CompareVersions returns -1 / 0 / 1. Per semver, a prerelease is SMALLER than the release with the
-// same numbers (1.0.0-rc < 1.0.0).
-//
-// TRADEOFF: this is ONE semver-ish comparator used for every ecosystem. PyPI PEP440 (epochs, "1.0a1"
-// vs "1.0.0") and OS-package orderings ("1ubuntu2", Debian epochs) can sort differently at edge
-// cases, so a borderline advisory can be missed → recall may be LOW there. That is why the
-// ecosystem whitelist (ecosystemNames) admits only language ecosystems, not OS distros.
+// CompareVersions returns -1 / 0 / 1 under the semver default (no ecosystem). Kept for API
+// compatibility; the ecosystem-aware matching path uses versioncmp.Compare directly. Since
+// v0.4 input that is not semver ("2.0.0.RELEASE") compares as 0 rather than by v0.3.0's
+// lenient reading: call versioncmp.Compare and check ok to tell "equal" from "not comparable".
 func CompareVersions(a, b string) int {
-	ac, apre := splitVersion(a)
-	bc, bpre := splitVersion(b)
-	n := len(ac)
-	if len(bc) > n {
-		n = len(bc)
-	}
-	for i := 0; i < n; i++ {
-		x, y := "0", "0"
-		if i < len(ac) {
-			x = ac[i]
-		}
-		if i < len(bc) {
-			y = bc[i]
-		}
-		if c := cmpSegment(x, y); c != 0 {
-			return c
-		}
-	}
-	return cmpPrerelease(apre, bpre)
+	c, _ := versioncmp.Compare("", a, b)
+	return c
 }
 
-// splitVersion strips a v prefix, cuts build metadata (+…), splits off the prerelease (-…), then
-// splits the core on ".".
-func splitVersion(s string) ([]string, string) {
-	v := strings.TrimSpace(s)
-	v = strings.TrimPrefix(strings.TrimPrefix(v, "v"), "V")
-	if i := strings.IndexByte(v, '+'); i >= 0 {
-		v = v[:i]
-	}
-	pre := ""
-	if i := strings.IndexByte(v, '-'); i >= 0 {
-		pre, v = v[i+1:], v[:i]
-	}
-	if v == "" {
-		return nil, pre
-	}
-	return strings.Split(v, "."), pre
-}
-
-// cmpSegment compares one version segment: number vs number by value, text vs text lexically;
-// a number sorts BELOW text (the semver prerelease rule).
-func cmpSegment(a, b string) int {
-	an, bn := isNum(a), isNum(b)
-	switch {
-	case an && bn:
-		return cmpNum(a, b)
-	case an:
-		return -1
-	case bn:
-		return 1
-	}
-	return strings.Compare(strings.ToLower(a), strings.ToLower(b))
-}
-
-func isNum(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// cmpNum compares two numeric strings of any length (a build date like 20230101120000 overflows int64).
-func cmpNum(a, b string) int {
-	a = strings.TrimLeft(a, "0")
-	b = strings.TrimLeft(b, "0")
-	if len(a) != len(b) {
-		if len(a) < len(b) {
-			return -1
-		}
-		return 1
-	}
-	return strings.Compare(a, b)
-}
-
-// cmpPrerelease compares prerelease identifiers; "" (the final release) is GREATER than any prerelease.
-func cmpPrerelease(a, b string) int {
-	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
-	switch {
-	case a == "" && b == "":
-		return 0
-	case a == "":
-		return 1
-	case b == "":
-		return -1
-	}
-	as, bs := strings.Split(a, "."), strings.Split(b, ".")
-	n := len(as)
-	if len(bs) < n {
-		n = len(bs)
-	}
-	for i := 0; i < n; i++ {
-		if c := cmpSegment(as[i], bs[i]); c != 0 {
-			return c
-		}
-	}
-	switch {
-	case len(as) < len(bs):
-		return -1
-	case len(as) > len(bs):
-		return 1
-	}
-	return 0
-}
-
-// VersionInRange reports whether version falls inside r. introduced empty/"0" means from the start;
-// fixed is a HALF-OPEN bound (version < fixed); lastAffected is a CLOSED bound (version <= lastAffected).
+// VersionInRange reports whether version falls inside r under the semver default. introduced
+// empty/"0" means from the start; fixed is HALF-OPEN (version < fixed); lastAffected is CLOSED
+// (version <= lastAffected). The internal matcher uses versionInRange with the record ecosystem.
 func VersionInRange(version string, r affectedRange) bool {
-	if in := strings.TrimSpace(r.introduced); in != "" && in != "0" {
-		if CompareVersions(version, in) < 0 {
-			return false
+	in, _ := versionInRange(version, r, "")
+	return in
+}
+
+// versionInRange is the ecosystem-aware range test. ok=false means a bound could not be
+// compared for this ecosystem, so membership is INDETERMINATE and the caller must keep the
+// version unknown rather than treat it as out of range. The range type selects the scheme: a
+// SEMVER range is ordered by semver whatever the ecosystem; a GIT range (commit hashes) is never
+// comparable, so it returns indeterminate rather than guessing membership.
+func versionInRange(version string, r affectedRange, eco string) (in, ok bool) {
+	if r.typ == rangeGit || r.typ == rangeBroken {
+		return false, false
+	}
+	if r.typ == rangeSemver {
+		eco = ""
+	}
+	if lo := strings.TrimSpace(r.introduced); lo != "" && lo != "0" {
+		if f := strings.TrimSpace(r.fixed); f != "" {
+			if c, ok := versioncmp.Compare(eco, f, lo); !ok || c <= 0 {
+				return false, false // fixed at or before introduced: the range places no version
+			}
+		}
+		if l := strings.TrimSpace(r.lastAffected); l != "" {
+			if c, ok := versioncmp.Compare(eco, l, lo); !ok || c < 0 {
+				return false, false
+			}
+		}
+		c, cok := versioncmp.Compare(eco, version, lo)
+		if !cok {
+			return false, false
+		}
+		if c < 0 {
+			return false, true
 		}
 	}
 	if f := strings.TrimSpace(r.fixed); f != "" {
-		return CompareVersions(version, f) < 0
+		c, cok := versioncmp.Compare(eco, version, f)
+		if !cok {
+			return false, false
+		}
+		return c < 0, true
 	}
 	if l := strings.TrimSpace(r.lastAffected); l != "" {
-		return CompareVersions(version, l) <= 0
+		c, cok := versioncmp.Compare(eco, version, l)
+		if !cok {
+			return false, false
+		}
+		return c <= 0, true
 	}
-	return true // introduced but never fixed: every version from there on is affected
+	return true, true // introduced but never fixed: every version from there on is affected
 }
 
 // normVersionKey normalizes a version for matching the concrete-version list ("v1.2.3" == "1.2.3").

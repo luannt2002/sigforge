@@ -32,15 +32,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/versioncmp"
 )
 
 // EnvOSVURL is the environment variable the operator uses to supply the OSV bulk-dump root (the
@@ -58,10 +59,10 @@ const osvWebResolver = "https://osv.dev/vulnerability/"
 const (
 	// downloadLimit bounds one dump download end to end; npm (~205MB) over a slow link still fits.
 	downloadLimit = 12 * time.Minute
-	// maxZipBytes caps the downloaded dump on disk (npm's ~205MB is the largest known), guarding a
-	// scarce disk against a hostile or runaway endpoint. It streams to a temp file, so this is a
-	// disk ceiling, independent of the fetch client's in-memory ceiling.
-	maxZipBytes int64 = 512 << 20
+	// maxZipBytes caps the downloaded dump on disk (Chainguard's ~1.1GB and Ubuntu's ~0.8GB are the
+	// largest known), guarding the disk against a hostile or runaway endpoint. The dump streams to
+	// a file and is reduced entry by entry, so this is a disk ceiling, not a memory one.
+	maxZipBytes int64 = 2 << 30
 )
 
 var (
@@ -83,11 +84,19 @@ var ecosystemNames = map[string]string{
 	"rubygems": "RubyGems", "gem": "RubyGems", "bundler": "RubyGems", "ruby": "RubyGems",
 	"crates.io": "crates.io", "crates": "crates.io", "cargo": "crates.io", "rust": "crates.io",
 	"nuget": "NuGet", "dotnet": "NuGet", "csharp": "NuGet", ".net": "NuGet",
+	"hex": "Hex", "pub": "Pub", "swift": "SwiftURL", "swifturl": "SwiftURL", "cran": "CRAN", "hackage": "Hackage",
+	"debian": "Debian", "ubuntu": "Ubuntu", "alpine": "Alpine", "wolfi": "Wolfi", "chainguard": "Chainguard",
+	"rocky linux": "Rocky Linux", "rocky": "Rocky Linux", "almalinux": "AlmaLinux",
 }
 
-// Ecosystem maps an alias to its OSV ecosystem name; ok is false when outside the whitelist.
+// releaseScoped ecosystems keep a separate advisory set per distro release ("Debian:12"): a
+// version is comparable only against its own release's records, so a lookup must name one.
+var releaseScoped = map[string]bool{"Debian": true, "Ubuntu": true, "Alpine": true, "Rocky Linux": true, "AlmaLinux": true}
+
+// Ecosystem maps an alias, or an OSV ecosystem name with a release suffix ("Debian:12"), to the
+// ecosystem's dump directory; ok is false when outside the whitelist.
 func Ecosystem(name string) (eco string, ok bool) {
-	v, ok := ecosystemNames[strings.ToLower(strings.TrimSpace(name))]
+	v, ok := ecosystemNames[strings.ToLower(trimEcosystem(name))]
 	return v, ok
 }
 
@@ -141,9 +150,18 @@ func (v Vuln) Ref() string {
 }
 
 // Result is a lookup outcome: the tri-state status plus any matching vulns (nil unless Vulnerable).
+//
+// PackageKnown and VersionPinned let an adapter recover the honest sub-cases a bare Status folds: a
+// StatusUnknown with PackageKnown is "advisories exist for the package but its version can't be
+// positioned" (a potential affect), without it is a package absent from the index (unknown product);
+// a StatusVulnerable with VersionPinned is an in-range match on a concrete version, without it is an
+// unpinnable version surfacing every advisory for the package (potential, not confirmed).
 type Result struct {
-	Status Status
-	Vulns  []Vuln
+	Status        Status
+	Vulns         []Vuln
+	PackageKnown  bool // the package appears in the index (advisories exist for it)
+	VersionPinned bool // a concrete version was supplied for range matching (not empty / a manifest range)
+	Partial       bool // the dump had entries that could not be read: no answer from it is provably whole
 }
 
 // Index is a reduced OSV index for ONE ecosystem, looked up by package name. It is read-only after
@@ -155,6 +173,8 @@ type Index struct {
 	BuiltAt   time.Time
 	byName    map[string][]record
 	count     int
+	skipped   int        // dump entries that could not be read: the index is not provably whole
+	fetched   fetch.Meta // where LoadIndex got the dump: the source now, the store (Cached), or a stale store copy
 }
 
 // Len is the number of advisory rows (one advisory touching n packages counts as n).
@@ -192,33 +212,43 @@ func pkgKey(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 // RANGE version ("^4.17.0") cannot pin the running instance, so every advisory for the package is
 // returned as Vulnerable and the caller must treat it as "potentially affected, version not pinned"
 // rather than confirmed — surfacing the facts beats staying silent.
-func (idx *Index) Lookup(name, version string) Result {
+func (idx *Index) Lookup(name, version string) Result { return idx.LookupIn("", name, version) }
+
+// LookupIn is Lookup within one distro release: with a release suffix ("Debian:12") only that
+// release's records (and release-less ones) count, so another release's fix never decides.
+func (idx *Index) LookupIn(ecosystem, name, version string) Result {
+	r := idx.lookupIn(ecosystem, name, version)
+	r.Partial = idx != nil && idx.skipped > 0
+	return r
+}
+
+func (idx *Index) lookupIn(ecosystem, name, version string) Result {
 	if idx == nil {
 		return Result{Status: StatusUnknown}
 	}
 	recs := idx.byName[pkgKey(name)]
+	if strings.Contains(ecosystem, ":") {
+		recs = sameRelease(recs, ecosystem)
+	}
 	if len(recs) == 0 {
 		// The package never appears in the index: it may be unaffected, but it may also be a name /
 		// ecosystem mismatch or a coverage gap, so this is not asserted as "no vulnerability".
 		return Result{Status: StatusUnknown}
 	}
 	ver := CleanVersion(version)
-	seen := make(map[string]bool, len(recs))
+	pinned := ver != ""
+	seen, seenUnplaced := make(map[string]bool, len(recs)*2), map[string]bool{}
 	out := make([]Vuln, 0, 4)
-	for i := range recs {
-		r := &recs[i]
-		if ver != "" && !recordMatches(r, ver) {
-			continue
-		}
+	var unplaced []Vuln // advisories the version could not be placed against
+	add := func(dst *[]Vuln, r *record, seen map[string]bool) {
 		id := r.id
 		if id == "" {
 			id = r.cve
 		}
-		if id == "" || seen[id] {
-			continue
+		if id == "" || seenVuln(seen, r.vulnKeys) {
+			return
 		}
-		seen[id] = true
-		out = append(out, Vuln{
+		*dst = append(*dst, Vuln{
 			ID:       r.id,
 			CVE:      r.cve,
 			Severity: r.severity,
@@ -226,30 +256,94 @@ func (idx *Index) Lookup(name, version string) Result {
 			URL:      osvWebResolver + url.PathEscape(id),
 		})
 	}
+	indeterminate := false
+	for i := range recs {
+		r := &recs[i]
+		if ver != "" {
+			matched, determinate := recordMatches(r, ver)
+			if !matched {
+				if !determinate {
+					indeterminate = true
+					add(&unplaced, r, seenUnplaced)
+				}
+				continue
+			}
+		}
+		add(&out, r, seen)
+	}
 	if len(out) == 0 {
+		if indeterminate {
+			// The version could not be positioned under this ecosystem's rules (versioncmp ok=false):
+			// an honest unknown, NOT a resolved "no known vuln for this version". The package IS known,
+			// so an adapter reads this as potentially-affected, not unknown-product; the advisories it
+			// could not be placed against are returned as the ones to look at.
+			return Result{Status: StatusUnknown, Vulns: unplaced, PackageKnown: true, VersionPinned: pinned}
+		}
 		// The package IS known to the index but no advisory touches this version: a real resolved
 		// "no known vulnerability for this version", distinct from the unknown cases above.
-		return Result{Status: StatusNoKnownVuln}
+		return Result{Status: StatusNoKnownVuln, PackageKnown: true, VersionPinned: pinned}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return severityRank(out[i].Severity) > severityRank(out[j].Severity) })
-	return Result{Status: StatusVulnerable, Vulns: out}
+	return Result{Status: StatusVulnerable, Vulns: out, PackageKnown: true, VersionPinned: pinned}
 }
 
-// recordMatches reports whether a pinned version is touched by this record (a range or, when the
-// advisory carried no range, the concrete-version list).
-func recordMatches(r *record, ver string) bool {
-	for i := range r.ranges {
-		if VersionInRange(ver, r.ranges[i]) {
+func sameRelease(recs []record, ecosystem string) []record {
+	keep := releaseRows(ecosystem)
+	var out []record
+	for i := range recs {
+		if keep(&recs[i]) {
+			out = append(out, recs[i])
+		}
+	}
+	return out
+}
+
+// seenVuln folds one logical vuln reported under several ids: it reports whether any of this
+// record's keys was already emitted, and otherwise marks them all so a cross-source duplicate
+// (same flaw as a GHSA and a GO/PYSEC id sharing a CVE alias) is counted once.
+func seenVuln(seen map[string]bool, keys []string) bool {
+	for _, k := range keys {
+		if seen[k] {
 			return true
+		}
+	}
+	for _, k := range keys {
+		seen[k] = true
+	}
+	return false
+}
+
+// recordMatches reports whether a pinned version is touched by this record (a version range or,
+// when only commit ranges or none were given, the concrete-version list). determinate=false means
+// the version could not be placed — a bound not comparable under the record's ecosystem, commit
+// ranges with no versions list, or a version list cut off — so the caller keeps the lookup
+// unknown rather than counting it as a clean miss.
+func recordMatches(r *record, ver string) (matched, determinate bool) {
+	determinate = true
+	for i := range r.ranges {
+		if r.ranges[i].typ == rangeGit {
+			continue // commit bounds: the record's version ranges or its versions list answer instead
+		}
+		in, ok := versionInRange(ver, r.ranges[i], r.ecosystem)
+		if !ok {
+			determinate = false
+			continue
+		}
+		if in {
+			return true, true
 		}
 	}
 	key := normVersionKey(ver)
 	for _, v := range r.versions {
-		if normVersionKey(v) == key {
-			return true
+		// the ecosystem's own order decides equality ("1.0.0b1" is "1.0.0-beta1"); the spelling (a v prefix, git tags) matches too
+		if c, ok := versioncmp.Compare(r.ecosystem, ver, v); (ok && c == 0) || normVersionKey(v) == key {
+			return true, true
 		}
 	}
-	return false
+	if onlyCommitRanges(r.ranges) && len(r.versions) == 0 {
+		return false, false // no version range and no versions list: nothing places the version
+	}
+	return false, determinate && !r.truncated
 }
 
 // summary is rebuilt from facts that exist in the reduced row (the reducer drops descriptions to
@@ -277,8 +371,9 @@ func severityRank(s string) int {
 	return 0
 }
 
-// reConcreteVersion matches a single pinned version; a manifest RANGE ("^4.17.0", ">=1.2 <2") does not.
-var reConcreteVersion = regexp.MustCompile(`^[vV]?\d+(\.\d+)*([.\-+][0-9A-Za-z.\-+]+)?$`)
+// reConcreteVersion matches a single pinned version, OS-package forms included (epoch "1:",
+// tilde, apk "_rc1"); a manifest RANGE ("^4.17.0", ">=1.2 <2", "1.2.*") does not.
+var reConcreteVersion = regexp.MustCompile(`^[vV]?\d+(\.\d+)*([.\-+:~_][0-9A-Za-z.\-+:~_]+)?$`)
 
 // CleanVersion returns a version usable for range matching, or "" when it is a range / undetermined
 // (the caller then gets every advisory for the package — see Lookup).
@@ -295,6 +390,16 @@ func CleanVersion(version string) string {
 type Adapter struct {
 	baseURL string
 	client  *fetch.Client
+
+	mu    sync.Mutex
+	dumps map[string]*storedDump // with a store: each dump fetched once per Adapter, read per release
+}
+
+type storedDump struct {
+	once sync.Once
+	path string
+	meta fetch.Meta
+	err  error
 }
 
 // New builds an adapter bound to the operator-supplied OSV dump root and client. An empty baseURL
@@ -319,26 +424,114 @@ func (a *Adapter) LoadIndex(ctx context.Context, ecosystem string) (*Index, erro
 	if a.baseURL == "" {
 		return nil, errSourceOff
 	}
-	zipPath, size, err := a.downloadDump(ctx, eco)
+	client := a.client
+	if client == nil {
+		client = fetch.New()
+	}
+	zipPath, meta, release, err := a.dump(ctx, client, eco)
+	defer release()
 	if err != nil {
 		return nil, fmt.Errorf("osv %s: %w", eco, err)
 	}
-	defer os.Remove(zipPath)
+	st, err := os.Stat(zipPath)
+	if err != nil {
+		return nil, fmt.Errorf("osv %s: %w", eco, err)
+	}
+	if st.Size() == 0 {
+		return nil, fmt.Errorf("osv %s: %w", eco, errEmptyDump)
+	}
+	idx, err := indexOf(ctx, eco, zipPath, st, releaseRows(ecosystem), client.CacheDir != "")
+	if err != nil {
+		return nil, fmt.Errorf("osv %s: %w", eco, err)
+	}
+	if idx.Len() == 0 && !strings.Contains(ecosystem, ":") {
+		return nil, fmt.Errorf("osv %s: %w", eco, errBuiltNothing) // a release may hold no rows; a whole dump may not
+	}
+	idx.BuiltAt, idx.fetched = meta.FetchedAt, meta
+	return idx, nil
+}
 
+// dump fetches eco's dump; with a store the stored copy is remembered, so loading several
+// releases of one distro in a run asks the source once.
+func (a *Adapter) dump(ctx context.Context, client *fetch.Client, eco string) (string, fetch.Meta, func(), error) {
+	get := func() (string, fetch.Meta, func(), error) {
+		dctx, cancel := context.WithTimeout(ctx, downloadLimit)
+		defer cancel()
+		return client.Download(dctx, a.baseURL+"/"+url.PathEscape(eco)+"/all.zip", maxZipBytes)
+	}
+	if client.CacheDir == "" {
+		return get()
+	}
+	a.mu.Lock() // guards only the map, so two ecosystems download side by side
+	d := a.dumps[eco]
+	if d == nil {
+		d = &storedDump{}
+		if a.dumps == nil {
+			a.dumps = map[string]*storedDump{}
+		}
+		a.dumps[eco] = d
+	}
+	a.mu.Unlock()
+	d.once.Do(func() { d.path, d.meta, _, d.err = get() }) // a stored copy needs no release
+	return d.path, d.meta, func() {}, d.err
+}
+
+// indexOf reads the dump's index file when it was cut from this very dump, and otherwise
+// reduces the dump — cutting the file for later runs when the dump is in the store.
+func indexOf(ctx context.Context, eco, zipPath string, st os.FileInfo, keep func(*record) bool, stored bool) (*Index, error) {
+	cachePath, stamp := "", dumpStamp(st)
+	if stored {
+		cachePath = zipPath + ".idx.gz"
+		if idx, err := readIndexFile(cachePath, stamp, eco, keep); err == nil {
+			return idx, nil
+		}
+	}
 	zf, err := os.Open(zipPath)
 	if err != nil {
-		return nil, fmt.Errorf("osv %s: %w", eco, err)
+		return nil, err
 	}
 	defer zf.Close()
+	return buildIndex(ctx, eco, zf, st.Size(), keep, cachePath, stamp)
+}
 
-	idx, err := BuildIndex(ctx, eco, zf, size)
+// Sync refreshes one ecosystem's dump in the client's store — with the client's MaxAge at 0
+// it always asks the source, so an unchanged dump costs a 304 — cuts its index file when the
+// dump changed, and returns the stored size. Later runs read that index.
+func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
+	eco, ok := Ecosystem(ecosystem)
+	switch {
+	case !ok:
+		return 0, fmt.Errorf("%w: %q", errUnknownEco, ecosystem)
+	case a.baseURL == "":
+		return 0, errSourceOff
+	case a.client == nil || a.client.CacheDir == "":
+		return 0, errors.New("osv: sync needs the client's store (CacheDir)")
+	}
+	dctx, cancel := context.WithTimeout(ctx, downloadLimit)
+	defer cancel()
+	path, meta, release, err := a.client.Download(dctx, a.baseURL+"/"+url.PathEscape(eco)+"/all.zip", maxZipBytes)
+	defer release()
+	if err == nil && meta.Stale {
+		err = errors.New(meta.Err) // the store kept its copy, but the source did not answer
+	}
 	if err != nil {
-		return nil, fmt.Errorf("osv %s: %w", eco, err)
+		return 0, fmt.Errorf("osv %s: %w", eco, err)
 	}
-	if idx.Len() == 0 {
-		return nil, fmt.Errorf("osv %s: %w", eco, errBuiltNothing)
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("osv %s: %w", eco, err)
 	}
-	return idx, nil
+	if f, err := os.Open(path + ".idx.gz"); err == nil {
+		_, err = indexDecoder(f, dumpStamp(st))
+		f.Close()
+		if err == nil {
+			return st.Size(), nil // already cut from this dump
+		}
+	}
+	if _, err := indexOf(ctx, eco, path, st, func(*record) bool { return false }, true); err != nil {
+		return 0, fmt.Errorf("osv %s: %w", eco, err)
+	}
+	return st.Size(), nil
 }
 
 // BuildIndex builds an in-RAM index from a zip dump (no network). r/size is an io.ReaderAt — the
@@ -352,67 +545,5 @@ func BuildIndex(ctx context.Context, ecosystem string, r io.ReaderAt, size int64
 	if eco == "" {
 		return nil, errUnknownEco
 	}
-	idx := &Index{Ecosystem: eco, BuiltAt: time.Now(), byName: make(map[string][]record, 4096)}
-	err := reduceZip(ctx, r, size, eco, func(r *record) error {
-		idx.add(r)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return idx, nil
-}
-
-// downloadDump streams <base>/<eco>/all.zip to a temp file and returns its path + size; the caller
-// deletes it. The dump is far larger than the fetch client's in-memory ceiling and archive/zip needs
-// an io.ReaderAt, so it streams to disk here (bounded by maxZipBytes) rather than through fetch.Get,
-// reusing only the operator's configured HTTP client.
-func (a *Adapter) downloadDump(ctx context.Context, eco string) (string, int64, error) {
-	u := a.baseURL + "/" + url.PathEscape(eco) + "/all.zip"
-	cctx, cancel := context.WithTimeout(ctx, downloadLimit)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
-	if err != nil {
-		return "", 0, err
-	}
-	req.Header.Set("User-Agent", "sigforge-osv")
-
-	hc := http.DefaultClient
-	if a.client != nil && a.client.HTTP != nil {
-		hc = a.client.HTTP
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return "", 0, err
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, fmt.Errorf("download %s: status %d", eco, resp.StatusCode)
-	}
-
-	tmp, err := os.CreateTemp("", "sigforge-osv-*.zip")
-	if err != nil {
-		return "", 0, err
-	}
-	n, err := io.Copy(tmp, io.LimitReader(resp.Body, maxZipBytes+1))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		os.Remove(tmp.Name())
-		return "", 0, err
-	}
-	if n > maxZipBytes {
-		os.Remove(tmp.Name()) // over the ceiling means a truncated zip; keeping it only wastes disk
-		return "", 0, fmt.Errorf("download %s exceeds the %d byte ceiling", eco, maxZipBytes)
-	}
-	if n == 0 {
-		os.Remove(tmp.Name())
-		return "", 0, errEmptyDump
-	}
-	return tmp.Name(), n, nil
+	return buildIndex(ctx, eco, r, size, func(*record) bool { return true }, "", "")
 }
