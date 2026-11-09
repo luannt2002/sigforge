@@ -5,7 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
 )
@@ -183,8 +186,8 @@ func TestResolveCPELiveDict(t *testing.T) {
 func TestResolveCPEDictOffUsesSnapshot(t *testing.T) {
 	r := New("", fetch.New())
 	cpe, _, st := r.ResolveCPE(context.Background(), "nginx", "", "")
-	if st != StateVerified || cpe != "cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*" {
-		t.Fatalf("snapshot resolve wrong: cpe=%q state=%v", cpe, st)
+	if st == StateVerified || r.Status(context.Background()).Source != "snapshot" {
+		t.Fatalf("dict off: the snapshot is in use but never verifies, got cpe=%q state=%v", cpe, st)
 	}
 }
 
@@ -196,9 +199,9 @@ func TestResolveCPEFailOpenUnknownStaysUnknown(t *testing.T) {
 	if st != StateUnknown || cpe != "" {
 		t.Fatalf("dead dict + unknown tech must be Unknown with no cpe, got cpe=%q state=%v", cpe, st)
 	}
-	// ...but a tech the public-domain sample DOES know still resolves (fail-open).
-	if cpe, _, st := r.ResolveCPE(context.Background(), "nginx", "", ""); st != StateVerified || cpe == "" {
-		t.Fatalf("dead dict must fall back to snapshot for a known tech, got cpe=%q state=%v", cpe, st)
+	// ...and a tech the sample knows is not verified by it either: the sample is not the dictionary.
+	if cpe, _, st := r.ResolveCPE(context.Background(), "nginx", "", ""); st == StateVerified || r.Status(context.Background()).Source != "snapshot" {
+		t.Fatalf("dead dict falls back to the snapshot, which never verifies, got cpe=%q state=%v", cpe, st)
 	}
 }
 
@@ -206,8 +209,66 @@ func TestResolveCPEFailOpenUnknownStaysUnknown(t *testing.T) {
 func TestResolveCPEGarbageDictFallsBack(t *testing.T) {
 	r := New(serveJSON(t, "<html>Access Denied</html>"), fetch.New())
 	cpe, _, st := r.ResolveCPE(context.Background(), "nginx", "", "")
-	if st != StateVerified || cpe == "" {
-		t.Fatalf("garbage dict must fall back to the snapshot, got cpe=%q state=%v", cpe, st)
+	if st == StateVerified || r.Status(context.Background()).Source != "snapshot" {
+		t.Fatalf("garbage dict falls back to the snapshot, which never verifies, got cpe=%q state=%v", cpe, st)
+	}
+}
+
+// enrich resolves once per detection, so the dictionary must be fetched once per
+// Resolver — not once per ResolveCPE call.
+func TestResolveCPELoadsDictOnce(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(dictTestJSON))
+	}))
+	t.Cleanup(srv.Close)
+	r := New(srv.URL, fetch.New())
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.ResolveCPE(context.Background(), "nginx", "", "")
+		}()
+	}
+	wg.Wait()
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("5 resolves must fetch the dictionary once, fetched %d times", n)
+	}
+}
+
+// Status must say which dictionary is in use, so a configured live dictionary that
+// failed — or served only one page of the paged NVD API — is never silent.
+func TestStatus(t *testing.T) {
+	onePage := `{"resultsPerPage": 2, "startIndex": 0, "totalResults": 1000, "products": [
+	  {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:nginx:nginx:1.21.0:*:*:*:*:*:*:*", "titles": [{"title": "nginx", "lang": "en"}]}},
+	  {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:apache:http_server:2.4.57:*:*:*:*:*:*:*", "titles": [{"title": "Apache HTTP Server", "lang": "en"}]}}
+	]}`
+	cases := []struct {
+		name        string
+		url         string
+		wantSource  string
+		wantErr     string // substring; "" means Err must be empty
+		wantPartial bool
+	}{
+		{"no URL uses the sample, nothing failed", "", "snapshot", "", false},
+		{"live dictionary in use", serveJSON(t, dictTestJSON), "live", "", false},
+		{"live down falls back and says why", serve500(t), "snapshot", "500", false},
+		{"live junk falls back and says why", serveJSON(t, "<html>Access Denied</html>"), "snapshot", "unparseable", false},
+		{"live with no usable entries falls back and says why", serveJSON(t, `{"products": []}`), "snapshot", "no usable", false},
+		{"one page of a paged feed is reported partial", serveJSON(t, onePage), "live", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := New(c.url, fetch.New()).Status(context.Background())
+			if s.Source != c.wantSource || s.Partial() != c.wantPartial || s.Entries == 0 {
+				t.Fatalf("got %+v (partial=%v), want source=%s partial=%v and entries>0", s, s.Partial(), c.wantSource, c.wantPartial)
+			}
+			if c.wantErr == "" && s.Err != "" || c.wantErr != "" && !strings.Contains(s.Err, c.wantErr) {
+				t.Fatalf("Err = %q, want it to contain %q", s.Err, c.wantErr)
+			}
+		})
 	}
 }
 
@@ -219,5 +280,53 @@ func TestEmbeddedSnapshotUsable(t *testing.T) {
 	}
 	if len(e) == 0 {
 		t.Fatal("embedded snapshot is empty — is data/cpe-dict-snapshot.json broken?")
+	}
+}
+
+// A dictionary synced into the local store (within MaxAge) costs no request, and Status
+// says it is the cached copy.
+func TestDictFromSyncedStoreIsCached(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(dictTestJSON))
+	}))
+	t.Cleanup(srv.Close)
+	c := fetch.New()
+	c.CacheDir, c.MaxAge = t.TempDir(), time.Hour
+	s1 := New(srv.URL, c).Status(context.Background())
+	s2 := New(srv.URL, c).Status(context.Background())
+	if hits.Load() != 1 || s1.Cached || !s2.Cached || s2.Entries != s1.Entries {
+		t.Fatalf("the second run must reuse the synced dictionary (cached) with no request: hits=%d %+v / %+v", hits.Load(), s1, s2)
+	}
+}
+
+// The source fails but a synced dictionary is in the store: identity uses it (2 bases,
+// not the embedded sample) and Status names the failure.
+func TestDictStaleCopyWhenSourceFails(t *testing.T) {
+	var down atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(dictTestJSON))
+	}))
+	t.Cleanup(srv.Close)
+	c := fetch.New()
+	c.CacheDir = t.TempDir()
+	New(srv.URL, c).Status(context.Background())
+	down.Store(true)
+	s := New(srv.URL, c).Status(context.Background())
+	if s.Source != "live" || !s.Cached || !strings.Contains(s.Err, "503") || s.Entries != 2 {
+		t.Fatalf("want the stored dictionary with the failure named, got %+v", s)
+	}
+}
+
+// The embedded sample is a handful of CPE bases, not the dictionary: it never verifies an
+// identity, so a curated CPE is not displaced by a sample match.
+func TestEmbeddedSampleNeverVerifies(t *testing.T) {
+	if cpe, _, st := New("", fetch.New()).ResolveCPE(context.Background(), "Nginx", "", ""); st == StateVerified {
+		t.Fatalf("the embedded sample verified %q", cpe)
 	}
 }

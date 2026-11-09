@@ -37,8 +37,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
 
 // EnvKEVURL / EnvEPSSURL are the environment variables the operator uses to supply
@@ -69,6 +72,7 @@ type Signal struct {
 	Ransomware bool    // KEV flags it as used in a ransomware campaign
 	EPSS       float64 // probability of exploitation in the next 30 days, 0..1
 	EPSSPct    float64 // the EPSS percentile across all CVEs, 0..1
+	HasEPSS    bool    // EPSS actually returned a score for this CVE — distinguishes a real 0.0 from "no score" (nil in unified)
 }
 
 // KEVEntry is one normalized KEV row. It keeps a few descriptive fields so a caller
@@ -88,6 +92,7 @@ var kevSnapshot []byte
 // kevDoc is the upstream KEV feed schema: an outer object with a vulnerabilities[]
 // array. Other top-level fields (title, catalogVersion, count) are ignored.
 type kevDoc struct {
+	Count           *int `json:"count"` // the catalog's own entry count: what proves it whole
 	Vulnerabilities []struct {
 		CveID                      string `json:"cveID"`
 		VendorProject              string `json:"vendorProject"`
@@ -117,6 +122,32 @@ type Adapter struct {
 	kevURL  string
 	epssURL string
 	client  *fetch.Client
+
+	// shortcut: the KEV catalog loads once per Adapter, so build one Adapter per scan
+	// (as callers do); a long-lived Adapter keeps its first catalog — rebuild to refresh.
+	once      sync.Once
+	catalog   map[string]KEVEntry
+	freshness unified.Freshness
+	fetchedAt time.Time
+	status    CatalogStatus
+	complete  bool // the live/synced catalog has as many rows as its count, one CVE id each, none repeated
+}
+
+// CatalogStatus says which KEV catalog prioritizes the leads, so a configured live
+// catalog that failed (a 403, a 500, a proxy page) is visible instead of silently
+// replaced by the small embedded snapshot.
+type CatalogStatus struct {
+	Source  string // "live" or "snapshot"
+	Entries int    // KEV entries available to prioritize against
+	Err     string // why the configured live catalog could not be fetched now (Cached: a stale synced copy is in use); "" otherwise
+	Cached  bool   // the operator's catalog came from the local store (synced copy), not a fetch now
+}
+
+// Status loads the catalog if needed (once per Adapter, shared with every lookup) and
+// reports which one is in use.
+func (a *Adapter) Status(ctx context.Context) CatalogStatus {
+	a.loadKEV(ctx)
+	return a.status
 }
 
 // New builds an adapter bound to the operator-supplied KEV and EPSS URLs and client.
@@ -138,7 +169,7 @@ func (a *Adapter) Enrich(ctx context.Context, cves []string) map[string]Signal {
 		return out
 	}
 	epss := a.queryEPSS(ctx, ids) // EPSS/EPSSPct set, may be empty (off/fail-open)
-	kev := a.loadKEV(ctx)         // live catalog, or the embedded snapshot, never nil
+	kev, _, _ := a.loadKEV(ctx)   // live catalog, or the embedded snapshot, never nil
 	for _, id := range ids {
 		s := epss[id] // zero-value Signal if EPSS had nothing
 		s.CVE = id
@@ -155,21 +186,47 @@ func (a *Adapter) Enrich(ctx context.Context, cves []string) map[string]Signal {
 // catalog from the operator's URL but fails open to the embedded public-domain
 // snapshot on an empty URL, a fetch error, or junk content (a proxy serving HTML),
 // so an air-gapped run still recognizes the most notorious CVEs instead of going
-// fully blind. It never returns nil.
-func (a *Adapter) loadKEV(ctx context.Context) map[string]KEVEntry {
+// fully blind. It never returns nil. The second return is the data's freshness:
+// Live when the operator's live catalog was used, Snapshot when it fell back to
+// the embedded point-in-time baseline (so a consumer never reads it as live).
+// The third return is the live catalog's fetch time (UTC), set only on the Live
+// path; the embedded snapshot has no fetch time, so it stays zero, never faked.
+// The catalog is fetched once per Adapter: enrich prioritizes every detection's CVE
+// leads, and re-downloading the whole catalog per detection would be pure waste.
+func (a *Adapter) loadKEV(ctx context.Context) (map[string]KEVEntry, unified.Freshness, time.Time) {
+	a.once.Do(func() { a.catalog, a.freshness, a.fetchedAt = a.fetchKEV(ctx) })
+	return a.catalog, a.freshness, a.fetchedAt
+}
+
+func (a *Adapter) fetchKEV(ctx context.Context) (map[string]KEVEntry, unified.Freshness, time.Time) {
 	snap, _ := ParseKEV(kevSnapshot)
+	a.status = CatalogStatus{Source: "snapshot", Entries: len(snap)}
 	if a.kevURL == "" {
-		return snap
+		return snap, unified.FreshnessSnapshot, time.Time{}
 	}
-	raw, err := a.client.Get(ctx, a.kevURL)
+	raw, meta, err := a.client.GetMeta(ctx, a.kevURL)
 	if err != nil {
-		return snap
+		a.status.Err = err.Error()
+		return snap, unified.FreshnessSnapshot, time.Time{}
 	}
-	m, err := ParseKEV(raw)
-	if err != nil || len(m) == 0 {
-		return snap
+	m, complete, err := parseKEVCatalog(raw)
+	if err != nil {
+		a.status.Err = "live KEV catalog unparseable: " + err.Error()
+		return snap, unified.FreshnessSnapshot, time.Time{}
 	}
-	return m
+	if len(m) == 0 {
+		a.status.Err = "live KEV catalog had no entries"
+		return snap, unified.FreshnessSnapshot, time.Time{}
+	}
+	a.status = CatalogStatus{Source: "live", Entries: len(m), Cached: meta.Cached, Err: meta.Err}
+	a.complete = complete
+	switch {
+	case meta.Stale:
+		return m, unified.FreshnessStale, meta.FetchedAt // the source failed: the last synced copy
+	case meta.Cached:
+		return m, unified.FreshnessSnapshot, meta.FetchedAt // the locally synced copy, as of its sync
+	}
+	return m, unified.FreshnessLive, meta.FetchedAt
 }
 
 // queryEPSS asks the operator's EPSS URL for scores, coalescing the CVEs into the
@@ -219,15 +276,27 @@ func (a *Adapter) fetchEPSSBatch(ctx context.Context, ids []string, out map[stri
 // ParseKEV is the PURE decode of a KEV feed into a lookup map keyed by UPPER-cased
 // CVE (no network). A row without a valid CVE id is skipped.
 func ParseKEV(b []byte) (map[string]KEVEntry, error) {
+	m, _, err := parseKEVCatalog(b)
+	return m, err
+}
+
+// parseKEVCatalog is ParseKEV plus whether the catalog proves itself whole: it has as many
+// rows as the count it states, each row exactly one CVE id, no id repeated (a null,
+// id-less, multi-id or repeated row leaves it unproven).
+func parseKEVCatalog(b []byte) (map[string]KEVEntry, bool, error) {
 	var doc kevDoc
 	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	out := make(map[string]KEVEntry, len(doc.Vulnerabilities))
+	exact := 0
 	for _, r := range doc.Vulnerabilities {
 		id := normalizeCVE(r.CveID)
 		if id == "" {
 			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(r.CveID), id) {
+			exact++
 		}
 		out[id] = KEVEntry{
 			CVE:           id,
@@ -240,7 +309,8 @@ func ParseKEV(b []byte) (map[string]KEVEntry, error) {
 			Ransomware: strings.EqualFold(strings.TrimSpace(r.KnownRansomwareCampaignUse), "Known"),
 		}
 	}
-	return out, nil
+	rows := len(doc.Vulnerabilities)
+	return out, doc.Count != nil && *doc.Count == rows && exact == rows && len(out) == rows, nil
 }
 
 // ParseEPSS is the PURE decode of a FIRST.org EPSS response into Signals carrying
@@ -257,9 +327,11 @@ func ParseEPSS(b []byte) (map[string]Signal, error) {
 		if id == "" {
 			continue
 		}
-		epss, _ := strconv.ParseFloat(strings.TrimSpace(d.EPSS), 64)
+		epss, epssErr := strconv.ParseFloat(strings.TrimSpace(d.EPSS), 64)
 		pct, _ := strconv.ParseFloat(strings.TrimSpace(d.Percentile), 64)
-		out[id] = Signal{CVE: id, EPSS: epss, EPSSPct: pct}
+		// HasEPSS marks a real returned score (even 0.0) — only an unparseable
+		// epss field leaves it false, so "no score" never reads as 0.0 downstream.
+		out[id] = Signal{CVE: id, EPSS: epss, EPSSPct: pct, HasEPSS: epssErr == nil}
 	}
 	return out, nil
 }

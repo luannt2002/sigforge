@@ -4,9 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
 
 // flatRepoJSON is the classic, widely-mirrored jsrepository shape: version bounds
@@ -93,7 +96,7 @@ func TestVersionAffectedFlat(t *testing.T) {
 		{"3.0.0", false},
 	}
 	for _, c := range cases {
-		if got := versionAffected(c.ver, v); got != c.want {
+		if got, _ := versionAffected(c.ver, v); got != c.want {
 			t.Errorf("below 1.6.3, %s: want %v got %v", c.ver, c.want, got)
 		}
 	}
@@ -108,7 +111,7 @@ func TestVersionAffectedAboveExclusive(t *testing.T) {
 		"1.9.9": true,
 		"2.0.0": false, // exclusive upper bound
 	} {
-		if got := versionAffected(ver, v); got != want {
+		if got, _ := versionAffected(ver, v); got != want {
 			t.Errorf("above 1.0.0 %s: want %v got %v", ver, want, got)
 		}
 	}
@@ -124,7 +127,7 @@ func TestVersionAffectedBoundedWindow(t *testing.T) {
 		"3.5.0": false, // exclusive upper bound (fixed)
 		"3.6.0": false,
 	} {
-		if got := versionAffected(ver, v); got != want {
+		if got, _ := versionAffected(ver, v); got != want {
 			t.Errorf("[1.0.3,3.5.0) %s: want %v got %v", ver, want, got)
 		}
 	}
@@ -139,7 +142,7 @@ func TestVersionAffectedNestedWithExcludes(t *testing.T) {
 		"1.7.0": true,
 		"1.8.0": false,
 	} {
-		if got := versionAffected(ver, v); got != want {
+		if got, _ := versionAffected(ver, v); got != want {
 			t.Errorf("nested+excludes %s: want %v got %v", ver, want, got)
 		}
 	}
@@ -147,7 +150,7 @@ func TestVersionAffectedNestedWithExcludes(t *testing.T) {
 
 func TestVersionAffectedEmptyVersionIsLead(t *testing.T) {
 	// A version we can't pin must be reported as a LEAD, never dropped as clean.
-	if !versionAffected("", &repoVuln{Below: "1.6.3"}) {
+	if got, _ := versionAffected("", &repoVuln{Below: "1.6.3"}); !got {
 		t.Fatal("empty version must be treated as affected (a LEAD)")
 	}
 }
@@ -341,4 +344,124 @@ func hasCVE(res Result, cve string) bool {
 		}
 	}
 	return false
+}
+
+// enrich's JS hook resolves one library per call, so the Retire.js repository must be
+// fetched once per Adapter (one Adapter per scan), not once per library.
+func TestRepoLoadsOnce(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(nestedRepoJSON))
+	}))
+	t.Cleanup(srv.Close)
+	a := New(srv.URL, fetch.New())
+	for i := 0; i < 3; i++ {
+		a.LookupOne(context.Background(), "jquery", "1.0.0")
+	}
+	a.Lookup(context.Background(), map[string]string{"jquery": "1.0.0"})
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("4 lookups must fetch the repository once, fetched %d times", n)
+	}
+}
+
+// A repository synced into the local store (within MaxAge) costs no request and is never
+// reported live.
+func TestRepoFromSyncedStoreIsNotLive(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(nestedRepoJSON))
+	}))
+	defer srv.Close()
+	c := fetch.New()
+	c.CacheDir, c.MaxAge = t.TempDir(), time.Hour
+	r1 := New(srv.URL, c).LookupOne(context.Background(), "jquery", "1.0.0")
+	r2 := New(srv.URL, c).LookupOne(context.Background(), "jquery", "1.0.0")
+	if !r1.Live {
+		t.Fatal("the first run fetched the repository: want live")
+	}
+	if hits.Load() != 1 || r2.Live || ToUnified(r2).Freshness != unified.FreshnessSnapshot || r2.Resolved != r1.Resolved {
+		t.Fatalf("the second run must reuse the synced repository as a snapshot with no request: hits=%d live=%v", hits.Load(), r2.Live)
+	}
+}
+
+// The source fails but a synced repository is in the store: lookups use it, labelled
+// stale, never live.
+func TestRepoStaleCopyWhenSourceFails(t *testing.T) {
+	var down atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(nestedRepoJSON))
+	}))
+	defer srv.Close()
+	c := fetch.New()
+	c.CacheDir = t.TempDir()
+	r1 := New(srv.URL, c).LookupOne(context.Background(), "jquery", "1.0.0")
+	down.Store(true)
+	r2 := New(srv.URL, c).LookupOne(context.Background(), "jquery", "1.0.0")
+	if r2.Live || !r2.Stale || ToUnified(r2).Freshness != unified.FreshnessStale || r2.Resolved != r1.Resolved || len(r2.Vulns) != len(r1.Vulns) {
+		t.Fatalf("want the stored repository's answer, stale: %+v", r2)
+	}
+}
+
+// A detected name with a ".js" suffix ("Vue.js") resolves to the repository's bare key
+// ("vue"), so page detections reach their advisories.
+func TestResolveTrimsJSSuffix(t *testing.T) {
+	repo, err := ParseRepo([]byte(`{"vue":{"vulnerabilities":[{"below":"2.6.11","severity":"medium","identifiers":{"CVE":["CVE-2024-0001"]}}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := resolve(repo, "Vue.js", "2.6.0")
+	if !r.KnownLib || !r.Resolved || len(r.Vulns) != 1 {
+		t.Fatalf("Vue.js 2.6.0 must resolve to the vue entry with its advisory, got %+v", r)
+	}
+}
+
+// An advisory bound the npm ordering cannot read ("2.0.0rc1"), or an installed version it
+// cannot read, leaves the advisory's reach unknown: the lead is kept and the result is
+// potentially affected — never "not affected".
+func TestResolveUncomparableIsNeverClean(t *testing.T) {
+	repo, err := ParseRepo([]byte(`{"testlib":{"vulnerabilities":[{"below":"2.0.0rc1","identifiers":{"CVE":["CVE-2099-0001"]}}]},` +
+		`"ctrllib":{"vulnerabilities":[{"below":"2.0.0","identifiers":{"CVE":["CVE-2099-0002"]}}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ lib, ver string }{{"testlib", "1.5.0"}, {"ctrllib", "1.5.0 beta"}} {
+		u := ToUnified(resolve(repo, c.lib, c.ver))
+		if u.State != unified.StatePotentiallyAffected || len(u.Leads) != 1 {
+			t.Errorf("%s %s: want potentially_affected with its lead, got %v %+v", c.lib, c.ver, u.State, u.Leads)
+		}
+	}
+	if u := ToUnified(resolve(repo, "ctrllib", "1.5.0")); u.State != unified.StateAffectedByAdvisory {
+		t.Errorf("control: ctrllib 1.5.0 < 2.0.0 must be affected, got %v", u.State)
+	}
+}
+
+// A caller of LookupOne can tell leads that could not be placed from leads that apply.
+func TestUnpositionedIsVisibleToCallers(t *testing.T) {
+	repo, _ := ParseRepo([]byte(`{"testlib":{"vulnerabilities":[{"below":"2.0.0rc1","identifiers":{"CVE":["CVE-2099-0001"]}}]}}`))
+	if r := resolve(repo, "testlib", "1.5.0"); !r.Unpositioned || len(r.Vulns) != 1 {
+		t.Fatalf("want one lead flagged Unpositioned, got %+v", r)
+	}
+}
+
+// With only the embedded Retire.js sample in use (no repository configured or reachable), a hit
+// is still reported, but "no advisory matched" says nothing — the sample is a handful of
+// libraries, not the repository.
+func TestEmbeddedSampleOnlyAnswersPositively(t *testing.T) {
+	a := New("", fetch.New())
+	if u := ToUnified(a.LookupOne(context.Background(), "lodash", "4.17.20")); u.State == unified.StateNotAffectedByAdvisory || u.Err == "" {
+		t.Fatalf("a miss against the embedded sample = %v %q, want a named gap", u.State, u.Err)
+	}
+	if u := ToUnified(a.LookupOne(context.Background(), "jquery", "1.6.2")); u.State != unified.StateAffectedByAdvisory {
+		t.Fatalf("a hit in the embedded sample is still a lead, got %v", u.State)
+	}
+	full := serveJSON(t, `{"lodash":{"vulnerabilities":[{"below":"4.17.21","identifiers":{"CVE":["CVE-2021-23337"]}}]}}`)
+	if u := ToUnified(New(full, fetch.New()).LookupOne(context.Background(), "lodash", "4.17.21")); u.State == unified.StateNotAffectedByAdvisory || u.Err == "" {
+		t.Fatalf("a miss against the live repository is no clearance either, got %v %q", u.State, u.Err)
+	}
 }

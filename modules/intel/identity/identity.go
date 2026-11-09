@@ -38,6 +38,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
 )
@@ -87,7 +88,8 @@ var cpeSnapshot []byte
 // cpeDoc is the NVD 2.0 CPE API schema: products[] each wrapping a cpe object with its
 // cpeName, a deprecated flag, and localized titles. Other fields are ignored.
 type cpeDoc struct {
-	Products []struct {
+	TotalResults int `json:"totalResults"` // products the feed says exist; > len(Products) on one page of a paged feed
+	Products     []struct {
 		CPE struct {
 			CPEName    string `json:"cpeName"`
 			Deprecated bool   `json:"deprecated"`
@@ -105,12 +107,41 @@ type cpeDoc struct {
 type Resolver struct {
 	dictURL string
 	client  *fetch.Client
+
+	// shortcut: the dictionary loads once per Resolver and a failed live load stays on
+	// the snapshot for the Resolver's lifetime (visible in Status); build a new Resolver
+	// to retry.
+	once    sync.Once
+	entries []Entry
+	status  DictStatus
 }
+
+// DictStatus says which dictionary ResolveCPE matches against, so a configured live
+// dictionary that failed — or delivered only one page of a paged feed — is visible
+// instead of silently degrading every resolution to the small embedded sample.
+type DictStatus struct {
+	Source   string // "live" or "snapshot"
+	Entries  int    // distinct vendor:product bases available to Match
+	Products int    // product rows the feed delivered (before collapsing versions)
+	Total    int    // product rows the feed says exist (totalResults); 0 when it does not say
+	Err      string // why the configured live dictionary could not be fetched now (Cached: a stale synced copy is in use); "" otherwise
+	Cached   bool   // the operator's dictionary came from the local store (synced copy), not a fetch now
+}
+
+// Partial reports that the feed delivered fewer products than it says exist — one page
+// of the paged NVD API, not the whole dictionary.
+func (s DictStatus) Partial() bool { return s.Total > s.Products }
 
 // New builds a resolver bound to the operator-supplied CPE dictionary URL and client.
 // The URL may be empty (the embedded public-domain sample is then used).
 func New(dictURL string, client *fetch.Client) *Resolver {
 	return &Resolver{dictURL: strings.TrimSpace(dictURL), client: client}
+}
+
+// Status loads the dictionary if it is not loaded yet and reports which one is in use.
+func (r *Resolver) Status(ctx context.Context) DictStatus {
+	r.once.Do(func() { r.load(ctx) })
+	return r.status
 }
 
 // ResolveCPE resolves (name / vendor / product) to a VERIFIED CPE or Unknown. When
@@ -121,26 +152,40 @@ func New(dictURL string, client *fetch.Client) *Resolver {
 // a dead/off dictionary uses the embedded sample, so a tech the sample does not know
 // still returns Unknown rather than erroring.
 func (r *Resolver) ResolveCPE(ctx context.Context, name, vendor, product string) (cpe string, evidence string, state State) {
-	return Match(r.load(ctx), name, vendor, product)
+	r.once.Do(func() { r.load(ctx) })
+	cpe, evidence, state = Match(r.entries, name, vendor, product)
+	if state == StateVerified && r.status.Source != "live" {
+		return "", "", StateUnknown // the embedded sample is a handful of bases, not the dictionary: it never verifies
+	}
+	return cpe, evidence, state
 }
 
-// load returns the dictionary entries, preferring the operator's live feed but failing
-// open to the embedded public-domain sample on an empty URL, a fetch error, or junk
-// content (a proxy serving HTML). It never returns nil.
-func (r *Resolver) load(ctx context.Context) []Entry {
-	snap, _ := ParseDict(cpeSnapshot)
+// load fills entries and status, preferring the operator's live feed but failing open
+// to the embedded public-domain sample on an empty URL, a fetch error, or junk content
+// (a proxy serving HTML) — and recording why in status instead of hiding it.
+func (r *Resolver) load(ctx context.Context) {
+	snap, products, total, _ := parseDict(cpeSnapshot)
+	r.entries = snap
+	r.status = DictStatus{Source: "snapshot", Entries: len(snap), Products: products, Total: total}
 	if r.dictURL == "" {
-		return snap
+		return
 	}
-	raw, err := r.client.Get(ctx, r.dictURL)
+	raw, meta, err := r.client.GetMeta(ctx, r.dictURL)
 	if err != nil {
-		return snap
+		r.status.Err = err.Error()
+		return
 	}
-	live, err := ParseDict(raw)
-	if err != nil || len(live) == 0 {
-		return snap
+	live, products, total, err := parseDict(raw)
+	if err != nil {
+		r.status.Err = "live dictionary unparseable: " + err.Error()
+		return
 	}
-	return live
+	if len(live) == 0 {
+		r.status.Err = "live dictionary had no usable CPE entries"
+		return
+	}
+	r.entries = live
+	r.status = DictStatus{Source: "live", Entries: len(live), Products: products, Total: total, Cached: meta.Cached, Err: meta.Err}
 }
 
 // ParseDict is the PURE decode of an NVD CPE dictionary feed into version-agnostic
@@ -149,9 +194,16 @@ func (r *Resolver) load(ctx context.Context) []Entry {
 // one product collapse to a single base, keeping the first English title as evidence.
 // The result is sorted by CPE for deterministic tests and logs.
 func ParseDict(b []byte) ([]Entry, error) {
+	e, _, _, err := parseDict(b)
+	return e, err
+}
+
+// parseDict is ParseDict plus the feed's delivered and declared product counts, which
+// Status needs to tell one page of a paged feed from the whole dictionary.
+func parseDict(b []byte) (entries []Entry, products, total int, err error) {
 	var doc cpeDoc
 	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	byBase := make(map[string]Entry)
 	for _, p := range doc.Products {
@@ -172,7 +224,7 @@ func ParseDict(b []byte) ([]Entry, error) {
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CPE < out[j].CPE })
-	return out, nil
+	return out, len(doc.Products), doc.TotalResults, nil
 }
 
 // Match is the PURE resolution rule (no network, table-testable). It collects the

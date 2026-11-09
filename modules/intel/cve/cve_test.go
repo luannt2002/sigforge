@@ -154,3 +154,27 @@ func TestLookupOverLoopback(t *testing.T) {
 		t.Errorf("patched version → %+v, want StateNoKnownCVE + no CVEs", patched)
 	}
 }
+
+// Lookup keeps the feed's declared total, so a one-page answer is recognizable as partial.
+func TestLookupRecordsFeedTotal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"totalResults":2500,"vulnerabilities":[{"cve":{"id":"CVE-2021-0001"}}]}`))
+	}))
+	defer srv.Close()
+	res, err := New(srv.URL, fetch.New()).Lookup(context.Background(), "cpe:2.3:a:x:y:*:*:*:*:*:*:*:*", "1.0")
+	if err != nil || res.Total != 2500 || len(res.CVEs) != 1 {
+		t.Fatalf("Lookup must keep the feed total: total=%d cves=%d err=%v", res.Total, len(res.CVEs), err)
+	}
+}
+
+// A body that is not an NVD CVE API answer (no totalResults) is a failed lookup, never "no CVE".
+func TestParseRejectsBodiesThatAreNotNVD(t *testing.T) {
+	for _, b := range []string{`{}`, `null`, `{"message":"rate limited, retry later"}`, `{"vulnerabilities":[]}`} {
+		if _, err := Parse([]byte(b)); err == nil {
+			t.Errorf("Parse(%s) accepted a body that is not an NVD answer", b)
+		}
+	}
+	if _, err := Parse([]byte(`{"totalResults":0,"vulnerabilities":[]}`)); err != nil {
+		t.Errorf("a real empty NVD answer must parse: %v", err)
+	}
+}

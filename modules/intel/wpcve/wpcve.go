@@ -44,10 +44,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/versioncmp"
 )
 
 // EnvWPVulnURL / EnvWPOrgURL are the environment variables the operator uses to
@@ -138,6 +140,19 @@ type Lead struct {
 	Confidence string  // always "heuristic": method is version-range, not a proven exploit
 }
 
+// unresolvedReason refines a Resolved=false result so an adapter can keep the
+// honest tri-state apart (feed off vs unreachable vs unknown slug) instead of
+// collapsing it to one "unknown". Unexported: it adds no public API surface, and
+// its zero value (reasonResolved) is the "nothing special" case.
+type unresolvedReason int
+
+const (
+	reasonResolved    unresolvedReason = iota // entry present, or the state is carried by another flag
+	reasonFeedOff                             // the vuln feed was not configured ⇒ not_checked
+	reasonSourceDown                          // configured feed errored / empty / unparseable ⇒ source_unavailable
+	reasonUnknownSlug                         // the feed answered but does not list this slug ⇒ unknown_product
+)
+
 // PluginResult is the full answer for one plugin/theme slug.
 //
 // Resolved=false means UNKNOWN: the vulnerability feed was off, unreachable,
@@ -145,25 +160,31 @@ type Lead struct {
 // installed version could not be parsed for range comparison
 // (UnparsedVersion=true). The caller MUST render that as a not-measured finding,
 // NOT as "clean". Resolved=true with an empty Vulns means the feed HAD an opinion
-// and the installed version matched none of its ranges — clean per that source.
+// and the installed version matched none of its ranges — a miss, which ToUnified
+// reports as not_checked, never as clean (the feed carries no count).
 type PluginResult struct {
 	Slug            string
 	Version         string
+	Kind            string // "plugin" | "theme" — the directory queried (for scope)
 	InDirectory     Tri    // tier-4 provenance, tri-state
 	Provenance      string // ProvFree | ProvNotInDir | ProvUnknown
 	LatestVersion   string // newest version per the .org directory (when known)
 	RequiresPHP     string // minimum PHP per .org (when known)
 	RequiresWP      string // minimum WP per .org (when known)
-	Vulns           []Lead // version-range LEADs (empty + Resolved=true ⇒ clean per the feed)
+	Vulns           []Lead // version-range LEADs (empty + Resolved=true ⇒ no range matched)
 	Compat          Compat // CompatUnknown unless a runtime was supplied via WithRuntime
 	Resolved        bool   // false ⇒ UNKNOWN (feed gave no answer or version unparseable) ⇒ not-measured
 	UnparsedVersion bool   // true ⇒ a version WAS detected but is not semver-comparable ⇒ distinct UNKNOWN, never clean
+	Unpositioned    bool   // Vulns are advisories whose bounds could not be compared with Version: they may not apply
+
+	reason unresolvedReason // why Resolved=false (off vs unavailable vs unknown slug); zero when Resolved
 }
 
 // Provider resolves provenance + vulnerabilities from the operator-supplied WPVULN
 // and WPORG URLs. Either URL may be empty (that source stays OFF: no network). The
-// zero value is not ready; use New. Stateless per call (no cache), matching the
-// kev/cve adapters.
+// zero value is not ready; use New. Stateless per call (no cache): each query is
+// per slug, like the cve/lifecycle adapters — unlike kev/jslib, there is no whole
+// catalog to load once.
 type Provider struct {
 	vulnURL    string
 	orgURL     string
@@ -209,6 +230,7 @@ func (p *Provider) lookup(ctx context.Context, slug, version, kind string) Plugi
 	res := PluginResult{
 		Slug:        strings.TrimSpace(slug),
 		Version:     strings.TrimSpace(version),
+		Kind:        kind,
 		InDirectory: TriUnknown,
 		Provenance:  ProvUnknown,
 		Compat:      CompatUnknown,
@@ -233,11 +255,12 @@ func (p *Provider) lookup(ctx context.Context, slug, version, kind string) Plugi
 	}
 
 	// tier 2/3 — vulnerability feed. A nil entry (off / unreachable / 404 / "found
-	// nothing") is UNKNOWN, never clean (the honest-verdict rule).
-	entry, err := p.fetchVulns(ctx, res.Slug, kind)
-	if err != nil || entry == nil {
-		res.Resolved = false
-		return res
+	// nothing") is UNKNOWN, never clean (the honest-verdict rule); reason keeps the
+	// three causes apart for an adapter.
+	entry, reason := p.fetchVulns(ctx, res.Slug, kind)
+	if entry == nil {
+		res.reason = reason
+		return res // Resolved stays false ⇒ UNKNOWN
 	}
 	res.Resolved = true
 
@@ -252,12 +275,18 @@ func (p *Provider) lookup(ctx context.Context, slug, version, kind string) Plugi
 		return res
 	}
 
+	var unpositioned []Lead
 	for i := range entry.Vulnerabilities {
 		v := &entry.Vulnerabilities[i]
-		if res.Version != "" && !versionAffected(res.Version, v) {
-			continue
+		switch affected, determinate := versionAffected(res.Version, v); {
+		case affected:
+			res.Vulns = append(res.Vulns, leadFrom(v))
+		case !determinate:
+			unpositioned = append(unpositioned, leadFrom(v))
 		}
-		res.Vulns = append(res.Vulns, leadFrom(v))
+	}
+	if len(res.Vulns) == 0 && len(unpositioned) > 0 {
+		res.Vulns, res.Unpositioned = unpositioned, true
 	}
 	return res
 }
@@ -285,18 +314,27 @@ type feedVuln struct {
 }
 
 // fetchVulns asks the operator's WPVULN URL about one slug via the stateless fetch
-// client. OFF ⇒ (nil, nil) and no network. Fail-open: any fetch error (incl. a 404
-// = slug absent) ⇒ (nil, err) ⇒ caller treats it as UNKNOWN, never clean. A non-nil
-// entry (even with an empty Vulnerabilities list) means the feed KNOWS the slug.
-func (p *Provider) fetchVulns(ctx context.Context, slug, kind string) (*feedEntry, error) {
+// client, returning why the lookup is UNKNOWN when it is. OFF ⇒ reasonFeedOff and no
+// network. Fail-open: a fetch error (incl. a 404 = slug absent), an empty or
+// unparseable body ⇒ reasonSourceDown. A feed that answers but does not list the
+// slug ⇒ reasonUnknownSlug. A non-nil entry (even with an empty Vulnerabilities
+// list) means the feed KNOWS the slug ⇒ reasonResolved.
+func (p *Provider) fetchVulns(ctx context.Context, slug, kind string) (*feedEntry, unresolvedReason) {
 	if p.vulnURL == "" || p.client == nil {
-		return nil, nil
+		return nil, reasonFeedOff
 	}
 	b, err := p.client.Get(ctx, buildURL(p.vulnURL, slug, kind))
 	if err != nil || len(b) == 0 {
-		return nil, err // unreachable / 404 / empty ⇒ UNKNOWN (NOT clean)
+		return nil, reasonSourceDown // unreachable / 404 / empty ⇒ UNKNOWN (NOT clean)
 	}
-	return parseVulns(b, slug)
+	e, err := parseVulns(b, slug)
+	if err != nil {
+		return nil, reasonSourceDown // unparseable body ⇒ UNKNOWN (NOT clean)
+	}
+	if e == nil {
+		return nil, reasonUnknownSlug // feed answered but does not list this slug
+	}
+	return e, reasonResolved
 }
 
 // parseVulns turns a feed body into an entry, applying the honest-verdict rule. A
@@ -317,6 +355,13 @@ func parseVulns(b []byte, slug string) (*feedEntry, error) {
 	}
 	for k, v := range raw { // keyed-by-slug shape
 		if strings.EqualFold(k, slug) {
+			var probe map[string]json.RawMessage
+			if err := json.Unmarshal(v, &probe); err != nil {
+				return nil, err
+			}
+			if _, ok := probe["vulnerabilities"]; !ok {
+				return nil, nil // null or an entry without a vulnerabilities list: not an answer ⇒ UNKNOWN
+			}
 			var e feedEntry
 			if err := json.Unmarshal(v, &e); err != nil {
 				return nil, err
@@ -355,14 +400,14 @@ func (p *Provider) orgLookup(ctx context.Context, slug, kind string) (*orgInfo, 
 // not fetch.Client.Get — because here status carries meaning: 200 ⇒ parse
 // (in-directory, or a null/error body ⇒ not-in-directory); 404 ⇒ not-in-directory
 // (clean negative, NOT an error); anything else / transport error ⇒ UNKNOWN. It
-// reuses the client's configured *http.Client (timeout) rather than a second one.
+// goes through the client's Do (its timeout and 429 hold-off), not a second client.
 func (p *Provider) orgFetch(ctx context.Context, u string) (*orgInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "sigforge-fetch")
-	res, err := p.client.HTTP.Do(req)
+	res, err := p.client.Do(req) // through the client's 429 hold-off, like every fetch
 	if err != nil {
 		return nil, err
 	}
@@ -435,39 +480,71 @@ func buildURL(base, slug, kind string) string {
 // "fixed_in = X" means vulnerable strictly below X. Unfixed means no fix was ever
 // published, so anything at/above the lower bound stays vulnerable. An empty
 // installed version can't be excluded ⇒ true (treated as a LEAD; honest "can't
-// pin"). Pure.
-func versionAffected(installed string, rec *feedVuln) bool {
+// pin"). Versions order as WordPress orders them, by PHP's version_compare; a bound it
+// cannot read is never taken as equal — unless another bound already puts the version
+// outside, determinate=false (whether the advisory applies is unknown). Pure.
+func versionAffected(installed string, rec *feedVuln) (affected, determinate bool) {
 	installed = strings.TrimSpace(installed)
 	if installed == "" {
-		return true
+		return true, true
+	}
+	determinate = true
+	cmp := func(bound string) (int, bool) {
+		c, ok := versioncmp.Compare("Packagist", installed, bound)
+		if ok && c != 0 && zeroPaddedEqual(installed, bound) {
+			ok = false // PHP puts 5.8.0 above 5.8, a padded order makes them equal: ambiguous
+		}
+		determinate = determinate && ok
+		return c, ok
 	}
 
 	if mv := strings.TrimSpace(rec.MinVersion); mv != "" {
-		c := cmpVer(installed, mv)
-		if strings.EqualFold(strings.TrimSpace(rec.MinOp), "gt") {
-			if c <= 0 {
-				return false
+		if c, ok := cmp(mv); ok {
+			if strings.EqualFold(strings.TrimSpace(rec.MinOp), "gt") {
+				if c <= 0 {
+					return false, true
+				}
+			} else if c < 0 { // ge (default)
+				return false, true
 			}
-		} else if c < 0 { // ge (default)
-			return false
 		}
 	}
 
-	if rec.Unfixed {
-		return true // no fixed release ⇒ no upper bound
-	}
-
-	if xv := strings.TrimSpace(rec.MaxVersion); xv != "" {
-		c := cmpVer(installed, xv)
-		if strings.EqualFold(strings.TrimSpace(rec.MaxOp), "le") {
-			return c <= 0
+	if !rec.Unfixed { // Unfixed: no fixed release ⇒ no upper bound
+		if xv := strings.TrimSpace(rec.MaxVersion); xv != "" {
+			if c, ok := cmp(xv); ok {
+				le := strings.EqualFold(strings.TrimSpace(rec.MaxOp), "le")
+				if (le && c > 0) || (!le && c >= 0) { // lt (default): "fixed_in" ⇒ vulnerable strictly below
+					return false, true
+				}
+			}
 		}
-		return c < 0 // lt (default): "fixed_in" ⇒ vulnerable strictly below
 	}
 
-	// only a lower bound given, no max ⇒ can't bound above; the lower bound already
-	// matched, so report it as a LEAD rather than silently dropping it.
-	return true
+	// every readable bound let the version in; with only a lower bound the advisory is
+	// reported as a LEAD rather than silently dropped.
+	return determinate, determinate
+}
+
+// zeroPaddedEqual reports whether two all-numeric versions differ only by trailing zero groups.
+func zeroPaddedEqual(a, b string) bool {
+	groups := func(s string) ([]int, bool) {
+		var out []int
+		for _, p := range strings.Split(strings.TrimSpace(s), ".") {
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 0 {
+				return nil, false
+			}
+			out = append(out, n)
+		}
+		for len(out) > 0 && out[len(out)-1] == 0 {
+			out = out[:len(out)-1]
+		}
+		return out, true
+	}
+	x, okx := groups(a)
+	y, oky := groups(b)
+	return okx && oky && slices.Equal(x, y)
 }
 
 // CheckCompatibility compares required vs runtime for PHP and WP, three-state. A

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
 
 // ── pure matchers (no network) ─────────────────────────────────────────────────
@@ -36,7 +37,7 @@ func TestVersionAffected(t *testing.T) {
 		{"only upper bound", "0.5", feedVuln{MaxVersion: "1.0", MaxOp: "lt"}, true},
 	}
 	for _, c := range cases {
-		if got := versionAffected(c.ver, &c.rec); got != c.want {
+		if got, _ := versionAffected(c.ver, &c.rec); got != c.want {
 			t.Errorf("%s: versionAffected(%q)=%v want %v", c.name, c.ver, got, c.want)
 		}
 	}
@@ -386,5 +387,67 @@ func TestLookupThemeKnownSlug(t *testing.T) {
 	res := New(vuln.URL+"/{slug}", "", fetch.New()).LookupTheme(context.Background(), "twentytwenty", "1.5")
 	if !res.Resolved || len(res.Vulns) != 1 || res.Vulns[0].ID != "T1" {
 		t.Fatalf("theme lookup wrong: resolved=%v vulns=%+v", res.Resolved, res.Vulns)
+	}
+}
+
+// WordPress orders versions with PHP's version_compare: a letter suffix is part of the version
+// (1.2.2 < 1.2.3a), and a bound that is not a version at all leaves the advisory's reach
+// unknown — kept as a lead, potentially affected, never "not affected".
+func TestBoundsUnderPHPOrderAndUncomparableBounds(t *testing.T) {
+	if a, ok := versionAffected("1.2.2", &feedVuln{MaxVersion: "1.2.3a"}); !a || !ok {
+		t.Errorf("1.2.2 below fix 1.2.3a: want affected+determinate, got %v %v", a, ok)
+	}
+	if a, ok := versionAffected("1.2.2", &feedVuln{MaxVersion: "trunk"}); a || ok {
+		t.Errorf("a bound that is not a version: want indeterminate, got affected=%v determinate=%v", a, ok)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"acme":{"vulnerabilities":[{"id":"V1","cve":"CVE-2099-0001","max_version":"trunk"}]}}`)
+	}))
+	defer srv.Close()
+	res := New(srv.URL+"/{slug}", "", fetch.New()).LookupPlugin(context.Background(), "acme", "1.2.2")
+	if u := ToUnified(res); u.State != unified.StatePotentiallyAffected || len(u.Leads) != 1 || u.Err == "" {
+		t.Fatalf("an advisory with an uncomparable bound must be a potential lead, got %v %+v %q", u.State, u.Leads, u.Err)
+	}
+}
+
+// A source that is off says so.
+func TestFeedOffSaysWhy(t *testing.T) {
+	if u := ToUnified(New("", "", fetch.New()).LookupPlugin(context.Background(), "acme", "1.0")); u.State != unified.StateNotChecked || u.Err == "" {
+		t.Fatalf("an off feed must be not_checked with a reason, got %v %q", u.State, u.Err)
+	}
+}
+
+// A slug the feed maps to null, or to an object without a vulnerabilities list, was not
+// answered: unknown, not "no vulnerability".
+func TestNullOrShapelessEntryIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"nullslug":null,"emptyobj":{}}`)
+	}))
+	defer srv.Close()
+	p := New(srv.URL, "", fetch.New())
+	for _, slug := range []string{"nullslug", "emptyobj"} {
+		if u := ToUnified(p.LookupPlugin(context.Background(), slug, "1.0")); u.State != unified.StateUnknownProduct {
+			t.Errorf("%s: %v, want unknown_product", slug, u.State)
+		}
+	}
+}
+
+// When PHP's order and a zero-padded numeric order disagree (5.8.0 vs 5.8), the comparison is
+// ambiguous — the advisory may apply — so it is indeterminate, never a clean miss.
+func TestTrailingZeroDisagreementIsIndeterminate(t *testing.T) {
+	cases := []struct {
+		ver string
+		rec feedVuln
+	}{
+		{"5.8.0", feedVuln{MaxVersion: "5.8", MaxOp: "le"}},
+		{"2.0", feedVuln{MinVersion: "2.0.0", MinOp: "ge", MaxVersion: "2.1.3", MaxOp: "lt"}},
+	}
+	for _, c := range cases {
+		if a, ok := versionAffected(c.ver, &c.rec); a || ok {
+			t.Errorf("%s vs %+v: want indeterminate, got affected=%v determinate=%v", c.ver, c.rec, a, ok)
+		}
+	}
+	if a, ok := versionAffected("5.8.1", &feedVuln{MaxVersion: "5.8"}); a || !ok {
+		t.Errorf("5.8.1 is past fix 5.8 in both orders: want a determinate miss, got %v %v", a, ok)
 	}
 }

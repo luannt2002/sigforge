@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
 )
@@ -46,6 +47,12 @@ import (
 // URL (e.g. https://services.nvd.nist.gov/rest/json/cves/2.0). It mirrors the source
 // adapters' and lifecycle's naming.
 const EnvVar = "SIGFORGE_SOURCE_CVE_URL"
+
+// ErrFeedOff is returned by Lookup when the feed is off (no base URL). It is a
+// sentinel so a consumer (e.g. the unified adapter) can tell "feed off / not
+// checked" apart from a fetch/decode failure ("source unavailable") with
+// errors.Is — the two are both StateUnknown but mean different things for honesty.
+var ErrFeedOff = errors.New(EnvVar + " not set: CVE feed is off (set it to the CVE API base URL; see .env.example)")
 
 // State is the tri-state CVE verdict. The zero value is StateUnknown, so an unset
 // verdict is honestly "unknown / not-checked", never a false "no CVEs = safe".
@@ -81,10 +88,12 @@ type CVE struct {
 // Result is one lookup's outcome. CPE is the exact CPE queried (version filled in);
 // State is the honest tri-state; CVEs is non-empty only for StateHasCVE.
 type Result struct {
-	CPE     string
-	Version string
-	State   State
-	CVEs    []CVE
+	CPE       string
+	Version   string
+	State     State
+	CVEs      []CVE
+	Total     int       // CVEs the feed says match (totalResults); more than len(CVEs) when it returned one page
+	FetchedAt time.Time // when the feed answered (UTC); zero when no fetch happened (feed off / no CPE)
 }
 
 // Adapter queries the operator-supplied CVE API base URL for a CPE's known CVEs.
@@ -117,17 +126,18 @@ func (a *Adapter) Lookup(ctx context.Context, cpe, version string) (Result, erro
 	query := withVersion(cpe, version)
 	res.CPE = query
 	if a.baseURL == "" {
-		return res, errors.New(EnvVar + " not set: CVE feed is off (set it to the CVE API base URL, e.g. https://services.nvd.nist.gov/rest/json/cves/2.0)")
+		return res, ErrFeedOff
 	}
 	raw, err := a.client.Get(ctx, a.baseURL+"?virtualMatchString="+url.QueryEscape(query))
 	if err != nil {
 		return res, fmt.Errorf("cve: fetch %q: %w", query, err)
 	}
-	cves, err := Parse(raw)
+	cves, total, err := parse(raw)
 	if err != nil {
 		return res, fmt.Errorf("cve: %q: %w", query, err)
 	}
-	res.CVEs = cves
+	res.CVEs, res.Total = cves, total
+	res.FetchedAt = time.Now().UTC()
 	if len(cves) == 0 {
 		res.State = StateNoKnownCVE
 	} else {
@@ -156,6 +166,7 @@ func withVersion(cpe, version string) string {
 // CVE id and its CVSS metrics. Every other field (descriptions, references,
 // configurations, weaknesses) is intentionally ignored.
 type nvdResponse struct {
+	TotalResults    *int `json:"totalResults"` // the API pages results; more than len(Vulnerabilities) ⇒ one page came back; absent ⇒ not an NVD answer
 	Vulnerabilities []struct {
 		CVE struct {
 			ID      string `json:"id"`
@@ -185,9 +196,19 @@ type nvdMetric struct {
 // (v4.0 → v3.1 → v3.0 → v2.0); a CVE with no CVSS metric is still reported, with a
 // zero CVSS and empty Severity, rather than dropped.
 func Parse(raw []byte) ([]CVE, error) {
+	cves, _, err := parse(raw)
+	return cves, err
+}
+
+// parse is Parse plus the feed's declared total (totalResults), which Lookup keeps so a
+// truncated page is reported instead of read as the complete list.
+func parse(raw []byte) ([]CVE, int, error) {
 	var resp nvdResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("decode cve response: %w", err)
+		return nil, 0, fmt.Errorf("decode cve response: %w", err)
+	}
+	if resp.TotalResults == nil {
+		return nil, 0, errors.New("decode cve response: not an NVD CVE API answer (no totalResults)")
 	}
 	out := make([]CVE, 0, len(resp.Vulnerabilities))
 	for _, v := range resp.Vulnerabilities {
@@ -202,7 +223,7 @@ func Parse(raw []byte) ([]CVE, error) {
 		}
 		out = append(out, c)
 	}
-	return out, nil
+	return out, *resp.TotalResults, nil
 }
 
 // pickMetric returns the first metric from the highest-precedence non-empty group.

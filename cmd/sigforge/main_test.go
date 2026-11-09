@@ -110,7 +110,7 @@ func captureStdout(t *testing.T, fn func()) string {
 // branch prints the leads followed by the WHY trace.
 func TestCmdCVEExplainEndToEnd(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"vulnerabilities":[{"cve":{"id":"CVE-2021-23017","metrics":{"cvssMetricV31":[{"source":"nvd@nist.gov","cvssData":{"baseScore":7.7,"baseSeverity":"HIGH"}}]}}}]}`)
+		io.WriteString(w, `{"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-23017","metrics":{"cvssMetricV31":[{"source":"nvd@nist.gov","cvssData":{"baseScore":7.7,"baseSeverity":"HIGH"}}]}}}]}`)
 	}))
 	defer srv.Close()
 	t.Setenv(cve.EnvVar, srv.URL)

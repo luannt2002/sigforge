@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
 
 // kevTestJSON is the real upstream KEV shape: an outer object + vulnerabilities[]
@@ -264,5 +267,94 @@ func TestEmbeddedSnapshotHasRansomware(t *testing.T) {
 	}
 	if ransom == 0 {
 		t.Fatal("the snapshot has no ransomware CVE")
+	}
+}
+
+// enrich prioritizes the CVE leads of every detection, so the KEV catalog must be
+// fetched once per Adapter (one Adapter per scan), not once per call.
+func TestKEVCatalogLoadsOnce(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(kevTestJSON))
+	}))
+	t.Cleanup(srv.Close)
+	a := New(srv.URL, "", fetch.New())
+	for i := 0; i < 3; i++ {
+		a.EnrichUnified(context.Background(), []string{"CVE-2021-44228"})
+	}
+	a.Enrich(context.Background(), []string{"CVE-2021-44228"})
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("4 calls must fetch the KEV catalog once, fetched %d times", n)
+	}
+}
+
+// Status must say which KEV catalog prioritizes the leads, so a configured live catalog
+// that failed (a 403, a 500, a proxy page) is never silently replaced by the small
+// embedded snapshot.
+func TestCatalogStatus(t *testing.T) {
+	cases := []struct{ name, url, wantSource, wantErr string }{
+		{"no URL uses the snapshot, nothing failed", "", "snapshot", ""},
+		{"live catalog in use", serveJSON(t, kevTestJSON), "live", ""},
+		{"live down falls back and says why", serve500(t), "snapshot", "500"},
+		{"live junk falls back and says why", serveJSON(t, "<html>Access Denied</html>"), "snapshot", "unparseable"},
+		{"live with no entries falls back and says why", serveJSON(t, `{"vulnerabilities":[]}`), "snapshot", "no entries"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := New(c.url, "", fetch.New()).Status(context.Background())
+			if s.Source != c.wantSource || s.Entries == 0 {
+				t.Fatalf("got %+v, want source=%s and entries>0", s, c.wantSource)
+			}
+			if c.wantErr == "" && s.Err != "" || c.wantErr != "" && !strings.Contains(s.Err, c.wantErr) {
+				t.Fatalf("Err = %q, want it to contain %q", s.Err, c.wantErr)
+			}
+		})
+	}
+}
+
+// A catalog synced into the local store (within MaxAge) is used with no request and is
+// labelled a snapshot of the sync time — never live.
+func TestKEVFromSyncedStoreIsSnapshot(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(kevTestJSON))
+	}))
+	defer srv.Close()
+	c := fetch.New()
+	c.CacheDir, c.MaxAge = t.TempDir(), time.Hour
+	first := New(srv.URL, "", c).EnrichUnified(context.Background(), []string{"CVE-2021-44228"})["CVE-2021-44228"]
+	second := New(srv.URL, "", c).EnrichUnified(context.Background(), []string{"CVE-2021-44228"})["CVE-2021-44228"]
+	if first.Freshness != unified.FreshnessLive {
+		t.Fatalf("the first run fetched the catalog: want live, got %v", first.Freshness)
+	}
+	if hits.Load() != 1 || second.Freshness != unified.FreshnessSnapshot || second.FetchedAt == "" || second.State != first.State {
+		t.Fatalf("the second run must reuse the synced catalog as a dated snapshot with no request: hits=%d %+v", hits.Load(), second)
+	}
+}
+
+// The source fails but a synced copy is in the store: leads are prioritized against that
+// copy (3 entries, not the 7-entry embedded snapshot), labelled stale, and Status names
+// the failure.
+func TestKEVStaleCopyWhenSourceFails(t *testing.T) {
+	var down atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(kevTestJSON))
+	}))
+	defer srv.Close()
+	c := fetch.New()
+	c.CacheDir = t.TempDir()
+	New(srv.URL, "", c).EnrichUnified(context.Background(), []string{"CVE-2021-44228"})
+	down.Store(true)
+	a := New(srv.URL, "", c)
+	got := a.EnrichUnified(context.Background(), []string{"CVE-2021-44228"})["CVE-2021-44228"]
+	st := a.Status(context.Background())
+	if got.Freshness != unified.FreshnessStale || got.State != unified.StateAffectedByAdvisory || !st.Cached || !strings.Contains(st.Err, "503") || st.Entries != 3 {
+		t.Fatalf("want the stored copy, stale, with the failure named: %+v / %+v", got, st)
 	}
 }

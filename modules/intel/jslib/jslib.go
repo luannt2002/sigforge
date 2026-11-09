@@ -23,7 +23,8 @@
 //	HasCVE          — the feed knows the library AND the installed version falls in a
 //	                  published vulnerable range ⇒ Resolved=true with Vulns.
 //	NoKnownVuln     — the feed knows the library and the version matched no range ⇒
-//	                  Resolved=true, empty Vulns (clean PER THIS SOURCE).
+//	                  Resolved=true, empty Vulns (a miss, not a clearance: ToUnified
+//	                  answers not_checked).
 //	UNKNOWN         — the feed is off/dead/unparseable, OR the library is not listed
 //	                  (KnownLib=false), OR a version was detected but is not
 //	                  semver-comparable (UnparsedVersion=true) ⇒ Resolved=false. The
@@ -47,8 +48,10 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/versioncmp"
 )
 
 // EnvRetireJSURL is the environment variable the operator uses to supply the
@@ -100,23 +103,35 @@ type Lead struct {
 // the feed was off/dead/unparseable (KnownLib=false), the library is not listed
 // (KnownLib=false), or a version WAS detected but is not semver-comparable
 // (UnparsedVersion=true). Resolved=true with an empty Vulns means the feed KNOWS the
-// library and the installed version matched none of its ranges — clean per Retire.js.
+// library and the installed version matched none of its ranges — a miss, which ToUnified
+// reports as not_checked, never as clean.
 type Result struct {
 	Library         string
 	Version         string
-	Vulns           []Lead // version-range LEADs (empty + Resolved=true ⇒ clean per the feed)
+	Vulns           []Lead // version-range LEADs (empty + Resolved=true ⇒ no range matched)
 	KnownLib        bool   // the feed lists this library (its vuln history is known)
 	Resolved        bool   // false ⇒ UNKNOWN ⇒ not-measured (never "safe")
 	UnparsedVersion bool   // a version was detected but is not comparable ⇒ distinct UNKNOWN
+	Unpositioned    bool   // Vulns are advisories whose bounds could not be compared with Version: they may not apply
+	Live            bool   // the repo behind this result came from the operator's live URL, not the embedded snapshot
+	Stale           bool   // the source failed, so the repo is the last synced copy from the local store
+	Sample          bool   // the repo is the embedded sample, not the repository: a miss in it is not an answer
 }
 
 // Adapter resolves library vulnerabilities from the operator-supplied Retire.js URL,
 // falling back to the embedded Apache-2.0 snapshot when the URL is empty or the feed
-// is unusable. The zero value is not ready; use New. Stateless per call (no cache),
-// matching the kev/wpcve adapters.
+// is unusable. The zero value is not ready; use New.
 type Adapter struct {
 	url    string
 	client *fetch.Client
+
+	// shortcut: the repository loads once per Adapter (the kev adapter does the same),
+	// so build one Adapter per scan; a long-lived Adapter keeps its first repository.
+	once   sync.Once
+	repo   map[string]libEntry
+	live   bool
+	stale  bool
+	sample bool // the repo is the embedded sample
 }
 
 // New builds an adapter bound to the operator-supplied Retire.js URL and client. An
@@ -128,7 +143,10 @@ func New(retireURL string, client *fetch.Client) *Adapter {
 // LookupOne resolves one library at one version. It loads the repository (live or
 // snapshot) and returns the honest tri-state Result.
 func (a *Adapter) LookupOne(ctx context.Context, library, version string) Result {
-	return resolve(a.loadRepo(ctx), library, version)
+	repo, live, stale := a.loadRepo(ctx)
+	res := resolve(repo, library, version)
+	res.Live, res.Stale, res.Sample = live, stale, a.sample
+	return res
 }
 
 // Lookup resolves MANY libraries in one shot, loading the repository ONCE — the
@@ -140,30 +158,40 @@ func (a *Adapter) Lookup(ctx context.Context, libs map[string]string) map[string
 	if len(libs) == 0 {
 		return out
 	}
-	repo := a.loadRepo(ctx)
+	repo, live, stale := a.loadRepo(ctx)
 	for name, ver := range libs {
-		out[name] = resolve(repo, name, ver)
+		res := resolve(repo, name, ver)
+		res.Live, res.Stale, res.Sample = live, stale, a.sample
+		out[name] = res
 	}
 	return out
 }
 
-// loadRepo returns the library→entry lookup map. It prefers the live repository from
-// the operator's URL but fails open to the embedded Apache-2.0 snapshot on an empty
-// URL, a fetch error, or junk content (a proxy serving HTML). It never returns nil.
-func (a *Adapter) loadRepo(ctx context.Context) map[string]libEntry {
+// loadRepo returns the library→entry lookup map and whether it came LIVE from the
+// operator's URL (true) or fell open to the embedded Apache-2.0 snapshot (false) on an
+// empty URL, a fetch error, or junk content (a proxy serving HTML). It never returns a
+// nil map. The live flag is what lets the adapter report freshness honestly instead of
+// hardcoding snapshot. It is fetched once per Adapter: enrich's JS hook resolves one
+// library per call, and re-downloading the repository per library would be waste.
+func (a *Adapter) loadRepo(ctx context.Context) (map[string]libEntry, bool, bool) {
+	a.once.Do(func() { a.repo, a.live, a.stale, a.sample = a.fetchRepo(ctx) })
+	return a.repo, a.live, a.stale
+}
+
+func (a *Adapter) fetchRepo(ctx context.Context) (repo map[string]libEntry, live, stale, sample bool) {
 	snap, _ := ParseRepo(repoSnapshot)
 	if a.url == "" || a.client == nil {
-		return snap
+		return snap, false, false, true
 	}
-	raw, err := a.client.Get(ctx, a.url)
+	raw, meta, err := a.client.GetMeta(ctx, a.url)
 	if err != nil {
-		return snap
+		return snap, false, false, true
 	}
 	m, err := ParseRepo(raw)
 	if err != nil || len(m) == 0 {
-		return snap
+		return snap, false, false, true
 	}
-	return m
+	return m, !meta.Cached, meta.Stale, false // a locally synced copy is a snapshot, never live
 }
 
 // repoRange is the wire shape of a nested `ranges[]` entry (newer Retire.js master).
@@ -235,6 +263,9 @@ func resolve(repo map[string]libEntry, library, version string) Result {
 	}
 	entry, ok := repo[key]
 	if !ok {
+		entry, ok = repo[strings.TrimSuffix(key, ".js")] // a detected "Vue.js" is the repository's "vue"
+	}
+	if !ok {
 		return res // library not in the feed ⇒ UNKNOWN (never "safe")
 	}
 	res.KnownLib = true
@@ -248,12 +279,18 @@ func resolve(repo map[string]libEntry, library, version string) Result {
 	}
 	res.Resolved = true
 
+	var unpositioned []Lead
 	for i := range entry.Vulnerabilities {
 		v := &entry.Vulnerabilities[i]
-		if res.Version != "" && !versionAffected(res.Version, v) {
-			continue
+		switch affected, determinate := versionAffected(res.Version, v); {
+		case affected:
+			res.Vulns = append(res.Vulns, leadFrom(v))
+		case !determinate:
+			unpositioned = append(unpositioned, leadFrom(v))
 		}
-		res.Vulns = append(res.Vulns, leadFrom(v))
+	}
+	if len(res.Vulns) == 0 && len(unpositioned) > 0 {
+		res.Vulns, res.Unpositioned = unpositioned, true
 	}
 	return res
 }
@@ -261,46 +298,57 @@ func resolve(repo map[string]libEntry, library, version string) Result {
 // versionAffected reports whether `installed` falls in ANY of the vuln's published
 // ranges. The classic flat shape is treated as a single range synthesized from the
 // top-level bounds. An empty installed version can't be excluded ⇒ true (a LEAD,
-// honest "can't pin"). Pure.
-func versionAffected(installed string, v *repoVuln) bool {
+// honest "can't pin"). determinate=false: a bound could not be compared, so whether
+// the vuln applies is unknown. Pure.
+func versionAffected(installed string, v *repoVuln) (affected, determinate bool) {
 	installed = strings.TrimSpace(installed)
 	if installed == "" {
-		return true
-	}
-	for i := range v.Ranges {
-		if inRange(installed, &v.Ranges[i]) {
-			return true
-		}
+		return true, true
 	}
 	if len(v.Ranges) == 0 {
 		// classic flat shape ⇒ one range from the top-level bounds
 		return inRange(installed, &repoRange{AtOrAbove: v.AtOrAbove, Above: v.Above, Below: v.Below, AtOrBelow: v.AtOrBelow})
 	}
-	return false
+	determinate = true
+	for i := range v.Ranges {
+		in, ok := inRange(installed, &v.Ranges[i])
+		if in {
+			return true, true
+		}
+		determinate = determinate && ok
+	}
+	return false, determinate
 }
 
-// inRange tests one window. An explicitly excluded (back-patched) version is NOT
-// affected. A window with no bounds at all means the whole version space is
-// vulnerable ⇒ reported as a LEAD rather than silently dropped. Pure.
-func inRange(installed string, r *repoRange) bool {
-	for _, ex := range r.Excludes {
-		if ex = strings.TrimSpace(ex); ex != "" && cmpVer(installed, ex) == 0 {
+// inRange tests one window under npm's semver order. An explicitly excluded (back-patched)
+// version is NOT affected. A window with no bounds at all means the whole version space is
+// vulnerable ⇒ reported as a LEAD rather than silently dropped. A bound (or the installed
+// version) the order cannot read is never taken as equal: unless another bound already puts
+// the version outside, membership is indeterminate. Pure.
+func inRange(installed string, r *repoRange) (in, determinate bool) {
+	determinate = true
+	outside := func(bound string, out func(c int) bool) bool {
+		b := strings.TrimSpace(bound)
+		if b == "" {
 			return false
 		}
+		c, ok := versioncmp.Compare("npm", installed, b)
+		if !ok {
+			determinate = false
+			return false
+		}
+		return out(c)
 	}
-	if a := strings.TrimSpace(r.Above); a != "" && cmpVer(installed, a) <= 0 {
-		return false
+	for _, ex := range r.Excludes {
+		if outside(ex, func(c int) bool { return c == 0 }) {
+			return false, true
+		}
 	}
-	if a := strings.TrimSpace(r.AtOrAbove); a != "" && cmpVer(installed, a) < 0 {
-		return false
+	if outside(r.Above, func(c int) bool { return c <= 0 }) || outside(r.AtOrAbove, func(c int) bool { return c < 0 }) ||
+		outside(r.Below, func(c int) bool { return c >= 0 }) || outside(r.AtOrBelow, func(c int) bool { return c > 0 }) {
+		return false, true
 	}
-	if b := strings.TrimSpace(r.Below); b != "" && cmpVer(installed, b) >= 0 {
-		return false
-	}
-	if b := strings.TrimSpace(r.AtOrBelow); b != "" && cmpVer(installed, b) > 0 {
-		return false
-	}
-	return true
+	return determinate, determinate
 }
 
 // leadFrom maps a wire vuln to a Lead, unifying flat and nested ranges and passing
@@ -377,49 +425,6 @@ func parseableVersion(s string) bool {
 		}
 	}
 	return true
-}
-
-// cmpVer compares dotted numeric versions group-by-group. A leading v/V and
-// non-numeric tails are tolerated. Pure.
-func cmpVer(a, b string) int {
-	pa, pb := parseVer(a), parseVer(b)
-	n := len(pa)
-	if len(pb) > n {
-		n = len(pb)
-	}
-	for i := 0; i < n; i++ {
-		x, y := 0, 0
-		if i < len(pa) {
-			x = pa[i]
-		}
-		if i < len(pb) {
-			y = pb[i]
-		}
-		if x != y {
-			if x < y {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
-}
-
-func parseVer(s string) []int {
-	s = strings.TrimLeft(strings.TrimSpace(s), "vV")
-	if i := strings.IndexAny(s, "-+ "); i >= 0 {
-		s = s[:i]
-	}
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ".")
-	out := make([]int, len(parts))
-	for i, p := range parts {
-		n, _ := strconv.Atoi(strings.TrimSpace(p))
-		out[i] = n
-	}
-	return out
 }
 
 // normalizeCVEs UPPER-cases, trims and dedupes CVE ids in first-appearance order,
