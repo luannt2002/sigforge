@@ -192,3 +192,35 @@ func runCmp(t *testing.T, eco string, cases []struct {
 		}
 	}
 }
+
+// Cases where the specification and the ecosystem's reference tooling agree, measured against
+// sigforge on 09/11/2026: a "ga"/"final" qualifier before a further hyphen group is the release
+// (Maven version order spec: null tokens are trimmed at each hyphen); PHP canonicalises any
+// non-alphanumeric character to one separator; PEP 440 orders local versions after the public one,
+// numeric local segments above alphanumeric ones, and a longer matching local version above a shorter.
+func TestSpecEdgeOrders(t *testing.T) {
+	for _, tc := range []struct {
+		eco, a, b string
+		want      int
+	}{
+		{"Maven", "1-1", "1-ga-1", 0},
+		{"Maven", "1-final-1", "1-1", 0},
+		{"Maven", "1.0-ga-2", "1.0-1", 1},
+		{"Packagist", "1.2.3.#.1", "1.2.3", 1},
+		{"Packagist", "1.2.3.#.p3", "1.2.3", 1},
+		{"Packagist", "1.2.3.#.beta", "1.2.3", -1},
+		{"Packagist", "1.0--2", "1.0.2", 0},
+		{"Packagist", "1.2.3.#", "1.2.3", 0}, // a trailing separator leaves no part (PHP splits with strtok)
+		{"PyPI", "1.0.0+local", "1.0.0", 1},
+		{"PyPI", "1.0.0+local.0", "1.0.0+local.0.1", -1},
+		{"PyPI", "1.0.0+local.a", "1.0.0+local.1", -1},
+		{"PyPI", "1.0.0+ubuntu-1", "1.0.0+ubuntu.1", 0},
+		{"PyPI", "1.0.0+abc", "1.0.0+ABD", -1},
+		{"PyPI", "1.0.1", "1.0.0+zzz", 1},
+	} {
+		got, ok := Compare(tc.eco, tc.a, tc.b)
+		if !ok || got != tc.want {
+			t.Errorf("%s: Compare(%q, %q) = %d (ok=%v), want %d", tc.eco, tc.a, tc.b, got, ok, tc.want)
+		}
+	}
+}

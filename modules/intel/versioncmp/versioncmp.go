@@ -279,6 +279,7 @@ type pep440 struct {
 	pre     *preRel  // nil ⇒ no pre-release
 	post    *int     // nil ⇒ no post
 	dev     *int     // nil ⇒ no dev
+	local   []string // the +local label's segments, lower-cased; nil ⇒ none
 }
 
 type preRel struct {
@@ -287,9 +288,9 @@ type preRel struct {
 }
 
 // pep440Re is a pragmatic subset of the PEP 440 grammar: epoch, dotted release, one
-// a/b/rc pre-release, a .post (or implicit "-N") release, and a .dev release. +local
-// metadata is stripped before matching. A version that does not match is reported
-// unparseable (ok=false), never guessed.
+// a/b/rc pre-release, a .post (or implicit "-N") release, and a .dev release; a +local
+// label is split off first and ordered on its own. A version that does not match is
+// reported unparseable (ok=false), never guessed.
 var pep440Re = regexp.MustCompile(`^(?:(\d+)!)?(\d+(?:\.\d+)*)` +
 	`(?:[._-]?(a|b|c|rc|alpha|beta|pre|preview)[._-]?(\d*))?` +
 	`(?:(?:[._-]?(?:post|rev|r)[._-]?(\d*))|-(\d+))?` +
@@ -298,14 +299,26 @@ var pep440Re = regexp.MustCompile(`^(?:(\d+)!)?(\d+(?:\.\d+)*)` +
 func parsePEP440(s string) (pep440, bool) {
 	v := strings.ToLower(strings.TrimSpace(s))
 	v = strings.TrimPrefix(v, "v")
-	if i := strings.IndexByte(v, '+'); i >= 0 { // local metadata is ignored for ordering
+	var local []string
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		local = strings.FieldsFunc(v[i+1:], func(r rune) bool { return r == '.' || r == '-' || r == '_' })
+		if len(local) == 0 || strings.Trim(v[i+1:], "._-") != v[i+1:] || strings.Contains(v[i+1:], "..") {
+			return pep440{}, false
+		}
+		for _, seg := range local {
+			for j := 0; j < len(seg); j++ {
+				if !isAlnumByte(seg[j]) {
+					return pep440{}, false
+				}
+			}
+		}
 		v = v[:i]
 	}
 	m := pep440Re.FindStringSubmatch(v)
 	if m == nil {
 		return pep440{}, false
 	}
-	out := pep440{epoch: atoiOr(m[1], 0), release: strings.Split(m[2], ".")}
+	out := pep440{epoch: atoiOr(m[1], 0), release: strings.Split(m[2], "."), local: local}
 	if m[3] != "" {
 		out.pre = &preRel{letter: preLetter(m[3]), num: atoiOr(m[4], 0)}
 	}
@@ -350,7 +363,35 @@ func cmpPEP440(x, y pep440) int {
 	if c := cmpOpt(x.post, y.post, false); c != 0 { // absent post sorts BELOW present
 		return c
 	}
-	return cmpOpt(x.dev, y.dev, true) // absent dev sorts ABOVE present
+	if c := cmpOpt(x.dev, y.dev, true); c != 0 { // absent dev sorts ABOVE present
+		return c
+	}
+	return cmpLocal(x.local, y.local)
+}
+
+// cmpLocal orders +local labels as PEP 440 says: none sorts below any; segment by segment a
+// numeric one compares as an integer and above an alphanumeric one, alphanumeric ones compare
+// lexically; a label that extends another, matching it, sorts above it.
+func cmpLocal(a, b []string) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		an, bn := isNum(a[i]), isNum(b[i])
+		switch {
+		case an && bn:
+			if c := cmpNumStr(a[i], b[i]); c != 0 {
+				return c
+			}
+		case an != bn:
+			if an {
+				return 1
+			}
+			return -1
+		default:
+			if c := strings.Compare(a[i], b[i]); c != 0 {
+				return c
+			}
+		}
+	}
+	return cmpInt(len(a), len(b))
 }
 
 // cmpPreStage ranks the pre-release stage: a dev-only version (no pre, no post) is lowest;
@@ -840,6 +881,15 @@ func (l *mvnList) normalize() {
 			break
 		}
 	}
+	// A hyphen group whose own tokens were all null ("ga" in 1-ga-1) holds only the next group:
+	// the Maven version order spec trims nulls per hyphen group, so the groups join (1-ga-1 = 1-1).
+	for i, it := range l.items {
+		if sub, ok := it.(*mvnList); ok && len(sub.items) == 1 {
+			if inner, ok := sub.items[0].(*mvnList); ok {
+				l.items[i] = inner
+			}
+		}
+	}
 }
 
 // mavenQualifier maps a qualifier to its comparable rank string: a known qualifier to its index
@@ -1199,7 +1249,7 @@ func parsePackagist(s string) ([]string, bool) {
 	var prev byte
 	for i := 0; i < len(v); i++ {
 		c := v[i]
-		if c == '-' || c == '_' || c == '+' {
+		if !isAlnumByte(c) { // PHP canonicalises every non-alphanumeric character to a separator
 			c = '.'
 		}
 		if prev != 0 && prev != '.' && c != '.' && isDigitByte(prev) != isDigitByte(c) {
@@ -1208,14 +1258,9 @@ func parsePackagist(s string) ([]string, bool) {
 		b.WriteByte(c)
 		prev = c
 	}
-	parts := strings.Split(b.String(), ".")
-	if !isNum(parts[0]) {
+	parts := strings.FieldsFunc(b.String(), func(r rune) bool { return r == '.' }) // strtok: empty parts vanish
+	if len(parts) == 0 || !isNum(parts[0]) {
 		return nil, false
-	}
-	for _, p := range parts {
-		if p == "" {
-			return nil, false
-		}
 	}
 	return parts, true
 }
