@@ -18,7 +18,8 @@
     "Apache Tomcat": {
       "cpe": ["cpe:2.3:a:apache:tomcat:*:*:*:*:*:*:*:*"],
       "cats": [22],
-      "headers": {"Server": "Apache-Coyote(?:/([\\d.]+))?\\;version:\\1"},
+      "headers": {"Server": "Apache-Coyote"},
+      "html": ["<(?:h3|title)>Apache Tomcat/(\\d+\\.\\d+\\.\\d+)</\\;version:\\1"],
       "implies": ["Java"],
       "provenance": "baseline",
       "license": "Apache-2.0"
@@ -26,7 +27,7 @@
     "Jetty": {
       "cpe": ["cpe:2.3:a:eclipse:jetty:*:*:*:*:*:*:*:*"],
       "cats": [22],
-      "headers": {"Server": "Jetty(?:\\(([\\d.]+))?\\;version:\\1"},
+      "headers": {"Server": "Jetty(?:\\((\\d+(?:\\.\\d+)*(?:\\.v\\d+)?))?\\;version:\\1"},
       "implies": ["Java"],
       "provenance": "baseline",
       "license": "Apache-2.0"
@@ -398,7 +399,7 @@
     "Bootstrap": {
       "cpe": ["cpe:2.3:a:getbootstrap:bootstrap:*:*:*:*:*:*:*:*"],
       "cats": [66],
-      "scriptSrc": ["bootstrap(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
+      "scriptSrc": ["(?:^|/)bootstrap(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1"],
       "provenance": "baseline",
       "license": "Apache-2.0"
     },
