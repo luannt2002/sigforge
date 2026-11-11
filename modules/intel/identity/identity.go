@@ -33,12 +33,17 @@
 package identity
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
 )
@@ -46,8 +51,19 @@ import (
 // EnvCPEDictURL is the environment variable the operator uses to supply the NVD CPE
 // dictionary URL (the "products" feed of the NVD 2.0 API). It mirrors the other intel
 // adapters' SIGFORGE_SOURCE_*_URL naming and is off by default, so nothing goes to the
-// network when it is unset — the embedded public-domain sample is used instead.
+// network when it is unset — the embedded public-domain sample is used instead. The URL
+// must serve the whole dictionary as one document: one page of the paged API is partial,
+// and a partial dictionary never verifies.
 const EnvCPEDictURL = "SIGFORGE_SOURCE_CPE_DICT_URL"
+
+// maxDictBytes caps the downloaded dictionary on disk, guarding it against a runaway
+// endpoint. The file is reduced row by row, so this is a disk ceiling, not a memory one.
+// A var so a test can lower it.
+var maxDictBytes int64 = 2 << 30
+
+// dictDownloadLimit bounds the dictionary download end to end: a streamed download is not
+// covered by the client's own timeout, which is sized for small catalogs.
+const dictDownloadLimit = 10 * time.Minute
 
 // CPEDictLicense records the source's provenance so a caller can tag it. The NVD CPE
 // dictionary is a U.S. Government work in the public domain (embeddable); see NOTICE.
@@ -85,20 +101,17 @@ type Entry struct {
 //go:embed data/cpe-dict-snapshot.json
 var cpeSnapshot []byte
 
-// cpeDoc is the NVD 2.0 CPE API schema: products[] each wrapping a cpe object with its
+// cpeProduct is one row of the NVD 2.0 CPE API schema's products[]: a cpe object with its
 // cpeName, a deprecated flag, and localized titles. Other fields are ignored.
-type cpeDoc struct {
-	TotalResults int `json:"totalResults"` // products the feed says exist; > len(Products) on one page of a paged feed
-	Products     []struct {
-		CPE struct {
-			CPEName    string `json:"cpeName"`
-			Deprecated bool   `json:"deprecated"`
-			Titles     []struct {
-				Title string `json:"title"`
-				Lang  string `json:"lang"`
-			} `json:"titles"`
-		} `json:"cpe"`
-	} `json:"products"`
+type cpeProduct struct {
+	CPE struct {
+		CPEName    string `json:"cpeName"`
+		Deprecated bool   `json:"deprecated"`
+		Titles     []struct {
+			Title string `json:"title"`
+			Lang  string `json:"lang"`
+		} `json:"titles"`
+	} `json:"cpe"`
 }
 
 // Resolver resolves a tech to a verified CPE against the operator-supplied dictionary
@@ -129,7 +142,9 @@ type DictStatus struct {
 }
 
 // Partial reports that the feed delivered fewer products than it says exist — one page
-// of the paged NVD API, not the whole dictionary.
+// of the paged NVD API, not the whole dictionary. ResolveCPE never verifies against it, and
+// the resolver does not walk the pages: the whole dictionary is one document the operator
+// mirrors, not a run's worth of requests to a rate-limited API.
 func (s DictStatus) Partial() bool { return s.Total > s.Products }
 
 // New builds a resolver bound to the operator-supplied CPE dictionary URL and client.
@@ -154,8 +169,8 @@ func (r *Resolver) Status(ctx context.Context) DictStatus {
 func (r *Resolver) ResolveCPE(ctx context.Context, name, vendor, product string) (cpe string, evidence string, state State) {
 	r.once.Do(func() { r.load(ctx) })
 	cpe, evidence, state = Match(r.entries, name, vendor, product)
-	if state == StateVerified && r.status.Source != "live" {
-		return "", "", StateUnknown // the embedded sample is a handful of bases, not the dictionary: it never verifies
+	if state == StateVerified && (r.status.Source != "live" || r.status.Partial()) {
+		return "", "", StateUnknown // the embedded sample or one page is not the dictionary: a unique match there proves nothing
 	}
 	return cpe, evidence, state
 }
@@ -164,18 +179,27 @@ func (r *Resolver) ResolveCPE(ctx context.Context, name, vendor, product string)
 // to the embedded public-domain sample on an empty URL, a fetch error, or junk content
 // (a proxy serving HTML) — and recording why in status instead of hiding it.
 func (r *Resolver) load(ctx context.Context) {
-	snap, products, total, _ := parseDict(cpeSnapshot)
+	snap, products, total, _ := parseDict(bytes.NewReader(cpeSnapshot))
 	r.entries = snap
 	r.status = DictStatus{Source: "snapshot", Entries: len(snap), Products: products, Total: total}
 	if r.dictURL == "" {
 		return
 	}
-	raw, meta, err := r.client.GetMeta(ctx, r.dictURL)
+	dctx, cancel := context.WithTimeout(ctx, dictDownloadLimit)
+	defer cancel()
+	path, meta, release, err := r.client.Download(dctx, r.dictURL, maxDictBytes)
+	defer release()
 	if err != nil {
 		r.status.Err = err.Error()
 		return
 	}
-	live, products, total, err := parseDict(raw)
+	f, err := os.Open(path)
+	if err != nil {
+		r.status.Err = err.Error()
+		return
+	}
+	defer f.Close()
+	live, products, total, err := parseDict(f)
 	if err != nil {
 		r.status.Err = "live dictionary unparseable: " + err.Error()
 		return
@@ -194,37 +218,83 @@ func (r *Resolver) load(ctx context.Context) {
 // one product collapse to a single base, keeping the first English title as evidence.
 // The result is sorted by CPE for deterministic tests and logs.
 func ParseDict(b []byte) ([]Entry, error) {
-	e, _, _, err := parseDict(b)
+	e, _, _, err := parseDict(bytes.NewReader(b))
 	return e, err
 }
 
-// parseDict is ParseDict plus the feed's delivered and declared product counts, which
-// Status needs to tell one page of a paged feed from the whole dictionary.
-func parseDict(b []byte) (entries []Entry, products, total int, err error) {
-	var doc cpeDoc
-	if err := json.Unmarshal(b, &doc); err != nil {
+// parseDict is ParseDict over a reader, plus the feed's delivered and declared product
+// counts, which Status needs to tell one page of a paged feed from the whole dictionary.
+// It walks the document token by token so only one product row is in memory at a time.
+func parseDict(rd io.Reader) (entries []Entry, products, total int, err error) {
+	dec := json.NewDecoder(rd)
+	byBase := make(map[string]Entry)
+	if err := delim(dec, '{'); err != nil {
 		return nil, 0, 0, err
 	}
-	byBase := make(map[string]Entry)
-	for _, p := range doc.Products {
-		if p.CPE.Deprecated {
-			continue
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, 0, 0, err
 		}
-		base, vendor, product := baseCPE(p.CPE.CPEName)
-		if base == "" {
-			continue
+		switch key {
+		case "totalResults": // products the feed says exist; more than it delivered on one page of a paged feed
+			err = dec.Decode(&total)
+		case "products":
+			err = delim(dec, '[')
+			for err == nil && dec.More() {
+				var p cpeProduct
+				if err = dec.Decode(&p); err == nil {
+					products++
+					addBase(byBase, p)
+				}
+			}
+			if err == nil {
+				err = delim(dec, ']')
+			}
+		default:
+			var skip json.RawMessage
+			err = dec.Decode(&skip)
 		}
-		if _, seen := byBase[base]; seen {
-			continue // first title wins; a later versioned row adds nothing new
+		if err != nil {
+			return nil, 0, 0, err
 		}
-		byBase[base] = Entry{CPE: base, Vendor: vendor, Product: product, Title: pickTitle(p.CPE.Titles)}
+	}
+	if err := delim(dec, '}'); err != nil {
+		return nil, 0, 0, err // a body cut short is not a smaller dictionary
 	}
 	out := make([]Entry, 0, len(byBase))
 	for _, e := range byBase {
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CPE < out[j].CPE })
-	return out, len(doc.Products), doc.TotalResults, nil
+	return out, products, total, nil
+}
+
+// addBase records p's vendor:product base unless p is deprecated, malformed, or a later
+// versioned row of a base already seen (the first title wins).
+func addBase(byBase map[string]Entry, p cpeProduct) {
+	if p.CPE.Deprecated {
+		return
+	}
+	base, vendor, product := baseCPE(p.CPE.CPEName)
+	if base == "" {
+		return
+	}
+	if _, seen := byBase[base]; !seen {
+		byBase[base] = Entry{CPE: base, Vendor: vendor, Product: product, Title: pickTitle(p.CPE.Titles)}
+	}
+}
+
+// delim reads the next token and fails unless it is want.
+func delim(dec *json.Decoder, want json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if tok != want {
+		return fmt.Errorf("want %v, got %v", want, tok)
+	}
+	return nil
 }
 
 // Match is the PURE resolution rule (no network, table-testable). It collects the
