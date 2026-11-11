@@ -30,11 +30,15 @@ type watchState struct {
 
 // cmdWatch re-checks an inventory — the packages, SBOM, plugins and libraries a site runs — against
 // the sources as they are now (run it after sync) and names what changed since its last run: a new
-// advisory for something in use is NEW, one no longer listed is GONE, and what a source did not answer
-// for is UNCHECKED (its leads kept, not GONE). An identity's first answer — on the first run, after a
-// run nothing answered, or for a package added later — is recorded (FIRST), not NEW. With
-// --fail-on-new a NEW lead fails the command, so a timer or monitor can alarm on it; a run no source
-// answered for anything fails too, and a run with nothing to look up fails without touching the state.
+// advisory for something in use is NEW, and one a whole answer no longer lists is GONE. UNCHECKED names
+// an identity a source did not answer for, and one whose answer cannot rule out a recorded lead it
+// leaves out (data the source cannot prove whole, a version it could not compare): the lead is kept,
+// not GONE. An identity with leads that is no longer in the inventory is REMOVED: its leads leave the
+// state, and listed again they are NEW. An identity's first answer — on the first run, after a run
+// nothing answered, or for a package added later — is recorded (FIRST), not NEW. With --fail-on-new a
+// NEW lead fails the command, so a timer or monitor can alarm on it; a run no source answered for
+// anything fails too, leaving an existing state as it was, and a run with nothing to look up fails
+// without touching the state.
 func cmdWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	statePath := fs.String("state", "", "file keeping what the last run saw (required)")
@@ -66,7 +70,7 @@ func cmdWatch(args []string) error {
 		client.MaxAge = watchMaxAge
 	}
 	set := feedset.New(client)
-	now, answered, unchecked := leadsByIdentity(enrich.EnrichUnifiedExt(ctx, nil, nil, inp, set.Options))
+	now, answered, unchecked, notWhole := leadsByIdentity(enrich.EnrichUnifiedExt(ctx, nil, nil, inp, set.Options))
 	for _, note := range set.Notes(ctx) {
 		fmt.Fprintln(os.Stderr, note)
 	}
@@ -91,8 +95,17 @@ func cmdWatch(args []string) error {
 		seen[key] = true
 	}
 	for key := range unchecked {
-		if ids, ok := prev.Leads[key]; ok {
-			now[key] = ids // unknown this run, not gone
+		if ids := minus(prev.Leads[key], now[key]); len(ids) > 0 {
+			now[key] = append(now[key], ids...) // unknown this run, not gone
+			sort.Strings(now[key])
+		}
+	}
+	kept := map[string]string{}
+	for key, why := range notWhole {
+		if ids := minus(prev.Leads[key], now[key]); len(ids) > 0 {
+			now[key] = append(now[key], ids...) // absent from an answer that cannot rule them out, not gone
+			sort.Strings(now[key])
+			kept[key] = fmt.Sprintf("%s: %d lead(s) absent from its answer are kept", why, len(ids))
 		}
 	}
 	news := 0
@@ -102,8 +115,12 @@ func cmdWatch(args []string) error {
 			n += len(ids)
 		}
 		fmt.Printf("first run: %d lead(s) on %d identit(ies) recorded; later runs name what changes\n", n, len(now))
-	} else {
+	} else if len(answered) > 0 { // a run no source answered for knows of no change
 		for _, key := range sortedKeys(now, prev.Leads) {
+			if !answered[key] && !unchecked[key] {
+				fmt.Printf("REMOVED  %s  %d lead(s) dropped: it is no longer in the inventory\n", key, len(prev.Leads[key]))
+				continue
+			}
 			if !seen[key] {
 				fmt.Printf("FIRST  %s  %d lead(s) recorded (its first answer)\n", key, len(now[key]))
 				continue
@@ -119,6 +136,12 @@ func cmdWatch(args []string) error {
 	}
 	for _, key := range sortedKeys(unchecked) {
 		fmt.Printf("UNCHECKED  %s  (the source did not answer: its leads are kept as they were)\n", key)
+	}
+	for _, key := range sortedKeys(kept) {
+		fmt.Printf("UNCHECKED  %s  (%s)\n", key, kept[key])
+	}
+	if len(answered) == 0 && !first { // the state it would write could only lose what the last answers recorded
+		return fmt.Errorf("watch: no source answered for any of the %d identit(ies) looked up; the state is left as it was", len(unchecked))
 	}
 	for key := range answered {
 		seen[key] = true
@@ -141,15 +164,21 @@ func cmdWatch(args []string) error {
 
 // leadsByIdentity keys each actionable result's lead ids by what was looked up, and splits the
 // identities into those a source answered for and those it did not (unavailable, or off): their
-// leads are unknown this run.
-func leadsByIdentity(rs []unified.Result) (leads map[string][]string, answered, unchecked map[string]bool) {
-	out, answered, unchecked := map[string][]string{}, map[string]bool{}, map[string]bool{}
+// leads are unknown this run. An answered identity whose answer cannot rule a lead out — from data the
+// source cannot prove whole, or for a version it could not compare — is in notWhole with why.
+func leadsByIdentity(rs []unified.Result) (leads map[string][]string, answered, unchecked map[string]bool, notWhole map[string]string) {
+	out, answered, unchecked, notWhole := map[string][]string{}, map[string]bool{}, map[string]bool{}, map[string]string{}
 	for _, r := range rs {
 		key := r.Scope + " " + r.Identity + "@" + r.Version
-		if r.Answered() {
-			answered[key] = true
-		} else {
+		switch {
+		case !r.LookedUp():
 			unchecked[key] = true
+		case r.State == unified.StateUnknownVersion:
+			answered[key], notWhole[key] = true, "the source could not compare the version with its advisories"
+		case !r.FullData:
+			answered[key], notWhole[key] = true, "the source cannot prove its data whole"
+		default:
+			answered[key] = true
 		}
 		if !r.State.Applicable() {
 			continue
@@ -162,7 +191,7 @@ func leadsByIdentity(rs []unified.Result) (leads map[string][]string, answered, 
 		sort.Strings(ids)
 		out[k] = ids
 	}
-	return out, answered, unchecked
+	return out, answered, unchecked, notWhole
 }
 
 func minus(a, b []string) []string {
