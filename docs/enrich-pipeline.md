@@ -43,6 +43,7 @@ stdin JSON Page ─▶ matcher.Match(db, page) ─▶ []Detection
                                        start (enrich reports such a lead as potentially affected); an
                                        advisory listing no versions keeps OSV's rule; one it cannot
                                        place is handled as in a package lookup)
+                        each result of the detection ─▶ applyExcludedBy (note only)
                                     ─▶ dropRepeated (a lead an earlier result named is not reported twice)
                                                  ▼
                                         []unified.Result
@@ -98,6 +99,9 @@ request is made to any target — safe to run against nothing.
   claimed version was asked), and records the conflicting claims in a note. (The matcher sets
   the flag when captured versions genuinely disagree, e.g. "9.5" vs "10"; it still picks
   one deterministically via `resolveVersion`, but the consumer is told it is uncertain.)
+- **Excluded-by is a note, never a downgrade.** When `Detection.ExcludedBy` is set,
+  `applyExcludedBy` adds `excluded by: <techs>` to each result of the detection; state and
+  leads are untouched.
 - **No version, no "affected".** A detection with no version is queried at the product
   level, so the feed lists every advisory the product ever had; `cve.ToUnified` reports
   that as `potentially_affected` with a "no version detected" note, never
@@ -121,4 +125,4 @@ sigforge enrich [--db FILE] [--json] < page.json
 Reads a JSON `matcher.Page` from stdin, matches it, runs `EnrichUnified` with the
 env-gated feeds, and prints the `[]unified.Result` as a table (state, source,
 freshness, per-lead KEV/EPSS signal, and any note — CPE provenance, version conflict,
-why a source was not checked) or as JSON with `--json`.
+excluded by, why a source was not checked) or as JSON with `--json`.

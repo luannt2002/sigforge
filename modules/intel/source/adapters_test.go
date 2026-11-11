@@ -1,6 +1,17 @@
 package source
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strings"
+	"testing"
+
+	"github.com/luannt2002/sigforge/modules/intel/diff"
+	"github.com/luannt2002/sigforge/modules/intel/merge"
+	"github.com/luannt2002/sigforge/modules/intel/schema"
+)
 
 // All three Normalize functions are pure and are tested on real-shaped fixtures —
 // no network is used anywhere in this package's tests.
@@ -228,4 +239,126 @@ func contains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// conditionKeys renders an entry's requires/requiresCategory/excludes as written to JSON, the
+// keys a consumer reads, so a test checks the contract rather than Go field names.
+func conditionKeys(fp schema.Fingerprint) string {
+	b, _ := json.Marshal(fp)
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(b, &m)
+	return fmt.Sprintf("%s %s %s", m["requires"], m["requiresCategory"], m["excludes"])
+}
+
+// A requires/requiresCategory/excludes value the matcher cannot evaluate quarantines its entry
+// with a counted, logged reason: emitted without its condition it would fire where the
+// source's rule never would. Readable conditions (requires also as a bare string) are kept.
+func TestWebappanalyzerQuarantinesUnreadableConditions(t *testing.T) {
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(prev)
+
+	set, err := (&webappanalyzer{}).Normalize([]byte(`{
+		"Gated":    {"html": "gated", "requires": "WordPress", "requiresCategory": [6], "excludes": ["Other"]},
+		"Plain":    {"html": "plain"},
+		"NumReq":   {"html": "a", "requires": 5},
+		"BlankReq": {"html": "b", "requires": [" "]},
+		"ObjExcl":  {"html": "c", "excludes": {"Other": true}},
+		"NamedCat": {"html": "d", "requiresCategory": ["Ecommerce"]}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"NumReq", "BlankReq", "ObjExcl", "NamedCat"} {
+		if _, ok := set[name]; ok {
+			t.Errorf("%s emitted without its condition, want quarantined", name)
+		}
+	}
+	if _, ok := set["Plain"]; !ok {
+		t.Error("an entry without conditions must still be emitted")
+	}
+	if got, want := conditionKeys(set["Gated"]), `["WordPress"] [6] ["Other"]`; got != want {
+		t.Errorf("Gated conditions = %s, want %s", got, want)
+	}
+	out := logged.String()
+	for _, want := range []string{"quarantined 4 ", "NumReq: requires", "BlankReq: requires", "ObjExcl: excludes", "NamedCat: requiresCategory"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("quarantine log lacks %q: %q", want, out)
+		}
+	}
+}
+
+// The conditions survive the publish path: merge (the winning entry keeps its own), the
+// on-disk JSON round trip, and a diff that reports a condition-only change.
+func TestWebappanalyzerConditionsSurviveMergeJSONAndDiff(t *testing.T) {
+	set, err := (&webappanalyzer{}).Normalize([]byte(`{
+		"Dependent": {"html": "dependent-marker", "requires": ["Needed"], "requiresCategory": [6], "excludes": ["Rival"]}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := map[string]schema.Fingerprint{"Dependent": {HTML: schema.StringList{"other-marker"}}}
+	merged := merge.Merge(nil,
+		merge.Source{Name: "webappanalyzer", Trust: 2, Set: set},
+		merge.Source{Name: "lower", Trust: 1, Set: lower})
+	b, err := (&schema.DB{SchemaVersion: schema.SchemaVersion, Fingerprints: merged}).JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := schema.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := conditionKeys(back.Fingerprints["Dependent"]), `["Needed"] [6] ["Rival"]`; got != want {
+		t.Errorf("after merge + JSON round trip: %s, want %s", got, want)
+	}
+	if !diff.Diff(back, back).Empty() {
+		t.Error("identical DBs must diff empty")
+	}
+	changed, err := schema.Parse(bytes.Replace(b, []byte(`"Needed"`), []byte(`"Elsewhere"`), 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := diff.Diff(back, changed).Changed; len(got) != 1 || got[0] != "Dependent" {
+		t.Errorf("a requires-only change must show as changed, got %v", got)
+	}
+}
+
+// The quarantine's edges: null is an absent condition, not an unreadable one; a bare category
+// number and a blank name after a readable one are unreadable; the log speaks only when an entry
+// is quarantined, a single one included.
+func TestWebappanalyzerQuarantineEdges(t *testing.T) {
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(prev)
+	normalize := func(doc string) map[string]schema.Fingerprint {
+		t.Helper()
+		logged.Reset()
+		set, err := (&webappanalyzer{}).Normalize([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return set
+	}
+
+	set := normalize(`{"Plain": {"html": "plain"}, "Null": {"html": "n", "requires": null, "requiresCategory": null, "excludes": null}}`)
+	if fp, ok := set["Null"]; !ok || len(fp.Requires)+len(fp.RequiresCategory)+len(fp.Excludes) > 0 {
+		t.Errorf("null conditions: emitted=%v %+v, want emitted with none", ok, fp)
+	}
+	if logged.Len() > 0 {
+		t.Errorf("nothing quarantined, yet logged %q", logged.String())
+	}
+	for name, doc := range map[string]string{
+		"BareCat":   `{"html": "b", "requiresCategory": 6}`,
+		"LateBlank": `{"html": "c", "requires": ["WordPress", " "]}`,
+	} {
+		if _, ok := normalize(`{"Plain": {"html": "plain"}, "` + name + `": ` + doc + `}`)[name]; ok {
+			t.Errorf("%s emitted, want quarantined", name)
+		}
+		if !strings.Contains(logged.String(), "quarantined 1 ") {
+			t.Errorf("%s: quarantine log %q, want a count of 1", name, logged.String())
+		}
+	}
 }

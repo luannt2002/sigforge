@@ -14,8 +14,9 @@ major schema version it does not understand — instead of silently misreading i
 - A DB is JSON: a versioned envelope `{schema_version, generated_at?, fingerprints}`
   around a map of technology-name → fingerprint.
 - The fingerprint shape is Wappalyzer-compatible (`cats`/`headers`/`cookies`/`meta`/
-  `html`/`scriptSrc`/`implies`/`dom` with inline `\;version:\1` / `\;confidence:N`
-  pattern suffixes), extended with sigforge's per-entry provenance/license/confidence/
+  `html`/`scriptSrc`/`implies`/`requires`/`requiresCategory`/`excludes`/`dom` with
+  inline `\;version:\1` / `\;confidence:N` pattern suffixes), extended with sigforge's
+  per-entry provenance/license/confidence/
   version_regex/cpe metadata.
 
 ## 3. Acceptance criteria

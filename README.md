@@ -63,7 +63,7 @@ generator is attacker-controllable and can be spoofed. Treat `Confidence` and
 ### Consuming the DB from another matcher
 
 The on-disk JSON is Wappalyzer-compatible (`cats` / `headers` / `cookies` /
-`meta` / `html` / `scriptSrc` / `implies` / `dom` with the inline
+`meta` / `html` / `scriptSrc` / `implies` / `requires` / `requiresCategory` / `excludes` / `dom` with the inline
 `\;version:\1` / `\;confidence:N` suffixes), wrapped in an envelope:
 
 ```json
