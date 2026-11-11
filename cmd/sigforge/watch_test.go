@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -275,6 +276,63 @@ func TestWatchFailsWhenNothingIsLookedUp(t *testing.T) {
 			}
 			if _, err := os.Stat(absent); !os.IsNotExist(err) {
 				t.Errorf("a run with nothing to look up must not create a state file (stat err=%v)", err)
+			}
+		})
+	}
+}
+
+// An inventory flag left empty — "$SLUG", or "$SLUG@$VER" with the slug unset — is refused naming the
+// flag, alone or beside a valid identity; an SBOM whose components all lack a usable purl has nothing
+// to look up and says so. Either way the run reports nothing and leaves the state as it was, so a
+// broken unit neither erases the kept leads nor reads as quiet.
+func TestWatchRefusesAnEmptyInventoryValue(t *testing.T) {
+	offline(t)
+	var zbuf bytes.Buffer
+	zw := zip.NewWriter(&zbuf)
+	for _, id := range []string{"GHSA-1", "GHSA-2"} {
+		f, _ := zw.Create("npm/" + id + ".json")
+		_, _ = f.Write([]byte(`{"id":"` + id + `","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.17.21"}]}]}]}`))
+	}
+	_ = zw.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(zbuf.Bytes()) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	const lodash = "pkg:npm/lodash@4.17.15"
+	primed := filepath.Join(t.TempDir(), "watch.json")
+	var err error
+	captureStdout(t, func() { err = cmdWatch([]string{"--state", primed, "--package", lodash}) })
+	before, rerr := os.ReadFile(primed)
+	if err != nil || rerr != nil || !strings.Contains(string(before), "GHSA-1") || !strings.Contains(string(before), "GHSA-2") {
+		t.Fatalf("the first run must record lodash's two leads: err=%v read=%v\n%s", err, rerr, before)
+	}
+	noPurl := filepath.Join(t.TempDir(), "inventory.cdx.json")
+	writeFile(t, noPurl, `{"bomFormat":"CycloneDX","components":[{"name":"lodash","version":"4.17.15"},{"name":"left-pad","purl":"left-pad@1.3.0"}]}`)
+	type refused struct {
+		args []string
+		want string // in the error
+	}
+	cases := map[string]refused{"SBOM without a usable purl": {[]string{"--sbom", noPurl}, "usable purl"}}
+	for _, flag := range []string{"package", "wp-plugin", "wp-theme", "jslib"} {
+		for _, v := range []string{"", " \t", "@", "@1.0"} {
+			cases[fmt.Sprintf("--%s %q", flag, v)] = refused{[]string{"--" + flag, v}, "flag -" + flag}
+			cases[fmt.Sprintf("--%s %q beside a valid package", flag, v)] = refused{[]string{"--package", lodash, "--" + flag, v}, "flag -" + flag}
+		}
+	}
+	for _, v := range []string{"npm:@1.0", "npm:@"} { // "npm:$NAME@$VER" with the name unset
+		cases["--package "+v] = refused{[]string{"--package", v}, fmt.Sprintf("package %q", v)}
+		cases["--package "+v+" beside a valid package"] = refused{[]string{"--package", lodash, "--package", v}, fmt.Sprintf("package %q", v)}
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "watch.json")
+			writeFile(t, state, string(before))
+			var err error
+			out := captureStdout(t, func() { err = cmdWatch(append([]string{"--state", state, "--fail-on-new"}, c.args...)) })
+			if err == nil || !strings.Contains(err.Error(), c.want) || out != "" {
+				t.Errorf("must fail with %q and print nothing: err=%v\n%s", c.want, err, out)
+			}
+			if after, err := os.ReadFile(state); err != nil || !bytes.Equal(after, before) {
+				t.Errorf("the state must be left as it was, byte for byte (read err=%v):\n%s", err, after)
 			}
 		})
 	}

@@ -24,8 +24,11 @@ func ParsePackageRef(s string) (PkgRef, error) {
 		return PkgRef{}, fmt.Errorf("package %q: want a purl (pkg:npm/lodash@4.17.20) or ecosystem:name@version", s)
 	}
 	name, version := rest, ""
-	if at := strings.LastIndex(rest, "@"); at > 0 { // at 0 is an npm scope, not a version
+	if at := strings.LastIndex(rest, "@"); at > 0 || at == 0 && !strings.Contains(rest, "/") { // at 0 is an npm scope only with a "/"
 		name, version = rest[:at], rest[at+1:]
+	}
+	if name == "" {
+		return PkgRef{}, fmt.Errorf("package %q: empty name", s)
 	}
 	return PkgRef{Ecosystem: eco, Name: name, Version: version}, nil
 }

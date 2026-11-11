@@ -402,6 +402,73 @@ func TestBuildEnrichInput(t *testing.T) {
 	}
 }
 
+// offline turns off every source the environment configures, so a test reaches only the server it sets.
+func offline(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "SIGFORGE_") {
+			t.Setenv(k, "")
+		}
+	}
+}
+
+// An inventory flag that names nothing — empty, blank, or a version with no name, as an unset variable
+// leaves "$NAME@$VER" — is refused naming the flag, before enrich reads a page or prints a result; a
+// version left empty keeps its meaning: the slug is looked up with no version.
+func TestEnrichRefusesAnEmptyInventoryValue(t *testing.T) {
+	offline(t)
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	stdin := os.Stdin
+	os.Stdin = null // no page
+	defer func() { os.Stdin = stdin }()
+	for _, flag := range []string{"package", "wp-plugin", "wp-theme", "jslib"} {
+		for _, v := range []string{"", " \t", "@", "@3.1.0"} {
+			for _, mode := range [][]string{nil, {"--json"}} {
+				out := captureStdout(t, func() { err = cmdEnrich(append(mode, "--"+flag, v)) })
+				if err == nil || !strings.Contains(err.Error(), "flag -"+flag) || out != "" {
+					t.Errorf("enrich %q --%s %q must fail naming the flag and print nothing: err=%v\n%s", mode, flag, v, err, out)
+				}
+			}
+		}
+	}
+	for _, v := range []string{"npm:@1.0", "npm:@"} { // "npm:$NAME@$VER" with the name unset
+		for _, mode := range [][]string{nil, {"--json"}} {
+			out := captureStdout(t, func() { err = cmdEnrich(append(mode, "--package", v)) })
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("package %q", v)) || out != "" {
+				t.Errorf("enrich %q --package %q must fail naming it and print nothing: err=%v\n%s", mode, v, err, out)
+			}
+		}
+	}
+	out := captureStdout(t, func() { err = cmdEnrich([]string{"--json", "--wp-plugin", "akismet@"}) })
+	if err != nil || !strings.Contains(out, `"identity": "akismet"`) {
+		t.Fatalf("a slug whose version is left empty is still looked up: err=%v\n%s", err, out)
+	}
+}
+
+// Every command's repeatable flag keeps each value it took — a package, slug or library with or without
+// a version (an npm scope's leading "@" included), an OSV ecosystem — trimmed, in order.
+func TestListFlagKeepsEveryValueThatNamesSomething(t *testing.T) {
+	valid := []string{
+		"pkg:npm/lodash@4.17.20", "pkg:npm/%40angular/core@12.0.0", "npm:@angular/core@12.0.0", "maven:org.apache.logging.log4j:log4j-core@2.14.1", // --package
+		"contact-form-7@5.0", "akismet@", "astra", // --wp-plugin, --wp-theme
+		"jquery@3.4.0", "jquery", "@angular/core", "@angular/core@12.0.0", // --jslib
+		"npm", "PyPI", "Debian:12", "crates.io", ".net", "Rocky Linux", // sync --osv
+	}
+	var l listFlag
+	for _, v := range valid {
+		if err := l.Set(" " + v + "\t"); err != nil {
+			t.Errorf("Set(%q) = %v, want it kept", v, err)
+		}
+	}
+	if !reflect.DeepEqual([]string(l), valid) {
+		t.Errorf("kept %q, want %q", []string(l), valid)
+	}
+}
+
 // sync --osv keeps an ecosystem's dump in the store and always asks the source — even with a
 // MaxAge set — so an unchanged dump costs one 304, never a second download.
 func TestSyncOSVDump(t *testing.T) {

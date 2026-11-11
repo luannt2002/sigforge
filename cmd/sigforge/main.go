@@ -952,8 +952,17 @@ func requestsNote(stats map[string]fetch.HostStats) string {
 // listFlag is a repeatable string flag.
 type listFlag []string
 
-func (l *listFlag) String() string     { return strings.Join(*l, ",") }
-func (l *listFlag) Set(v string) error { *l = append(*l, strings.TrimSpace(v)); return nil }
+func (l *listFlag) String() string { return strings.Join(*l, ",") }
+
+// Set refuses a value that names nothing (an unset "$NAME@$VER"): looked up, its answer would let watch drop kept leads.
+func (l *listFlag) Set(v string) error {
+	v = strings.TrimSpace(v)
+	if name, _ := splitAtVersion(v); name == "" {
+		return errors.New("empty name (an unset variable?)")
+	}
+	*l = append(*l, v)
+	return nil
+}
 
 // buildEnrichInput turns the enrich flags into the identities the page does not reveal:
 // packages of any ecosystem (purls or ecosystem:name@version, plus every component of a
@@ -1003,9 +1012,9 @@ func buildEnrichInput(packages []string, sbomPath string, wpPlugins, wpThemes, j
 	return inp, skipped, nil
 }
 
-// splitAtVersion splits "name@version" at its last "@" ("@" at 0 is an npm scope).
+// splitAtVersion splits "name@version" at its last "@" ("@" at 0 is an npm scope only with a "/": "@scope/name").
 func splitAtVersion(s string) (name, version string) {
-	if at := strings.LastIndex(s, "@"); at > 0 {
+	if at := strings.LastIndex(s, "@"); at > 0 || at == 0 && !strings.Contains(s, "/") {
 		return s[:at], s[at+1:]
 	}
 	return s, ""

@@ -72,7 +72,7 @@ func cmdWatch(args []string) error {
 	}
 	// a run that looked nothing up knows nothing: a diff against it would report every kept lead GONE and erase them
 	if len(answered)+len(unchecked) == 0 {
-		return fmt.Errorf("watch: nothing to look up: the inventory has no package, SBOM component, plugin, theme or library; the state is left as it was")
+		return fmt.Errorf("watch: nothing to look up: the inventory has no package, plugin, theme, library or SBOM component with a usable purl; the state is left as it was")
 	}
 
 	var prev watchState
