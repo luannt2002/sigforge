@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
 )
@@ -267,6 +268,7 @@ func parseBundle(raw []byte) (map[string][]Cycle, map[string]string, error) {
 	out := make(map[string][]Cycle, len(doc.Result))
 	byCPE := map[string]string{}
 	for _, p := range doc.Result {
+		name := strings.ToLower(visible(p.Name)) // one product listed under names differing in case is one product
 		cycles := make([]Cycle, 0, len(p.Releases))
 		for _, r := range p.Releases {
 			eol := json.RawMessage("null") // a release stating neither is unknown, never supported
@@ -286,16 +288,16 @@ func parseBundle(raw []byte) (map[string][]Cycle, map[string]string, error) {
 			}
 			cycles = append(cycles, c)
 		}
-		out[p.Name] = append(out[p.Name], cycles...) // a product listed twice: a release its lists disagree on is unknown
+		out[name] = append(out[name], cycles...) // a product listed twice: a release its lists disagree on is unknown
 		for _, id := range p.Identifiers {
 			vp := cpeVendorProduct(id.ID)
 			if id.Type != "cpe" || vp == "" {
 				continue
 			}
-			if prev, seen := byCPE[vp]; seen && prev != p.Name {
+			if prev, seen := byCPE[vp]; seen && prev != name {
 				byCPE[vp] = "" // shared by two products: ambiguous, never guessed
 			} else {
-				byCPE[vp] = p.Name
+				byCPE[vp] = name
 			}
 		}
 	}
@@ -311,8 +313,7 @@ func parseBundle(raw []byte) (map[string][]Cycle, map[string]string, error) {
 // with opposite verdicts, or a supported cycle does not vouch for its other versions
 // (see vouches).
 func Classify(cycles []Cycle, version string, now time.Time) (cycle, eolDate string, state State) {
-	version = strings.TrimSpace(version)
-	version = strings.TrimPrefix(version, "v")
+	version = cycleName(version) // in the same form as the cycles it is compared with
 	var own *Cycle
 	ownName := ""
 	for i := range cycles {
@@ -347,13 +348,24 @@ func vouches(cycles []Cycle, cycle string) bool {
 	return true
 }
 
-// cycleName is a cycle as a version prefix: trimmed, without a "v" before a digit.
+// cycleName is a cycle as a version prefix: visible, a decimal comma read as a dot, without a
+// "v" or "V" before a digit.
 func cycleName(cycle string) string {
-	cycle = strings.TrimSpace(cycle)
-	if len(cycle) > 1 && cycle[0] == 'v' && cycle[1] >= '0' && cycle[1] <= '9' {
+	cycle = strings.ReplaceAll(visible(cycle), ",", ".")
+	if len(cycle) > 1 && (cycle[0] == 'v' || cycle[0] == 'V') && cycle[1] >= '0' && cycle[1] <= '9' {
 		return cycle[1:]
 	}
 	return cycle
+}
+
+// visible is s trimmed and without format characters (zero-width space, BOM) that hand-edited data carries unseen.
+func visible(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s))
 }
 
 func versionInCycle(version, cycle string) bool {

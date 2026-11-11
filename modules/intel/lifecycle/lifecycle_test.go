@@ -382,3 +382,12 @@ func TestParseBundleLeansToEnded(t *testing.T) {
 		}
 	}
 }
+
+// A technology name maps to its product whatever its case: "nginx" on a command line is Nginx.
+func TestProductForIgnoresCase(t *testing.T) {
+	for _, name := range []string{"Nginx", "nginx", "NGINX", " nginx "} {
+		if p, ok := ProductFor(name); !ok || p != "nginx" {
+			t.Errorf("ProductFor(%q) = %q, %v", name, p, ok)
+		}
+	}
+}

@@ -1,5 +1,7 @@
 package lifecycle
 
+import "strings"
+
 // products maps a sigforge baseline technology name to its endoflife.date product
 // id. Every pair is a PUBLIC FACT: the tech on the left is the product tracked at
 // endoflife.date/<id> on the right (verified against the live feed). A tech with
@@ -35,6 +37,15 @@ var products = map[string]string{
 // ProductFor returns the endoflife.date product id for a technology name, and
 // false when the tech is not tracked there.
 func ProductFor(tech string) (string, bool) {
-	p, ok := products[tech]
+	p, ok := productsByLower[strings.ToLower(strings.TrimSpace(tech))]
 	return p, ok
 }
+
+// productsByLower is products keyed case-insensitively: "nginx" on a command line is Nginx.
+var productsByLower = func() map[string]string {
+	m := make(map[string]string, len(products))
+	for k, v := range products {
+		m[strings.ToLower(k)] = v
+	}
+	return m
+}()
