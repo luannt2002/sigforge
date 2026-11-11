@@ -8,8 +8,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/luannt2002/sigforge/framework/fetch"
 	"github.com/luannt2002/sigforge/modules/intel/identity"
 	"github.com/luannt2002/sigforge/modules/intel/kev"
+	"github.com/luannt2002/sigforge/modules/intel/osv"
 )
 
 // Notes asks only the sources this run used: a configured KEV catalog the run never consulted is
@@ -59,6 +61,7 @@ func TestDictNote(t *testing.T) {
 		{"live and complete", identity.DictStatus{Source: "live", Entries: 2, Products: 5, Total: 5}, ""},
 		{"live failed", identity.DictStatus{Source: "snapshot", Entries: 3, Err: "status 500"}, "not in use (status 500)"},
 		{"one page", identity.DictStatus{Source: "live", Entries: 2, Products: 2, Total: 1000}, "2 of 1000 products"},
+		{"one page verifies nothing", identity.DictStatus{Source: "live", Entries: 2, Products: 2, Total: 1000}, "no identity is verified"},
 	}
 	for _, c := range cases {
 		got := dictNote(c.s)
@@ -71,6 +74,10 @@ func TestDictNote(t *testing.T) {
 func TestKEVNote(t *testing.T) {
 	if got := kevNote(kev.CatalogStatus{Source: "live", Entries: 1400}); got != "" {
 		t.Errorf("a live catalog must print no note, got %q", got)
+	}
+	// in use, but with something to look at (its release date, skipped rows): named, not silent
+	if got := kevNote(kev.CatalogStatus{Source: "live", Entries: 1400, Warn: "catalog released 2026-08-01T00:00:00Z, 100 days ago"}); !strings.Contains(got, "100 days ago") {
+		t.Errorf("a live catalog's warning must be printed, got %q", got)
 	}
 	got := kevNote(kev.CatalogStatus{Source: "snapshot", Entries: 3, Err: "status 403"})
 	if !strings.Contains(got, "not in use (status 403)") || !strings.Contains(got, "3 entries") {
@@ -85,5 +92,18 @@ func TestNotesOnStaleCopy(t *testing.T) {
 	}
 	if got := dictNote(identity.DictStatus{Source: "live", Entries: 2, Cached: true, Err: "status 503"}); !strings.Contains(got, "last synced copy") || !strings.Contains(got, "status 503") {
 		t.Errorf("dictNote on a stale copy = %q", got)
+	}
+}
+
+// OSV is wired only when its source is configured: unset, enrich names the gap for a package it is
+// asked about, and a detected platform is not looked up at all — no extra "feed off" result for it.
+func TestOSVWiredOnlyWhenConfigured(t *testing.T) {
+	t.Setenv(osv.EnvOSVURL, "")
+	if o := New(fetch.New()).Options; o.OSV != nil || o.OSVRelease != nil {
+		t.Fatal("OSV must stay nil when its source is unset")
+	}
+	t.Setenv(osv.EnvOSVURL, "http://127.0.0.1:1")
+	if o := New(fetch.New()).Options; o.OSV == nil || o.OSVRelease == nil {
+		t.Fatal("both OSV lookups must be wired when its source is set")
 	}
 }
