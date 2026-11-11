@@ -134,11 +134,28 @@ func (s Status) String() string {
 
 // Vuln is one advisory touching the looked-up package@version.
 type Vuln struct {
-	ID       string // native OSV id (GHSA-/GO-/PYSEC-…), the stable key
-	CVE      string // CVE alias if any, UPPER-cased
-	Severity string // upstream text label mapped (low|medium|high|critical), or "" if unscored
-	Summary  string // rebuilt from recorded facts (the fixed version), never fabricated
-	URL      string // https://osv.dev/vulnerability/<ID>
+	ID       string  // native OSV id (GHSA-/GO-/PYSEC-…), the stable key
+	CVE      string  // CVE alias if any, UPPER-cased
+	Severity string  // upstream text label mapped (low|medium|high|critical), or "" if unscored
+	Summary  string  // rebuilt from recorded facts (the fixed version), never fabricated
+	URL      string  // https://osv.dev/vulnerability/<ID>
+	Score    float64 // CVSS v3 base score computed from the record's vector, when Scored
+	Scored   bool    // the record has a v3 vector; a value keeps Vuln comparable by content
+	Vector   string  // that CVSS v3 vector, as the record gives it
+	CWE      string  // the weakness ids the record names, comma-separated (a string keeps Vuln comparable)
+	// OutsideListed (a platform's release only): the advisory reaches the version only through its
+	// "introduced 0" range while the version is older than every version the package's advisories
+	// name and older than this advisory's own list — it may not be one of this package's releases.
+	OutsideListed bool
+	// Published is when the record was published, as it gives it.
+	Published string
+}
+
+func deref(f *float64) float64 {
+	if f == nil {
+		return 0
+	}
+	return *f
 }
 
 // Ref is the display id, preferring the CVE (readers recognize it) and falling back to the OSV id.
@@ -162,6 +179,9 @@ type Result struct {
 	PackageKnown  bool // the package appears in the index (advisories exist for it)
 	VersionPinned bool // a concrete version was supplied for range matching (not empty / a manifest range)
 	Partial       bool // the dump had entries that could not be read: no answer from it is provably whole
+	// BelowListed (a platform's release only): the version is older than every version the package's
+	// advisories name; the advisories it reaches only "from the start" are marked OutsideListed.
+	BelowListed bool
 }
 
 // Index is a reduced OSV index for ONE ecosystem, looked up by package name. It is read-only after
@@ -194,7 +214,7 @@ func (idx *Index) Packages() int {
 }
 
 func (idx *Index) add(r *record) {
-	k := pkgKey(r.pkg)
+	k := idx.key(r.pkg)
 	if k == "" {
 		return
 	}
@@ -205,6 +225,18 @@ func (idx *Index) add(r *record) {
 // pkgKey is the lookup key, lower-cased: npm/PyPI/Packagist are case-insensitive at install time and
 // Go/Maven names still match exactly after lowering, so real-world collisions do not occur.
 func pkgKey(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// pep503Run is a run of the characters PEP 503 folds into one "-".
+var pep503Run = regexp.MustCompile(`[-_.]+`)
+
+// key is a package's lookup key in this index: PyPI names normalized as PEP 503 says (pip treats
+// python_jose and Python.Jose as python-jose), every other ecosystem lower-cased only.
+func (idx *Index) key(name string) string {
+	if idx.Ecosystem == "PyPI" {
+		return pep503Run.ReplaceAllString(pkgKey(name), "-")
+	}
+	return pkgKey(name)
+}
 
 // Lookup returns the tri-state result for name@version (see the package doc for the states).
 //
@@ -217,16 +249,22 @@ func (idx *Index) Lookup(name, version string) Result { return idx.LookupIn("", 
 // LookupIn is Lookup within one distro release: with a release suffix ("Debian:12") only that
 // release's records (and release-less ones) count, so another release's fix never decides.
 func (idx *Index) LookupIn(ecosystem, name, version string) Result {
-	r := idx.lookupIn(ecosystem, name, version)
+	return idx.lookup(ecosystem, name, version, false)
+}
+
+// lookup answers LookupIn; with release the version names a detected platform's release, which the
+// package may not hold (Shopware 5 looked up in a package of Shopware 6).
+func (idx *Index) lookup(ecosystem, name, version string, release bool) Result {
+	r := idx.lookupIn(ecosystem, name, version, release)
 	r.Partial = idx != nil && idx.skipped > 0
 	return r
 }
 
-func (idx *Index) lookupIn(ecosystem, name, version string) Result {
+func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result {
 	if idx == nil {
 		return Result{Status: StatusUnknown}
 	}
-	recs := idx.byName[pkgKey(name)]
+	recs := idx.byName[idx.key(name)]
 	if strings.Contains(ecosystem, ":") {
 		recs = sameRelease(recs, ecosystem)
 	}
@@ -237,6 +275,7 @@ func (idx *Index) lookupIn(ecosystem, name, version string) Result {
 	}
 	ver := CleanVersion(version)
 	pinned := ver != ""
+	below := release && pinned && belowNamedVersions(recs, ver)
 	seen, seenUnplaced := make(map[string]bool, len(recs)*2), map[string]bool{}
 	out := make([]Vuln, 0, 4)
 	var unplaced []Vuln // advisories the version could not be placed against
@@ -249,18 +288,30 @@ func (idx *Index) lookupIn(ecosystem, name, version string) Result {
 			return
 		}
 		*dst = append(*dst, Vuln{
-			ID:       r.id,
-			CVE:      r.cve,
-			Severity: r.severity,
-			Summary:  summary(r),
-			URL:      osvWebResolver + url.PathEscape(id),
+			ID:        r.id,
+			CVE:       r.cve,
+			Severity:  r.severity,
+			Score:     deref(r.score),
+			Scored:    r.score != nil,
+			Vector:    r.vector,
+			CWE:       strings.Join(r.cwe, ","),
+			Published: r.published,
+			Summary:   summary(r),
+			URL:       osvWebResolver + url.PathEscape(id),
 		})
 	}
 	indeterminate := false
+	var outside []*record // reached only "from the start" below the named versions: reported, marked, after the rest
 	for i := range recs {
 		r := &recs[i]
 		if ver != "" {
-			matched, determinate := recordMatches(r, ver)
+			matched, determinate := recordMatches(r, ver, below && r.listed)
+			if !matched && below && r.listed {
+				if m, _ := recordMatches(r, ver, false); m {
+					outside = append(outside, r)
+					continue
+				}
+			}
 			if !matched {
 				if !determinate {
 					indeterminate = true
@@ -271,20 +322,53 @@ func (idx *Index) lookupIn(ecosystem, name, version string) Result {
 		}
 		add(&out, r, seen)
 	}
+	for _, r := range outside {
+		n := len(out)
+		add(&out, r, seen) // an advisory another record already reached stays unmarked
+		if len(out) > n {
+			out[n].OutsideListed = true
+		}
+	}
 	if len(out) == 0 {
 		if indeterminate {
 			// The version could not be positioned under this ecosystem's rules (versioncmp ok=false):
 			// an honest unknown, NOT a resolved "no known vuln for this version". The package IS known,
 			// so an adapter reads this as potentially-affected, not unknown-product; the advisories it
 			// could not be placed against are returned as the ones to look at.
-			return Result{Status: StatusUnknown, Vulns: unplaced, PackageKnown: true, VersionPinned: pinned}
+			return Result{Status: StatusUnknown, Vulns: unplaced, PackageKnown: true, VersionPinned: pinned, BelowListed: below}
 		}
 		// The package IS known to the index but no advisory touches this version: a real resolved
 		// "no known vulnerability for this version", distinct from the unknown cases above.
-		return Result{Status: StatusNoKnownVuln, PackageKnown: true, VersionPinned: pinned}
+		return Result{Status: StatusNoKnownVuln, PackageKnown: true, VersionPinned: pinned, BelowListed: below}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return severityRank(out[i].Severity) > severityRank(out[j].Severity) })
-	return Result{Status: StatusVulnerable, Vulns: out, PackageKnown: true, VersionPinned: pinned}
+	return Result{Status: StatusVulnerable, Vulns: out, PackageKnown: true, VersionPinned: pinned, BelowListed: below}
+}
+
+// listsRegistryReleases are the ecosystems whose advisories list the registry's releases in a range.
+// shortcut: measured on the Packagist, Maven and NuGet dumps (09/11/2026); add another after
+// measuring its dump. npm lists scattered versions (malicious-package records), not the registry's
+// releases; distros list their own archive's versions — both keep OSV's rule.
+var listsRegistryReleases = map[string]bool{"Packagist": true, "Maven": true, "NuGet": true}
+
+// belowNamedVersions reports whether a platform's release is older than every version the package's
+// advisories name (listed, or a range bound): a Shopware 5 version looked up in a package whose data
+// begins at 6. An advisory that lists the package's releases then shows the version is not one of
+// them, so its "introduced 0" range does not reach it; one that lists none still does.
+func belowNamedVersions(recs []record, ver string) bool {
+	floor, eco := "", ""
+	for i := range recs {
+		r := &recs[i]
+		if r.floor == "" || !listsRegistryReleases[r.ecosystem] {
+			continue
+		}
+		floor, eco = lower(r.ecosystem, floor, r.floor), r.ecosystem
+	}
+	if floor == "" {
+		return false
+	}
+	c, ok := versioncmp.Compare(eco, ver, floor)
+	return ok && c < 0
 }
 
 func sameRelease(recs []record, ecosystem string) []record {
@@ -318,11 +402,14 @@ func seenVuln(seen map[string]bool, keys []string) bool {
 // the version could not be placed — a bound not comparable under the record's ecosystem, commit
 // ranges with no versions list, or a version list cut off — so the caller keeps the lookup
 // unknown rather than counting it as a clean miss.
-func recordMatches(r *record, ver string) (matched, determinate bool) {
+func recordMatches(r *record, ver string, notARelease bool) (matched, determinate bool) {
 	determinate = true
 	for i := range r.ranges {
 		if r.ranges[i].typ == rangeGit {
 			continue // commit bounds: the record's version ranges or its versions list answer instead
+		}
+		if notARelease && r.ranges[i].introduced == "0" {
+			continue // the record's own list shows the version is not one of the package's releases
 		}
 		in, ok := versionInRange(ver, r.ranges[i], r.ecosystem)
 		if !ok {
@@ -479,6 +566,14 @@ func (a *Adapter) dump(ctx context.Context, client *fetch.Client, eco string) (s
 // indexOf reads the dump's index file when it was cut from this very dump, and otherwise
 // reduces the dump — cutting the file for later runs when the dump is in the store.
 func indexOf(ctx context.Context, eco, zipPath string, st os.FileInfo, keep func(*record) bool, stored bool) (*Index, error) {
+	idx, err := dumpIndex(ctx, eco, zipPath, st, keep, stored)
+	if err == nil && stored {
+		applyOverlay(idx, zipPath, st, eco, keep) // the records changed since the dump, from sync
+	}
+	return idx, err
+}
+
+func dumpIndex(ctx context.Context, eco, zipPath string, st os.FileInfo, keep func(*record) bool, stored bool) (*Index, error) {
 	cachePath, stamp := "", dumpStamp(st)
 	if stored {
 		cachePath = zipPath + ".idx.gz"
@@ -507,9 +602,23 @@ func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
 	case a.client == nil || a.client.CacheDir == "":
 		return 0, errors.New("osv: sync needs the client's store (CacheDir)")
 	}
+	dumpURL := a.baseURL + "/" + url.PathEscape(eco) + "/all.zip"
+	if stored, at, lastModified, ok := a.client.Stored(dumpURL); ok {
+		if fi, err := os.Stat(stored); err == nil && time.Since(fi.ModTime()) < fullEvery {
+			// no changed-records list (a mirror holding only dumps), or too many changes: the whole dump below
+			done, err := a.syncChanged(ctx, eco, stored, lastModified, at)
+			if err != nil {
+				return 0, fmt.Errorf("osv %s: changed records: %w", eco, err)
+			}
+			if done {
+				a.client.Confirm(dumpURL) // dump + overlay are current: a run within MaxAge reads them with no request
+				return a.cutIndex(ctx, eco, stored)
+			}
+		}
+	}
 	dctx, cancel := context.WithTimeout(ctx, downloadLimit)
 	defer cancel()
-	path, meta, release, err := a.client.Download(dctx, a.baseURL+"/"+url.PathEscape(eco)+"/all.zip", maxZipBytes)
+	path, meta, release, err := a.client.Download(dctx, dumpURL, maxZipBytes)
 	defer release()
 	if err == nil && meta.Stale {
 		err = errors.New(meta.Err) // the store kept its copy, but the source did not answer
@@ -517,6 +626,11 @@ func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("osv %s: %w", eco, err)
 	}
+	return a.cutIndex(ctx, eco, path)
+}
+
+// cutIndex makes sure the stored dump at path has its index file, and returns the dump's size.
+func (a *Adapter) cutIndex(ctx context.Context, eco, path string) (int64, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return 0, fmt.Errorf("osv %s: %w", eco, err)
@@ -528,7 +642,7 @@ func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
 			return st.Size(), nil // already cut from this dump
 		}
 	}
-	if _, err := indexOf(ctx, eco, path, st, func(*record) bool { return false }, true); err != nil {
+	if _, err := dumpIndex(ctx, eco, path, st, func(*record) bool { return false }, true); err != nil {
 		return 0, fmt.Errorf("osv %s: %w", eco, err)
 	}
 	return st.Size(), nil

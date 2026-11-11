@@ -17,7 +17,7 @@ import (
 // reads that file instead of decompressing and parsing the whole dump again — Ubuntu's is 8GB
 // of JSON, about three minutes. The file is stamped with the dump's size and mtime and is cut
 // again whenever the stored dump changes.
-const indexFormat = "sigforge-osv-index/6" // bump whenever a row field changes, so older files are cut again
+const indexFormat = "sigforge-osv-index/10" // bump whenever a row field changes, so older files are cut again
 
 var errStaleIndex = errors.New("osv: index file was cut from another dump")
 
@@ -28,7 +28,10 @@ type indexRow struct {
 	Pkg, Ecosystem, ID, CVE, Severity string
 	Ranges                            []indexRange
 	Versions, VulnKeys                []string
-	Truncated                         bool
+	Truncated, Listed                 bool
+	Score                             *float64
+	Vector, Published, Floor          string
+	CWE                               []string
 	Skipped                           int // set only on the final row, which has no Pkg: the dump's unreadable entries
 }
 
@@ -185,7 +188,7 @@ func (w *indexWriter) finish(ok bool) {
 }
 
 func rowOf(r *record) indexRow {
-	row := indexRow{Pkg: r.pkg, Ecosystem: r.ecosystem, ID: r.id, CVE: r.cve, Severity: r.severity, Versions: r.versions, VulnKeys: r.vulnKeys, Truncated: r.truncated}
+	row := indexRow{Pkg: r.pkg, Ecosystem: r.ecosystem, ID: r.id, CVE: r.cve, Severity: r.severity, Versions: r.versions, VulnKeys: r.vulnKeys, Truncated: r.truncated, Listed: r.listed, Score: r.score, Vector: r.vector, Published: r.published, Floor: r.floor, CWE: r.cwe}
 	for _, g := range r.ranges {
 		row.Ranges = append(row.Ranges, indexRange{Typ: g.typ, Introduced: g.introduced, Fixed: g.fixed, LastAffected: g.lastAffected})
 	}
@@ -193,7 +196,7 @@ func rowOf(r *record) indexRow {
 }
 
 func (row indexRow) record() record {
-	r := record{pkg: row.Pkg, ecosystem: row.Ecosystem, id: row.ID, cve: row.CVE, severity: row.Severity, versions: row.Versions, vulnKeys: row.VulnKeys, truncated: row.Truncated}
+	r := record{pkg: row.Pkg, ecosystem: row.Ecosystem, id: row.ID, cve: row.CVE, severity: row.Severity, versions: row.Versions, vulnKeys: row.VulnKeys, truncated: row.Truncated, listed: row.Listed, score: row.Score, vector: row.Vector, published: row.Published, floor: row.Floor, cwe: row.CWE}
 	for _, g := range row.Ranges {
 		r.ranges = append(r.ranges, affectedRange{typ: g.Typ, introduced: g.Introduced, fixed: g.Fixed, lastAffected: g.LastAffected})
 	}

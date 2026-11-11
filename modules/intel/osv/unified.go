@@ -56,6 +56,11 @@ func ToUnified(res Result, eco, name, version string, fetchedAt time.Time) unifi
 	return u
 }
 
+// noteOutsideListed is why a platform release's lead may not apply: the advisory reaches it only "from the
+// start", yet lists the package's releases and none so old — the version may belong to another release line
+// (Shopware 5 in a Shopware 6 package) or predate the package's publication (Liferay 6.2, artifact from 7.0).
+const noteOutsideListed = "the version is older than every version this package's advisories name and reaches this advisory only through its from-the-start range: it may not be one of this package's releases — confirm before relying on it"
+
 // Unavailable maps a LoadIndex failure to an honest unified.Result: a disabled source (errSourceOff)
 // is not_checked, any other failure is source_unavailable — neither is ever read as "clean".
 func Unavailable(eco, name, version string, err error) unified.Result {
@@ -73,7 +78,8 @@ func Unavailable(eco, name, version string, err error) unified.Result {
 	return u
 }
 
-// unifiedLeads maps OSV vulns to unified leads; OSV carries no numeric score, so Lead.Score stays nil
+// unifiedLeads maps OSV vulns to unified leads; Lead.Score is the base score of the record's CVSS v3
+// vector, nil when it has none
 // (an absent score is never fabricated as 0.0).
 func unifiedLeads(vulns []Vuln) []unified.Lead {
 	if len(vulns) == 0 {
@@ -81,7 +87,14 @@ func unifiedLeads(vulns []Vuln) []unified.Lead {
 	}
 	out := make([]unified.Lead, 0, len(vulns))
 	for _, v := range vulns {
-		l := unified.Lead{ID: v.ID, Title: v.Summary, Severity: v.Severity}
+		l := unified.Lead{ID: v.ID, Title: v.Summary, Severity: v.Severity, CVSS: v.Vector, CWE: unified.CWEIDs(strings.Split(v.CWE, ",")), Published: v.Published}
+		if v.OutsideListed {
+			l.Note = noteOutsideListed
+		}
+		if v.Scored {
+			score := v.Score
+			l.Score = &score
+		}
 		if v.CVE != "" {
 			l.CVE = []string{v.CVE}
 		}
@@ -98,6 +111,15 @@ func unifiedLeads(vulns []Vuln) []unified.Lead {
 // package is answered from that index. What the source cannot answer stays unanswered: an
 // off source or an unsupported ecosystem is not_checked, a failed load source_unavailable.
 func (a *Adapter) Lookuper() func(ctx context.Context, eco, name, version string) unified.Result {
+	pkg, _ := a.Lookupers()
+	return pkg
+}
+
+// Lookupers returns one run's two lookups over the same loaded dumps: pkg for a package's own
+// version (Lookuper), release for a detected platform's release looked up in its core packages — a
+// version the package may not hold, so one older than every version the package's advisories name
+// is not reached by the from-the-start ranges of those that list its releases.
+func (a *Adapter) Lookupers() (pkg, release func(ctx context.Context, eco, name, version string) unified.Result) {
 	type loaded struct {
 		once sync.Once
 		idx  *Index
@@ -105,50 +127,53 @@ func (a *Adapter) Lookuper() func(ctx context.Context, eco, name, version string
 	}
 	var mu sync.Mutex
 	byEco := map[string]*loaded{}
-	return func(ctx context.Context, eco, name, version string) unified.Result {
-		unanswered := func(state unified.State, why string) unified.Result {
-			u := unified.Unknown("ecosystem:"+trimEcosystem(eco), name, state, why)
-			u.Version, u.Source = version, unifiedSource
+	lookup := func(rel bool) func(ctx context.Context, eco, name, version string) unified.Result {
+		return func(ctx context.Context, eco, name, version string) unified.Result {
+			unanswered := func(state unified.State, why string) unified.Result {
+				u := unified.Unknown("ecosystem:"+trimEcosystem(eco), name, state, why)
+				u.Version, u.Source = version, unifiedSource
+				return u
+			}
+			e, ok := Ecosystem(eco)
+			if !ok {
+				return unanswered(unified.StateNotChecked, "OSV ecosystem "+eco+" is not supported")
+			}
+			eco = e + strings.TrimPrefix(eco, trimEcosystem(eco)) // the canonical name, release kept
+			if releaseScoped[e] && !strings.Contains(eco, ":") {
+				return unanswered(unified.StateNotChecked, e+" advisories differ per release: give the package as a purl with its distro qualifier (…?distro=<release>)")
+			}
+			key := e
+			if releaseScoped[e] && a.client != nil && a.client.CacheDir != "" {
+				key = eco // with a store each release is its own index, read from the dump's index file
+			}
+			mu.Lock() // guards only the map: one ecosystem's long load never holds up another's
+			l := byEco[key]
+			if l == nil {
+				l = &loaded{}
+				byEco[key] = l
+			}
+			mu.Unlock()
+			l.once.Do(func() { l.idx, l.err = a.LoadIndex(ctx, key) })
+			switch {
+			case errors.Is(l.err, errSourceOff):
+				return unanswered(unified.StateNotChecked, "osv feed off")
+			case l.err != nil:
+				return unanswered(unified.StateSourceUnavailable, l.err.Error())
+			}
+			u := ToUnified(l.idx.lookup(eco, name, version, rel), e, name, version, l.idx.BuiltAt)
+			switch {
+			case l.idx.fetched.Stale:
+				u.Freshness = unified.FreshnessStale
+				note := "osv source failed: verdict from the last synced dump (stale): " + l.idx.fetched.Err
+				if u.Err != "" {
+					note = u.Err + "; " + note // keep why the verdict is what it is
+				}
+				u.Err = note
+			case l.idx.fetched.Cached:
+				u.Freshness = unified.FreshnessSnapshot
+			}
 			return u
 		}
-		e, ok := Ecosystem(eco)
-		if !ok {
-			return unanswered(unified.StateNotChecked, "OSV ecosystem "+eco+" is not supported")
-		}
-		eco = e + strings.TrimPrefix(eco, trimEcosystem(eco)) // the canonical name, release kept
-		if releaseScoped[e] && !strings.Contains(eco, ":") {
-			return unanswered(unified.StateNotChecked, e+" advisories differ per release: give the package as a purl with its distro qualifier (…?distro=<release>)")
-		}
-		key := e
-		if releaseScoped[e] && a.client != nil && a.client.CacheDir != "" {
-			key = eco // with a store each release is its own index, read from the dump's index file
-		}
-		mu.Lock() // guards only the map: one ecosystem's long load never holds up another's
-		l := byEco[key]
-		if l == nil {
-			l = &loaded{}
-			byEco[key] = l
-		}
-		mu.Unlock()
-		l.once.Do(func() { l.idx, l.err = a.LoadIndex(ctx, key) })
-		switch {
-		case errors.Is(l.err, errSourceOff):
-			return unanswered(unified.StateNotChecked, "osv feed off")
-		case l.err != nil:
-			return unanswered(unified.StateSourceUnavailable, l.err.Error())
-		}
-		u := ToUnified(l.idx.LookupIn(eco, name, version), e, name, version, l.idx.BuiltAt)
-		switch {
-		case l.idx.fetched.Stale:
-			u.Freshness = unified.FreshnessStale
-			note := "osv source failed: verdict from the last synced dump (stale): " + l.idx.fetched.Err
-			if u.Err != "" {
-				note = u.Err + "; " + note // keep why the verdict is what it is
-			}
-			u.Err = note
-		case l.idx.fetched.Cached:
-			u.Freshness = unified.FreshnessSnapshot
-		}
-		return u
 	}
+	return lookup(false), lookup(true)
 }

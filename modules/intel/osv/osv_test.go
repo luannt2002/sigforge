@@ -3,13 +3,21 @@ package osv
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
 	"github.com/luannt2002/sigforge/modules/intel/unified"
@@ -517,5 +525,131 @@ func TestLookuperLoadsEachEcosystemOnce(t *testing.T) {
 	}
 	if u := New("", fetch.New()).Lookuper()(ctx, "npm", "lodash", "4.17.20"); u.State != unified.StateNotChecked {
 		t.Fatalf("an off source must be not_checked, got %+v", u)
+	}
+}
+
+// A platform's release (a detected Shopware 5) looked up in a core package may not be one of the
+// package's releases. No advisory is ever dropped for it: one that reaches the version only through the
+// "introduced 0" range of an advisory listing the package's releases, while the version is older than
+// every version the package's advisories name, is kept and marked (OutsideListed, a note on the lead) —
+// it may not apply (Shopware 5 in a Shopware 6 package) or may (Liferay 6.2 under an artifact first
+// published at 7.0). Everything else is unmarked: a range with its own bound, an advisory listing no
+// versions, npm, distros, and a package's own version (an SBOM, --package).
+func TestPlatformReleaseBelowEveryNamedVersionIsMarkedNotDropped(t *testing.T) {
+	adv := func(id, eco, pkg, introduced, fixed string, versions ...string) string {
+		vs, _ := json.Marshal(versions)
+		return `{"id":"` + id + `","affected":[{"package":{"name":"` + pkg + `","ecosystem":"` + eco + `"},` +
+			`"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"` + introduced + `"},{"fixed":"` + fixed + `"}]}],"versions":` + string(vs) + `}]}`
+	}
+	ordered := func(eco string, nameBody ...string) *Index {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		for i := 0; i < len(nameBody); i += 2 {
+			w, _ := zw.Create(nameBody[i])
+			_, _ = w.Write([]byte(nameBody[i+1]))
+		}
+		_ = zw.Close()
+		idx, err := BuildIndex(context.Background(), eco, bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return idx
+	}
+	idx := ordered("Packagist",
+		"b.json", adv("GHSA-b", "Packagist", "shopware/core", "0", "6.5.1.0", "6.5.0.0", "6.2.0"), // read first, its own list starts above the package's
+		"a.json", adv("GHSA-a", "Packagist", "shopware/core", "0", "6.4.20.0", "6.4.19.0", "6.0.0", "6.1.0"),
+		"n.json", adv("GHSA-n", "Packagist", "shopware/core", "0", "6.4.0"),
+		"pb.json", adv("GHSA-pb", "Packagist", "shopware/platform", "0", "6.5.1.0", "6.2.0"),
+		"pe.json", adv("GHSA-pe", "Packagist", "shopware/platform", "5.0.0", "5.7.18"),
+		"x.json", adv("GHSA-x", "Packagist", "drupal/drupal", "8.0.0", "8.9.0", "8.0.0", "8.5.0"),
+		"y.json", adv("GHSA-y", "Packagist", "drupal/drupal", "0", "7.58"),
+	)
+	ids := func(r Result) string { // a marked advisory carries a "?"
+		var out []string
+		for _, v := range r.Vulns {
+			id := v.ID
+			if v.OutsideListed {
+				id += "?"
+			}
+			out = append(out, id)
+		}
+		sort.Strings(out)
+		return strings.Join(out, ",")
+	}
+	for _, tc := range []struct {
+		pkg, version, want string
+		below              bool
+	}{
+		{"shopware/core", "5.7.17", "GHSA-a?,GHSA-b?,GHSA-n", true}, // GHSA-a and GHSA-b list the releases from 6.0.0; GHSA-n lists none
+		{"shopware/core", "6.1.5", "GHSA-a,GHSA-b,GHSA-n", false},   // GHSA-b's list starts at 6.2.0, but GHSA-a names 6.0.0
+		{"shopware/platform", "5.7.17", "GHSA-pb,GHSA-pe", false},   // GHSA-pe names 5.0.0: 5.x may be the package's
+		{"shopware/platform", "4.3.0", "GHSA-pb?", true},
+		{"drupal/drupal", "7.57", "GHSA-y", true}, // below 7.58, the lowest named, but GHSA-y lists no versions
+	} {
+		got := idx.lookup("", tc.pkg, tc.version, true)
+		if ids(got) != tc.want || got.BelowListed != tc.below {
+			t.Errorf("release %s@%s = %v %q below=%v, want %q below=%v", tc.pkg, tc.version, got.Status, ids(got), got.BelowListed, tc.want, tc.below)
+		}
+	}
+	if got := idx.Lookup("shopware/core", "5.7.17"); ids(got) != "GHSA-a,GHSA-b,GHSA-n" || got.BelowListed {
+		t.Errorf("a package's own version keeps OSV's rule, unmarked: %q below=%v", ids(got), got.BelowListed)
+	}
+	u := ToUnified(idx.lookup("", "shopware/core", "5.7.17", true), "Packagist", "shopware/core", "5.7.17", time.Time{})
+	notes := map[string]string{}
+	for _, l := range u.Leads {
+		notes[l.ID] = l.Note
+	}
+	if len(u.Leads) != 3 || !strings.Contains(notes["GHSA-a"], "older than every version") || notes["GHSA-n"] != "" {
+		t.Errorf("every lead is reported, a marked one with its note: %+v", u.Leads)
+	}
+	npm := ordered("npm",
+		"1.json", adv("GHSA-1", "npm", "lodash", "0", "4.17.21"),
+		"2.json", adv("GHSA-2", "npm", "lodash", "0", "4.17.24", "4.17.23"))
+	if got := npm.lookup("", "lodash", "4.17.20", true); ids(got) != "GHSA-1,GHSA-2" {
+		t.Errorf("npm lists are not the registry's releases: lodash@4.17.20 = %q", ids(got))
+	}
+	deb := ordered("Debian", "d.json", adv("DSA-1", "Debian:12", "openssl", "0", "3.0.11-1", "3.0.9-1", "3.0.10-1"))
+	if got := deb.lookup("Debian:12", "openssl", "3.0.8-1", true); ids(got) != "DSA-1" {
+		t.Errorf("a distro version below the list keeps OSV's rule, unmarked: %q", ids(got))
+	}
+}
+
+// The package's listed floor travels in the index file, so a run reading it still knows where the
+// package's releases begin.
+func TestIndexFileKeepsTheListedFloor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dump.idx.gz")
+	w := newIndexWriter(path, "stamp")
+	w.put(&record{pkg: "p", ecosystem: "Packagist", id: "X-1", floor: "6.0.0", listed: true, vulnKeys: []string{"X-1"},
+		ranges: []affectedRange{{typ: "ECOSYSTEM", introduced: "0", fixed: "6.4.0"}}})
+	w.putSkipped(0)
+	w.finish(true)
+	idx, err := readIndexFile(path, "stamp", "Packagist", releaseRows("Packagist"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := idx.lookup("", "p", "5.7.17", true); len(got.Vulns) != 1 || !got.Vulns[0].OutsideListed {
+		t.Fatalf("floor or list mark lost in the index file: release 5.7.17 = %+v", got)
+	}
+	if got := idx.lookup("", "p", "6.1.0", true); got.Status != StatusVulnerable {
+		t.Fatalf("6.1.0 = %v, want vulnerable", got.Status)
+	}
+}
+
+// An index file cut under another row format is not read — its rows would lack (or misread) fields
+// the lookup now relies on — so the dump is reduced again.
+func TestIndexFileOfAnotherFormatIsCutAgain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dump.idx.gz")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	if err := gob.NewEncoder(gz).Encode(indexHeader{Format: "sigforge-osv-index/9", Dump: "stamp"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = gz.Close()
+	_ = f.Close()
+	if _, err := readIndexFile(path, "stamp", "Packagist", releaseRows("Packagist")); !errors.Is(err, errStaleIndex) {
+		t.Fatalf("an index of another format must be refused as stale, got %v", err)
 	}
 }

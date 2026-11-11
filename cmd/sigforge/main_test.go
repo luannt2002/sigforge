@@ -416,13 +416,16 @@ func TestSyncOSVDump(t *testing.T) {
 	_, _ = f.Write([]byte(`{"id":"GHSA-1","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.17.21"}]}]}]}`))
 	_ = zw.Close()
 	dump := zbuf.Bytes()
-	var hits, bodies atomic.Int32
+	var hits, lists, bodies atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
+		if r.URL.Path == "/npm/modified_id.csv" {
+			lists.Add(1) // this mirror holds dumps only: the changed-records list is not there
+		}
 		if r.URL.Path != "/npm/all.zip" {
 			http.NotFound(w, r)
 			return
 		}
+		hits.Add(1)
 		if r.Header.Get("If-None-Match") == `"d1"` {
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -440,8 +443,9 @@ func TestSyncOSVDump(t *testing.T) {
 			t.Fatalf("run %d: err=%v out=%q", i, err, out)
 		}
 	}
-	if hits.Load() != 2 || bodies.Load() != 1 {
-		t.Fatalf("want 2 requests and 1 download, got %d and %d", hits.Load(), bodies.Load())
+	// the second sync asks for the changed-records list once, finds none, and revalidates the dump (304)
+	if hits.Load() != 2 || bodies.Load() != 1 || lists.Load() > 1 {
+		t.Fatalf("want 2 dump requests, 1 download and at most 1 ask for the changed-records list, got %d, %d and %d", hits.Load(), bodies.Load(), lists.Load())
 	}
 	if idx, _ := filepath.Glob(filepath.Join(os.Getenv(EnvCacheDir), "*.idx.gz")); len(idx) != 1 {
 		t.Fatalf("sync must leave the dump's index file for scans to read, found %v", idx)
