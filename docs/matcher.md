@@ -41,7 +41,13 @@ headers, cookies, HTML, meta tags and script srcs — and get back the technolog
   tech never labels itself: an edition that requires and excludes its base stays unlabeled.
 - A script-src pattern must not fire on its letters embedded mid-filename in a
   hashed bundle (token-boundary guard).
-- A blank/irrelevant page yields zero detections (no false positives).
+- A blank page yields zero detections (no false positives), and so does every
+  hard-negative page of the accuracy corpus on the baseline set.
+- A `dom` rule is read from the page's start tags, never from prose, comments or the
+  text inside `<script>`/`<style>`: every test of a selector compound must hold on
+  one start tag, and an attribute pattern runs on that attribute's value.
+- Two limits are deliberate: relations between compounds (descendant, child,
+  sibling) are not checked, and a `text` pattern is not evaluated.
 - `version_regex` alternates refine the version of an already-detected tech but can
   never, alone, create a detection.
 - Output is sorted by confidence descending, then by name. The function is pure.
@@ -66,12 +72,41 @@ requirement is resolved (expanding `implies` with a depth bound each round), lab
 entry's `provenance` and `license` so the operator knows the license posture of every lead.
 
 Honesty: a detection is a LEAD. Banner/meta versions are attacker-controllable.
-The schema's `dom` rules are evaluated passively (see `matcher_dom.go`): with no
-real DOM, a selector's distinguishing token and its attribute/text patterns are
-tested as substrings/regexes over the raw HTML (e.g. `ng-version` → Angular+version,
-`#vite-legacy-polyfill` → Vite). This is an approximation, not a DOM query, so a
-rule depending on element structure or JS runtime `properties` can be missed; a
-browser-backed consumer can still read `Fingerprint.Dom` itself.
+The schema's `dom` rules are evaluated passively (see `matcher_dom.go`) against the
+page's start tags, with no real DOM. A start tag is its name and attributes,
+valueless ones included; a `>` inside a quoted value does not end it; comments and
+the text inside `<script>` and `<style>` are not tags. That text runs to its own end
+tag — the name in any case, then whitespace, `/` or `>`, so `</scripts>` is still
+text — or to the end of the page. A selector splits into
+comma-separated branches and each branch into compounds
+(`div#id.cls[attr op "value" i]`, op one of `= ~= |= ^= $= *=`). A compound matches
+a start tag when all its tests hold on that one tag: tag and attribute names ignore
+case; ids, classes and values do not, except a value test that carries ` i`. A
+branch with a pseudo-class other than a structural one (`:first-child`, `:nth-*`, …)
+or a pseudo-element — `:not()`, `:has()`, … — never fires.
+
+- An attribute pattern is a regex (unanchored, case-insensitive, as in Wappalyzer)
+  over that attribute's value on a tag the branch's last compound matches, and needs
+  every other compound to match a tag too (`<app-root ng-version="16.2.0">` →
+  Angular 16.2.0). The same text in prose, in an XML prolog or on another tag is
+  not that attribute.
+- `exists`, a list or string selector (with its `\;confidence:N`), an empty attribute
+  pattern and a node with no pattern are presence tests. A branch needs at least
+  one literal: an attribute value of four or more characters (CSS escapes removed),
+  an id/class of six or more characters or with `-`/`_`, or a tag/attribute name
+  with `-`/`_` — the attribute an empty pattern names counts. All its literals must
+  be in the raw HTML, a cheap filter before tags are read, and each compound must
+  match a start tag; an empty pattern's attribute must sit on the last compound's
+  tag (`#vite-legacy-polyfill` → Vite). A plain tag or attribute name (`script`,
+  `content`) is never a literal, so a branch naming nothing else never fires.
+- JS runtime `properties` are ignored: a node carrying only them is a presence test
+  of its selector.
+
+Two limits are deliberate. Relations between compounds are not checked — raw HTML is
+not parsed into a tree, so `h2 + p` only means "an h2 and a p are on the page" and
+can fire where a browser would not. A `text` pattern needs the element's own text, so
+it is not evaluated and a rule built on it is missed. A browser-backed consumer can
+still read `Fingerprint.Dom` itself.
 
 ### 5.1 Diagram
 
