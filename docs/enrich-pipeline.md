@@ -36,8 +36,13 @@ stdin JSON Page ─▶ matcher.Match(db, page) ─▶ []Detection
                         eolResult:  opt.EOL.EOLStatus(tech, version) ─▶ lifecycle.ToUnified
                         platformResults: a release version (Drupal 7.59, Magento 2.4.6, Jetty 9.4.51.v…)
                                     ─▶ opt.OSVRelease per core package (platformPackages; releaseLine keeps a
-                                       version out of a package that holds another release line; the
-                                       release lookup drops a version older than all the package names)
+                                       version out of a package that holds another release line; for a
+                                       version older than all the package names (Packagist, Maven, NuGet),
+                                       the release lookup still reports, marked OutsideListed, what an
+                                       advisory listing the package's releases reaches only from the
+                                       start (enrich reports such a lead as potentially affected); an
+                                       advisory listing no versions keeps OSV's rule; one it cannot
+                                       place is handled as in a package lookup)
                                     ─▶ dropRepeated (a lead an earlier result named is not reported twice)
                                                  ▼
                                         []unified.Result

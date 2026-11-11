@@ -117,8 +117,9 @@ func (a *Adapter) Lookuper() func(ctx context.Context, eco, name, version string
 
 // Lookupers returns one run's two lookups over the same loaded dumps: pkg for a package's own
 // version (Lookuper), release for a detected platform's release looked up in its core packages — a
-// version the package may not hold, so one older than every version the package's advisories name
-// is not reached by the from-the-start ranges of those that list its releases.
+// version the package may not hold, so for one older than every version the package's advisories
+// name, what the from-the-start ranges of those that list its releases reach is marked OutsideListed
+// (an advisory whose ranges cannot place it stays unplaced, as for a package).
 func (a *Adapter) Lookupers() (pkg, release func(ctx context.Context, eco, name, version string) unified.Result) {
 	type loaded struct {
 		once sync.Once

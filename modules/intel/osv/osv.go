@@ -307,7 +307,8 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 		if ver != "" {
 			matched, determinate := recordMatches(r, ver, below && r.listed)
 			if !matched && below && r.listed {
-				if m, _ := recordMatches(r, ver, false); m {
+				// OSV's own rule decides the rest: a version it cannot place stays unknown with its lead, as for a package
+				if matched, determinate = recordMatches(r, ver, false); matched {
 					outside = append(outside, r)
 					continue
 				}
@@ -354,7 +355,9 @@ var listsRegistryReleases = map[string]bool{"Packagist": true, "Maven": true, "N
 // belowNamedVersions reports whether a platform's release is older than every version the package's
 // advisories name (listed, or a range bound): a Shopware 5 version looked up in a package whose data
 // begins at 6. An advisory that lists the package's releases then shows the version is not one of
-// them, so its "introduced 0" range does not reach it; one that lists none still does.
+// them: what its "introduced 0" range reaches is still reported, marked OutsideListed; one that
+// lists none keeps OSV's rule; one whose ranges cannot place the version is unplaced, as for
+// a package.
 func belowNamedVersions(recs []record, ver string) bool {
 	floor, eco := "", ""
 	for i := range recs {

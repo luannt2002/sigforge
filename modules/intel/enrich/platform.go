@@ -61,8 +61,9 @@ var platformPackages = map[string][]pkg{
 // Drupal 8 and later (Drupal 7 is drupal/drupal), @angular/core Angular 2 and later (1.x is the
 // AngularJS package "angular", which the fingerprints also name Angular), magento/community-edition
 // Magento 2 (1.x is magento/magento1ce). A version of another line would fall in the package's
-// "from the start" ranges: affected by advisories of a product it is not. The release lookup drops a
-// version older than every version a package's advisories name (Shopware 5 in shopware/platform);
+// "from the start" ranges: affected by advisories of a product it is not. For a version older than
+// every version a package's advisories name (Shopware 5 in shopware/platform), the release lookup
+// marks OutsideListed what an advisory listing the package's releases reaches only from the start;
 // this table holds only the packages whose data does not show that: drupal/core and the Magento
 // packages name older versions, and npm is outside that rule (measured on the dumps, 09/11/2026).
 var releaseLine = map[string][2]int{
