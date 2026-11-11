@@ -34,7 +34,7 @@ type watchState struct {
 // for is UNCHECKED (its leads kept, not GONE). An identity's first answer — on the first run, after a
 // run nothing answered, or for a package added later — is recorded (FIRST), not NEW. With
 // --fail-on-new a NEW lead fails the command, so a timer or monitor can alarm on it; a run no source
-// answered for anything fails too.
+// answered for anything fails too, and a run with nothing to look up fails without touching the state.
 func cmdWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	statePath := fs.String("state", "", "file keeping what the last run saw (required)")
@@ -69,6 +69,10 @@ func cmdWatch(args []string) error {
 	now, answered, unchecked := leadsByIdentity(enrich.EnrichUnifiedExt(ctx, nil, nil, inp, set.Options))
 	for _, note := range set.Notes(ctx) {
 		fmt.Fprintln(os.Stderr, note)
+	}
+	// a run that looked nothing up knows nothing: a diff against it would report every kept lead GONE and erase them
+	if len(answered)+len(unchecked) == 0 {
+		return fmt.Errorf("watch: nothing to look up: the inventory has no package, SBOM component, plugin, theme or library; the state is left as it was")
 	}
 
 	var prev watchState

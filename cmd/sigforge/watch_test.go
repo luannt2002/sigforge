@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -223,5 +224,58 @@ func TestWatchFirstAnswerIsRecordedNotNew(t *testing.T) {
 	dump.Store(zipOf("GHSA-1", "GHSA-2"))
 	if out, err := run(inventory...); err == nil || strings.Count(out, "NEW") != 3 || !strings.Contains(out, "lodash@4.17.25  GHSA-2") {
 		t.Fatalf("a lead appearing after the first answer is NEW for each identity: err=%v\n%s", err, out)
+	}
+}
+
+// A run that looked nothing up — no inventory flag, --sbom from an unset variable, an SBOM without
+// components — knows nothing about the inventory: it fails, reports nothing and leaves the state as it
+// was, so a timer never reads it as quiet and the kept leads are neither reported GONE nor erased.
+func TestWatchFailsWhenNothingIsLookedUp(t *testing.T) {
+	for _, s := range syncSources {
+		t.Setenv(s.env, "")
+	}
+	t.Setenv(EnvCacheDir, "")
+	var zbuf bytes.Buffer
+	zw := zip.NewWriter(&zbuf)
+	for _, id := range []string{"GHSA-1", "GHSA-2"} {
+		f, _ := zw.Create("npm/" + id + ".json")
+		_, _ = f.Write([]byte(`{"id":"` + id + `","affected":[{"package":{"name":"lodash","ecosystem":"npm"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.17.21"}]}]}]}`))
+	}
+	_ = zw.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(zbuf.Bytes()) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	primed := filepath.Join(t.TempDir(), "watch.json")
+	var err error
+	captureStdout(t, func() { err = cmdWatch([]string{"--state", primed, "--package", "pkg:npm/lodash@4.17.15"}) })
+	before, rerr := os.ReadFile(primed)
+	if err != nil || rerr != nil || !strings.Contains(string(before), "GHSA-1") || !strings.Contains(string(before), "GHSA-2") {
+		t.Fatalf("the first run must record lodash's two leads: err=%v read=%v\n%s", err, rerr, before)
+	}
+	emptySBOM := filepath.Join(t.TempDir(), "inventory.cdx.json")
+	writeFile(t, emptySBOM, `{"bomFormat":"CycloneDX","components":[]}`)
+	for name, inventory := range map[string][]string{
+		"no inventory flag":       nil,
+		"empty --sbom":            {"--sbom", ""},
+		"SBOM without components": {"--sbom", emptySBOM},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			state, absent := filepath.Join(dir, "watch.json"), filepath.Join(dir, "absent.json")
+			writeFile(t, state, string(before))
+			for _, path := range []string{state, absent} {
+				var err error
+				out := captureStdout(t, func() { err = cmdWatch(append([]string{"--state", path, "--fail-on-new"}, inventory...)) })
+				if err == nil || !strings.Contains(err.Error(), "nothing to look up") || out != "" {
+					t.Errorf("%s: a run with nothing to look up must fail and print nothing: err=%v\n%s", filepath.Base(path), err, out)
+				}
+			}
+			if after, err := os.ReadFile(state); err != nil || !bytes.Equal(after, before) {
+				t.Errorf("the state must be left as it was, byte for byte (read err=%v):\n%s", err, after)
+			}
+			if _, err := os.Stat(absent); !os.IsNotExist(err) {
+				t.Errorf("a run with nothing to look up must not create a state file (stat err=%v)", err)
+			}
+		})
 	}
 }
