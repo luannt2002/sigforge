@@ -2,6 +2,7 @@ package kev
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/luannt2002/sigforge/modules/intel/unified"
@@ -12,7 +13,7 @@ import (
 // returned no score — so a missing EPSS is never the real 0.0 that FIRST can
 // legitimately return. It goes in Lead.EPSS, never Lead.Score (CVSS, another scale).
 func SignalToLead(s Signal) unified.Lead {
-	l := unified.Lead{ID: s.CVE, CVE: []string{s.CVE}, KnownExpl: s.InKEV}
+	l := unified.Lead{ID: s.CVE, CVE: []string{s.CVE}, KnownExpl: s.InKEV, DueDate: s.DueDate, RequiredAction: s.RequiredAction, CWE: unified.CWEIDs(strings.Split(s.CWE, ","))}
 	if s.Ransomware {
 		l.Title = "used in a known ransomware campaign"
 	}
@@ -69,8 +70,7 @@ func (a *Adapter) EnrichUnified(ctx context.Context, cves []string) map[string]u
 		s := epss[id] // zero-value Signal (HasEPSS false) if EPSS had nothing
 		s.CVE = id
 		if e, ok := kev[id]; ok {
-			s.InKEV = true
-			s.Ransomware = e.Ransomware
+			markKEV(&s, e)
 		}
 		u := MapSignal(s, fresh, a.status.Source == "live" && a.complete)
 		if !fetchedAt.IsZero() {
