@@ -247,10 +247,9 @@ func patternExpr(raw string) string {
 	return expr
 }
 
-// validateDom compiles the attribute and text regexes of a Wappalyzer `dom` object
-// as the matcher does (an attribute pattern is anchored to `attr=`, see
-// matcher_dom.go). The array and bare-string dom shapes carry only selectors, which
-// are presence tokens, not regexes.
+// validateDom rejects a Wappalyzer `dom` object whose attribute regex (checked behind
+// an `attr=` prefix) or text regex does not compile. The array and bare-string dom
+// shapes carry only selectors, not regexes.
 func validateDom(name string, raw json.RawMessage) error {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(raw, &obj) != nil {
