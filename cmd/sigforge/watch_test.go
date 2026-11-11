@@ -3,16 +3,22 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/luannt2002/sigforge/modules/intel/jslib"
 	"github.com/luannt2002/sigforge/modules/intel/osv"
+	"github.com/luannt2002/sigforge/modules/intel/unified"
+	"github.com/luannt2002/sigforge/modules/intel/wpcve"
 )
 
 // watch re-checks an inventory against the sources as they are now and names what changed since its
@@ -335,5 +341,605 @@ func TestWatchRefusesAnEmptyInventoryValue(t *testing.T) {
 				t.Errorf("the state must be left as it was, byte for byte (read err=%v):\n%s", err, after)
 			}
 		})
+	}
+}
+
+func osvDump(entries map[string]string) []byte {
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	for name, body := range entries {
+		w, _ := zw.Create(name)
+		_, _ = w.Write([]byte(body))
+	}
+	_ = zw.Close()
+	return b.Bytes()
+}
+
+func npmAdvisory(id, pkg, fixed string) string {
+	return `{"id":"` + id + `","affected":[{"package":{"name":"` + pkg + `","ecosystem":"npm"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"` + fixed + `"}]}]}]}`
+}
+
+func watchOut(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	var err error
+	out := captureStdout(t, func() { err = cmdWatch(args) })
+	return out, err
+}
+
+func readState(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func stateLeads(t *testing.T, path string) map[string][]string {
+	t.Helper()
+	var s watchState
+	if err := json.Unmarshal([]byte(readState(t, path)), &s); err != nil {
+		t.Fatal(err)
+	}
+	return s.Leads
+}
+
+// A WordPress feed that answers but lists nothing for the plugin (null, {}, {"data":null}) cannot prove its
+// list whole: the leads recorded before are kept and named UNCHECKED, never GONE. While it still lists
+// every recorded lead, nothing is named.
+func TestWatchKeepsLeadsTheWordPressFeedNoLongerLists(t *testing.T) {
+	offline(t)
+	var body atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body.Load().(string))) }))
+	defer srv.Close()
+	t.Setenv(wpcve.EnvWPVulnURL, srv.URL+"/{kind}/{slug}")
+	const listed = `{"akismet":{"vulnerabilities":[{"id":"WPV-1","title":"XSS","min_version":"1.0","max_version":"5.0"},{"id":"WPV-2","title":"CSRF","max_version":"5.0"}]}}`
+	for _, empty := range []string{"null", "{}", `{"data":null}`} {
+		t.Run(empty, func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "watch.json")
+			body.Store(listed)
+			if _, err := watchOut(t, "--state", state, "--wp-plugin", "akismet@4.0"); err != nil || !strings.Contains(readState(t, state), "WPV-2") {
+				t.Fatalf("the first run must record the plugin's leads: err=%v\n%s", err, readState(t, state))
+			}
+			if out, err := watchOut(t, "--state", state, "--fail-on-new", "--wp-plugin", "akismet@4.0"); err != nil || out != "" {
+				t.Fatalf("an answer that still lists every recorded lead names nothing: err=%v\n%s", err, out)
+			}
+			body.Store(empty)
+			out, err := watchOut(t, "--state", state, "--fail-on-new", "--wp-plugin", "akismet@4.0")
+			if err != nil || strings.Contains(out, "GONE") || !strings.Contains(out, "UNCHECKED  wordpress:plugin akismet@4.0") {
+				t.Fatalf("a feed that lists nothing must keep the leads as UNCHECKED, never GONE: err=%v\n%s", err, out)
+			}
+			if s := readState(t, state); !strings.Contains(s, "WPV-1") || !strings.Contains(s, "WPV-2") {
+				t.Fatalf("the kept leads must stay in the state:\n%s", s)
+			}
+		})
+	}
+}
+
+// A dump with an entry it could not read is not the source's whole data: a lead absent from it may sit in
+// that entry, so it is kept and named UNCHECKED, never GONE — whether the package lost one advisory or every
+// one — while an advisory the dump does list is still NEW; once the dump reads whole again, nothing kept is new.
+func TestWatchKeepsLeadsAPartialDumpCannotRuleOut(t *testing.T) {
+	offline(t)
+	var dump atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump.Load().([]byte)) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	run := func() (string, error) {
+		return watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:npm/lodash@4.17.20", "--package", "pkg:npm/minimist@1.2.5")
+	}
+	whole := map[string]string{
+		"npm/GHSA-1.json": npmAdvisory("GHSA-1", "lodash", "4.17.21"),
+		"npm/GHSA-2.json": npmAdvisory("GHSA-2", "lodash", "4.17.21"),
+		"npm/GHSA-M.json": npmAdvisory("GHSA-M", "minimist", "1.2.6"),
+	}
+	dump.Store(osvDump(whole))
+	if _, err := run(); err != nil {
+		t.Fatal(err)
+	}
+	dump.Store(osvDump(map[string]string{
+		"npm/GHSA-1.json": whole["npm/GHSA-1.json"],
+		"npm/GHSA-2.json": `{"id":"GHSA-2",`, // lodash keeps GHSA-1: the unreadable entry holds a kept lead
+		"npm/GHSA-3.json": npmAdvisory("GHSA-3", "lodash", "4.17.21"),
+		"npm/GHSA-M.json": `{"id":"GHSA-M",`, // minimist's only entry: the package is absent from the dump
+	}))
+	out, err := run()
+	if err == nil || strings.Contains(out, "GONE") || !strings.Contains(out, "NEW   ecosystem:npm lodash@4.17.20  GHSA-3") ||
+		!strings.Contains(out, "UNCHECKED  ecosystem:npm lodash@4.17.20") || !strings.Contains(out, "UNCHECKED  ecosystem:npm minimist@1.2.5") {
+		t.Fatalf("a partial dump must keep what it no longer lists as UNCHECKED, never GONE, and still name a new advisory NEW: err=%v\n%s", err, out)
+	}
+	if s := readState(t, state); !strings.Contains(s, "GHSA-2") || !strings.Contains(s, "GHSA-3") || !strings.Contains(s, "GHSA-M") {
+		t.Fatalf("the state must keep the leads the dump could not rule out and record the new one:\n%s", s)
+	}
+	if got, want := stateLeads(t, state), map[string][]string{"ecosystem:npm lodash@4.17.20": {"GHSA-1", "GHSA-2", "GHSA-3"}, "ecosystem:npm minimist@1.2.5": {"GHSA-M"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("a kept lead joins the answered ones in sorted order: got %v, want %v", got, want)
+	}
+	whole["npm/GHSA-3.json"] = npmAdvisory("GHSA-3", "lodash", "4.17.21")
+	dump.Store(osvDump(whole))
+	if out, err := run(); err != nil || out != "" {
+		t.Fatalf("a dump read whole again changes nothing that was kept: err=%v\n%s", err, out)
+	}
+}
+
+// A dump read whole that no longer lists the package at all (its advisories withdrawn) rules its leads out: GONE.
+func TestWatchNamesGoneWhenAWholeDumpNoLongerListsThePackage(t *testing.T) {
+	offline(t)
+	var dump atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump.Load().([]byte)) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	minimist := npmAdvisory("GHSA-M", "minimist", "1.2.6")
+	dump.Store(osvDump(map[string]string{"npm/GHSA-1.json": npmAdvisory("GHSA-1", "lodash", "4.17.21"), "npm/GHSA-M.json": minimist}))
+	if _, err := watchOut(t, "--state", state, "--package", "pkg:npm/lodash@4.17.20"); err != nil {
+		t.Fatal(err)
+	}
+	dump.Store(osvDump(map[string]string{"npm/GHSA-M.json": minimist}))
+	out, err := watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:npm/lodash@4.17.20")
+	if err != nil || !strings.Contains(out, "GONE  ecosystem:npm lodash@4.17.20  GHSA-1") || strings.Contains(out, "UNCHECKED") {
+		t.Fatalf("a whole dump without the package must say GONE: err=%v\n%s", err, out)
+	}
+}
+
+// The JavaScript source falls back to its embedded sample when the repository fails: a library the sample
+// does not list is unknown to it, not rid of its advisories — the leads are kept, never GONE.
+func TestWatchKeepsLeadsTheEmbeddedSampleCannotRuleOut(t *testing.T) {
+	offline(t)
+	var down atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"fakelib":{"vulnerabilities":[{"below":"2.0.0","severity":"high","identifiers":{"CVE":["CVE-2099-0001"]}}]}}`))
+	}))
+	defer srv.Close()
+	t.Setenv(jslib.EnvRetireJSURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	if _, err := watchOut(t, "--state", state, "--jslib", "fakelib@1.0.0"); err != nil || !strings.Contains(readState(t, state), "CVE-2099-0001") {
+		t.Fatalf("the first run must record the library's lead: err=%v\n%s", err, readState(t, state))
+	}
+	down.Store(true)
+	out, err := watchOut(t, "--state", state, "--fail-on-new", "--jslib", "fakelib@1.0.0")
+	if err != nil || strings.Contains(out, "GONE") || !strings.Contains(out, "UNCHECKED  jslib fakelib@1.0.0") || !strings.Contains(readState(t, state), "CVE-2099-0001") {
+		t.Fatalf("the embedded sample must keep the lead as UNCHECKED, never GONE: err=%v\n%s\n%s", err, out, readState(t, state))
+	}
+}
+
+// A version the source can no longer compare (a parser that changed between releases) says nothing about
+// the leads an earlier run recorded for it: they are kept and named UNCHECKED, never GONE.
+func TestWatchKeepsLeadsOfAVersionTheSourceCannotCompare(t *testing.T) {
+	offline(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"acme":{"vulnerabilities":[{"id":"V1","title":"XSS","min_version":"1.0","max_version":"5.0"}]}}`))
+	}))
+	defer srv.Close()
+	t.Setenv(wpcve.EnvWPVulnURL, srv.URL+"/{kind}/{slug}")
+	state := filepath.Join(t.TempDir(), "watch.json")
+	const key = "wordpress:plugin acme@trunk"
+	writeFile(t, state, `{"updated":"2026-11-01T00:00:00Z","leads":{"`+key+`":["V1"]},"seen":["`+key+`"]}`)
+	out, err := watchOut(t, "--state", state, "--fail-on-new", "--wp-plugin", "acme@trunk")
+	if err != nil || strings.Contains(out, "GONE") || !strings.Contains(out, "UNCHECKED  "+key) || !strings.Contains(readState(t, state), `"V1"`) {
+		t.Fatalf("a version the source cannot compare must keep its leads as UNCHECKED, never GONE: err=%v\n%s\n%s", err, out, readState(t, state))
+	}
+}
+
+// An identity that leaves the inventory (a version bump, a regenerated SBOM) was not looked up, so its
+// advisories are not gone: one with leads is named REMOVED once, its leads leave the state and the run does
+// not fail; listed again later, each of its leads is NEW. One without leads leaves unnamed.
+func TestWatchNamesAnIdentityThatLeftTheInventoryRemoved(t *testing.T) {
+	offline(t)
+	dump := osvDump(map[string]string{"npm/GHSA-1.json": npmAdvisory("GHSA-1", "lodash", "4.17.21"), "npm/GHSA-2.json": npmAdvisory("GHSA-2", "lodash", "4.17.21")})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	const old, bumped = "pkg:npm/lodash@4.17.20", "pkg:npm/lodash@4.17.21"
+	if _, err := watchOut(t, "--state", state, "--package", old); err != nil {
+		t.Fatal(err)
+	}
+	out, err := watchOut(t, "--state", state, "--fail-on-new", "--package", bumped)
+	if err != nil || strings.Contains(out, "GONE") || !strings.Contains(out, "REMOVED  ecosystem:npm lodash@4.17.20") {
+		t.Fatalf("an identity no longer in the inventory is REMOVED, not GONE, and does not fail the run: err=%v\n%s", err, out)
+	}
+	if s := readState(t, state); strings.Contains(s, "GHSA-1") || !strings.Contains(s, `"ecosystem:npm lodash@4.17.20"`) {
+		t.Fatalf("its leads must leave the state while it stays seen:\n%s", s)
+	}
+	if out, err := watchOut(t, "--state", state, "--fail-on-new", "--package", bumped); err != nil || out != "" {
+		t.Fatalf("REMOVED is named once: err=%v\n%s", err, out)
+	}
+	out, err = watchOut(t, "--state", state, "--fail-on-new", "--package", old) // lodash@4.17.21, with no lead, leaves
+	if err == nil || !strings.Contains(out, "NEW   ecosystem:npm lodash@4.17.20  GHSA-1") || !strings.Contains(out, "NEW   ecosystem:npm lodash@4.17.20  GHSA-2") ||
+		strings.Contains(out, "REMOVED") {
+		t.Fatalf("an identity listed again names each of its leads NEW, and one without leads leaves unnamed: err=%v\n%s", err, out)
+	}
+}
+
+// A run no source answered for knows nothing: it fails and leaves the state as it was, byte for byte —
+// the leads of an identity it did not list are neither GONE nor REMOVED, and nothing is rewritten.
+func TestWatchLeavesTheStateAsItWasWhenNoSourceAnswers(t *testing.T) {
+	offline(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	const before = `{"updated":"2026-11-01T00:00:00Z","leads":{"ecosystem:npm lodash@4.17.15":["GHSA-1","GHSA-2"]},"seen":["ecosystem:npm lodash@4.17.15"]}`
+	for name, inventory := range map[string][]string{
+		"the WordPress feed off, another identity": {"--wp-plugin", "akismet@4.0"},
+		"the OSV source down, the same identity":   {"--package", "pkg:npm/lodash@4.17.15"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "watch.json")
+			writeFile(t, state, before)
+			out, err := watchOut(t, append([]string{"--state", state, "--fail-on-new"}, inventory...)...)
+			if err == nil || !strings.Contains(out, "UNCHECKED") || strings.Contains(out, "GONE") || strings.Contains(out, "REMOVED") {
+				t.Errorf("a run no source answered must fail naming only what it could not check: err=%v\n%s", err, out)
+			}
+			if after := readState(t, state); after != before {
+				t.Errorf("the state must be left as it was, byte for byte:\n%s", after)
+			}
+		})
+	}
+}
+
+// leadsByIdentity sorts each identity by what its answer can say: a source that did not look it up leaves it
+// unchecked; one that did, from data it cannot prove whole or for a version it could not compare, leaves it
+// answered but unable to rule a lead out (with why); only the rest can make a lead GONE.
+func TestLeadsByIdentitySplitsWhatAnAnswerCanRuleOut(t *testing.T) {
+	const key = "ecosystem:npm x@1"
+	type split struct{ answered, unchecked, notWhole bool }
+	for _, tc := range []struct {
+		state       unified.State
+		err         string
+		part, whole split // FullData false, true
+	}{
+		{unified.StateNotChecked, "", split{false, true, false}, split{false, true, false}},
+		{unified.StateNotChecked, unified.NoteNoClearance, split{true, false, true}, split{true, false, false}},
+		{unified.StateSourceUnavailable, "", split{false, true, false}, split{false, true, false}},
+		{unified.StateUnknownProduct, "", split{true, false, true}, split{true, false, false}},
+		{unified.StateUnknownVersion, "", split{true, false, true}, split{true, false, true}},
+		{unified.StatePotentiallyAffected, "", split{true, false, true}, split{true, false, false}},
+		{unified.StateAffectedByAdvisory, "", split{true, false, true}, split{true, false, false}},
+		{unified.StateNotAffectedByAdvisory, "", split{true, false, true}, split{true, false, false}},
+	} {
+		for _, full := range []bool{false, true} {
+			want := tc.part
+			if full {
+				want = tc.whole
+			}
+			r := unified.Result{State: tc.state, Err: tc.err, FullData: full, Scope: "ecosystem:npm", Identity: "x", Version: "1", Leads: []unified.Lead{{ID: "B"}, {ID: "A"}}}
+			leads, answered, unchecked, notWhole := leadsByIdentity([]unified.Result{r})
+			got := split{answered[key], unchecked[key], notWhole[key] != ""}
+			if got != want {
+				t.Errorf("%v %q full=%v: answered/unchecked/not whole = %+v, want %+v", tc.state, tc.err, full, got, want)
+			}
+			if wantLeads := map[bool]string{true: "[A B]", false: "[]"}[tc.state.Applicable()]; fmt.Sprint(leads[key]) != wantLeads {
+				t.Errorf("%v full=%v: leads = %v, want %s", tc.state, full, leads[key], wantLeads)
+			}
+		}
+	}
+}
+
+// Two lookups can land on one key — a distro package given with its release and without it are both
+// "ecosystem:Debian openssl@…" — and the one without a release is not answered: the answered one still
+// names a new advisory NEW and records it, while the leads recorded before stay.
+func TestWatchNamesNewWhenOnlyPartOfAKeyIsAnswered(t *testing.T) {
+	offline(t)
+	adv := func(id string) string {
+		return `{"id":"` + id + `","affected":[{"package":{"name":"openssl","ecosystem":"Debian:12"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"3.0.13-1~deb12u1"}]}]}]}`
+	}
+	var dump atomic.Value
+	dump.Store(osvDump(map[string]string{"Debian/DSA-0.json": adv("DSA-0"), "Debian/DSA-1.json": adv("DSA-1"), "Debian/DSA-9.json": adv("DSA-9")}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump.Load().([]byte)) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	run := func() (string, error) {
+		return watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-12", "--package", "pkg:deb/debian/openssl@3.0.11-1")
+	}
+	if out, err := run(); err != nil || !strings.Contains(readState(t, state), "DSA-1") {
+		t.Fatalf("the first run must record the answered lookup's lead: err=%v\n%s", err, out)
+	}
+	dump.Store(osvDump(map[string]string{"Debian/DSA-1.json": adv("DSA-1"), "Debian/DSA-2.json": adv("DSA-2")}))
+	out, err := run()
+	if err == nil || !strings.Contains(out, "NEW   ecosystem:Debian openssl@3.0.11-1  DSA-2") || strings.Contains(out, "GONE") {
+		t.Fatalf("a new advisory for the answered lookup must be NEW though the key's other lookup was not answered: err=%v\n%s", err, out)
+	}
+	if got, want := stateLeads(t, state), map[string][]string{"ecosystem:Debian openssl@3.0.11-1": {"DSA-0", "DSA-1", "DSA-2", "DSA-9"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the new lead must be recorded beside the kept ones, each once and in order, DSA-0 and DSA-9 among them though the answered lookup no longer lists them: got %v, want %v", got, want)
+	}
+	if out, err := run(); err != nil || strings.Contains(out, "NEW") {
+		t.Fatalf("a recorded lead is not NEW again: err=%v\n%s", err, out)
+	}
+}
+
+// A source down while another answers: the leads of the identity it did not answer for are kept, named
+// UNCHECKED and never GONE, and not NEW once it answers again; an identity no source answers for and
+// that has no lead adds no lead to the state.
+func TestWatchKeepsLeadsOfAnUnansweredIdentityWhileAnotherIsAnswered(t *testing.T) {
+	offline(t)
+	dump := osvDump(map[string]string{"npm/GHSA-1.json": npmAdvisory("GHSA-1", "lodash", "4.17.21")})
+	osvSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump) }))
+	defer osvSrv.Close()
+	t.Setenv(osv.EnvOSVURL, osvSrv.URL)
+	var down atomic.Bool
+	wpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"akismet":{"vulnerabilities":[{"id":"WPV-1","title":"XSS","min_version":"1.0","max_version":"5.0"}]}}`))
+	}))
+	defer wpSrv.Close()
+	t.Setenv(wpcve.EnvWPVulnURL, wpSrv.URL+"/{kind}/{slug}")
+	state := filepath.Join(t.TempDir(), "watch.json")
+	run := func() (string, error) {
+		return watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:npm/lodash@4.17.20", "--wp-plugin", "akismet@4.0",
+			"--package", "pkg:deb/debian/openssl@3.0.11-1") // no release: OSV never answers for it
+	}
+	want := map[string][]string{"ecosystem:npm lodash@4.17.20": {"GHSA-1"}, "wordpress:plugin akismet@4.0": {"WPV-1"}}
+	if out, err := run(); err != nil || !reflect.DeepEqual(stateLeads(t, state), want) {
+		t.Fatalf("the first run records the answered leads only: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
+	}
+	down.Store(true)
+	out, err := run()
+	if err != nil || strings.Contains(out, "GONE") || strings.Contains(out, "REMOVED") || strings.Contains(out, "FIRST") || !strings.Contains(out, "UNCHECKED  wordpress:plugin akismet@4.0") ||
+		!reflect.DeepEqual(stateLeads(t, state), want) {
+		t.Fatalf("a source that did not answer keeps its leads while another answers, never GONE or REMOVED: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
+	}
+	down.Store(false)
+	if out, err := run(); err != nil || strings.Contains(out, "NEW") || !reflect.DeepEqual(stateLeads(t, state), want) {
+		t.Fatalf("a kept lead is not NEW when its source answers again: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
+	}
+}
+
+// What a run names, records and fails on for one identity does not depend on the identity beside it: for every
+// pair of the kinds below, in both orders of their keys — but a WordPress-only kind beside a Debian-only one only
+// with the Debian key first, as a Debian key always sorts first — the run prints the lines of both, fails with
+// --fail-on-new only on a NEW lead, and records the leads and Seen of both, no key null. Two rules hold for the
+// whole run: one no source answered prints only what it could not check (never REMOVED), fails and leaves the
+// state as it was; one with nothing to look up fails and prints nothing.
+func TestWatchNamesEachIdentityOfARunOnItsOwn(t *testing.T) {
+	offline(t)
+	type kind struct {
+		name             string
+		scopes           string // D: a Debian package, its OSV dump whole; W: a WordPress plugin, the feed never whole
+		before, after    []int  // its leads in the state before and after the run
+		seenBefore, seen bool   // in Seen before and after the run
+		listed, answered bool   // in the inventory; its source answers for it
+		feed             []int  // the advisories its source lists for its version
+		lines            []string
+	}
+	const down = "UNCHECKED  {key}  (the source did not answer: its leads are kept as they were)"
+	kinds := []kind{
+		{name: "NEW", scopes: "D", before: []int{1}, seenBefore: true, listed: true, answered: true, feed: []int{1, 2},
+			lines: []string{"NEW   {key}  {id}2"}, after: []int{1, 2}, seen: true},
+		{name: "GONE", scopes: "D", before: []int{1, 2}, seenBefore: true, listed: true, answered: true, feed: []int{1},
+			lines: []string{"GONE  {key}  {id}2"}, after: []int{1}, seen: true},
+		{name: "unchanged", scopes: "DW", before: []int{1}, seenBefore: true, listed: true, answered: true, feed: []int{1},
+			after: []int{1}, seen: true},
+		{name: "UNCHECKED, its source down", scopes: "DW", before: []int{1}, seenBefore: true, listed: true,
+			lines: []string{down}, after: []int{1}, seen: true},
+		{name: "UNCHECKED, its data not whole", scopes: "W", before: []int{1, 2}, seenBefore: true, listed: true, answered: true, feed: []int{2},
+			lines: []string{"UNCHECKED  {key}  (the source cannot prove its data whole: 1 lead(s) absent from its answer are kept)"}, after: []int{1, 2}, seen: true},
+		{name: "REMOVED", scopes: "DW", before: []int{1, 2}, seenBefore: true,
+			lines: []string{"REMOVED  {key}  2 lead(s) dropped: it is no longer in the inventory"}, seen: true},
+		{name: "FIRST", scopes: "DW", listed: true, answered: true, feed: []int{1, 2},
+			lines: []string{"FIRST  {key}  2 lead(s) recorded (its first answer)"}, after: []int{1, 2}, seen: true},
+		{name: "no lead, answered whole", scopes: "D", listed: true, answered: true, seen: true},
+		{name: "no lead, its data not whole", scopes: "W", listed: true, answered: true, seen: true},
+		{name: "no lead, its source down", scopes: "DW", listed: true, lines: []string{down}},
+	}
+	var dump, feed atomic.Value // the run's Debian dump; the WordPress feed's answers by slug, 502 for any other
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/Debian/all.zip" {
+			_, _ = w.Write(dump.Load().([]byte))
+			return
+		}
+		body, ok := feed.Load().(map[string]string)[strings.TrimPrefix(r.URL.Path, "/plugin/")]
+		if !ok {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	t.Setenv(wpcve.EnvWPVulnURL, srv.URL+"/{kind}/{slug}")
+	debian := func(id, pkg, fixed string) string {
+		return `{"id":"` + id + `","affected":[{"package":{"name":"` + pkg + `","ecosystem":"Debian:12"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"` + fixed + `"}]}]}]}`
+	}
+	for _, a := range kinds {
+		for _, b := range kinds {
+			scopes := [2]string{"D", "W"} // a Debian key sorts before a WordPress one
+			for _, s := range []string{"D", "W"} {
+				if strings.Contains(a.scopes, s) && strings.Contains(b.scopes, s) {
+					scopes = [2]string{s, s} // the names order the keys
+					break
+				}
+			}
+			if !strings.Contains(a.scopes, scopes[0]) || !strings.Contains(b.scopes, scopes[1]) {
+				continue // only WordPress holds a and only the Debian dump b: b's key always sorts first
+			}
+			t.Run(a.name+" then "+b.name, func(t *testing.T) {
+				state := filepath.Join(t.TempDir(), "watch.json")
+				prev := watchState{Updated: "2026-11-01T00:00:00Z", Leads: map[string][]string{}}
+				args := []string{"--state", state, "--fail-on-new"}
+				entries, answers, leads := map[string]string{}, map[string]string{}, map[string][]string{}
+				var lines, seen []string
+				looked, answered, news := 0, 0, 0
+				for i, k := range []kind{a, b} {
+					name := []string{"aaa", "bbb"}[i]
+					ids := func(ns []int) []string {
+						var out []string
+						for _, n := range ns {
+							out = append(out, fmt.Sprintf("%s-%d", name, n))
+						}
+						return out
+					}
+					key := "wordpress:plugin " + name + "@4.0"
+					if scopes[i] == "D" {
+						key = "ecosystem:Debian " + name + "@1.0-1"
+					}
+					switch {
+					case !k.listed:
+					case scopes[i] == "W":
+						args = append(args, "--wp-plugin", name+"@4.0")
+						var vulns []string
+						for _, id := range ids(k.feed) {
+							vulns = append(vulns, `{"id":"`+id+`","title":"XSS","min_version":"1.0","max_version":"5.0"}`)
+						}
+						body := "{}" // the feed does not list the slug: answered, unknown to it
+						if vulns != nil {
+							body = `{"` + name + `":{"vulnerabilities":[` + strings.Join(vulns, ",") + `]}}`
+						}
+						if k.answered {
+							answers[name] = body
+						}
+					case k.answered:
+						args = append(args, "--package", "pkg:deb/debian/"+name+"@1.0-1?distro=debian-12")
+						for _, id := range ids(k.feed) {
+							entries["Debian/"+id+".json"] = debian(id, name, "2.0-1")
+						}
+						if k.feed == nil {
+							entries["Debian/"+name+"-0.json"] = debian(name+"-0", name, "0.5-1") // fixed before its version: nothing matches
+						}
+					default:
+						args = append(args, "--package", "pkg:deb/debian/"+name+"@1.0-1") // no release: OSV does not answer for it
+					}
+					placeholders := strings.NewReplacer("{key}", key, "{id}", name+"-")
+					for _, l := range k.lines {
+						lines = append(lines, placeholders.Replace(l))
+						if strings.HasPrefix(l, "NEW ") {
+							news++
+						}
+					}
+					if k.before != nil {
+						prev.Leads[key] = ids(k.before)
+					}
+					if k.after != nil {
+						leads[key] = ids(k.after)
+					}
+					if k.seenBefore {
+						prev.Seen = append(prev.Seen, key)
+					}
+					if k.seen {
+						seen = append(seen, key)
+					}
+					if k.listed {
+						looked++
+					}
+					if k.answered {
+						answered++
+					}
+				}
+				before, err := json.Marshal(prev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, state, string(before))
+				dump.Store(osvDump(entries))
+				feed.Store(answers)
+				wantErr := ""
+				switch {
+				case looked == 0:
+					wantErr, lines = "nothing to look up", nil
+				case answered == 0: // knows of no change: names only what it could not check
+					wantErr = fmt.Sprintf("no source answered for any of the %d identit(ies)", looked)
+					lines = slices.DeleteFunc(lines, func(l string) bool { return strings.HasPrefix(l, "REMOVED") })
+				case news > 0:
+					wantErr = fmt.Sprintf("watch: %d new lead(s)", news)
+				}
+				out, err := watchOut(t, args...)
+				got := strings.FieldsFunc(out, func(r rune) bool { return r == '\n' })
+				slices.Sort(got)
+				slices.Sort(lines)
+				if !slices.Equal(got, lines) {
+					t.Errorf("the run must print the lines of both identities, each whole:\n got %q\nwant %q", got, lines)
+				}
+				if (err == nil) != (wantErr == "") || err != nil && !strings.Contains(err.Error(), wantErr) {
+					t.Errorf("err = %v, want one naming %q (no error if empty)", err, wantErr)
+				}
+				raw := readState(t, state)
+				if strings.Contains(raw, "null") {
+					t.Errorf("no key may be null in the state:\n%s", raw)
+				}
+				if answered == 0 {
+					if raw != string(before) {
+						t.Errorf("the state must be left as it was, byte for byte:\n%s", raw)
+					}
+					return
+				}
+				var after watchState
+				if err := json.Unmarshal([]byte(raw), &after); err != nil || !reflect.DeepEqual(after.Leads, leads) || !slices.Equal(after.Seen, seen) {
+					t.Errorf("the state must hold the leads and Seen of both identities (err=%v):\n%s\nwant leads %v, seen %v", err, raw, leads, seen)
+				}
+			})
+		}
+	}
+}
+
+// Two identities that left the inventory and two no source answered for, beside one answered: each is named and
+// kept on its own — REMOVED with its own count, UNCHECKED with its own leads — none GONE, none NEW.
+func TestWatchLeftAndUnansweredBesideAnAnsweredOne(t *testing.T) {
+	offline(t)
+	dump := osvDump(map[string]string{"Debian/E-1.json": `{"id":"E-1","affected":[{"package":{"name":"eee","ecosystem":"Debian:12"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"2.0-1"}]}]}]}`})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	k := func(n string) string { return "ecosystem:Debian " + n + "@1.0-1" }
+	writeFile(t, state, `{"updated":"2026-11-01T00:00:00Z","leads":{"`+k("aaa")+`":["A-1","A-2"],"`+k("bbb")+`":["B-1","B-2"],"`+k("ccc")+`":["C-1"],"`+k("ddd")+`":["D-1"],"`+k("eee")+`":["E-1"]},"seen":["`+k("aaa")+`","`+k("bbb")+`","`+k("ccc")+`","`+k("ddd")+`","`+k("eee")+`"]}`)
+	out, err := watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:deb/debian/ccc@1.0-1", "--package", "pkg:deb/debian/ddd@1.0-1", "--package", "pkg:deb/debian/eee@1.0-1?distro=debian-12")
+	const left, down = "  2 lead(s) dropped: it is no longer in the inventory\n", "  (the source did not answer: its leads are kept as they were)\n"
+	want := "REMOVED  " + k("aaa") + left + "REMOVED  " + k("bbb") + left + "UNCHECKED  " + k("ccc") + down + "UNCHECKED  " + k("ddd") + down
+	if err != nil || out != want || !reflect.DeepEqual(stateLeads(t, state), map[string][]string{k("ccc"): {"C-1"}, k("ddd"): {"D-1"}, k("eee"): {"E-1"}}) {
+		t.Fatalf("each identity beside an answered one is named and kept on its own: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
+	}
+}
+
+// One advisory listed for two identities is NEW and GONE for each on its own: a lead another identity had before is
+// still NEW, and one another identity still has is still GONE.
+func TestWatchSharedAdvisoryIsNamedPerIdentity(t *testing.T) {
+	offline(t)
+	adv := func(id string, pkgs ...string) string {
+		var aff []string
+		for _, p := range pkgs {
+			aff = append(aff, `{"package":{"name":"`+p+`","ecosystem":"Debian:12"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"2.0-1"}]}]}`)
+		}
+		return `{"id":"` + id + `","affected":[` + strings.Join(aff, ",") + `]}`
+	}
+	dump := osvDump(map[string]string{"Debian/S-1.json": adv("S-1", "aaa", "bbb"), "Debian/S-2.json": adv("S-2", "aaa")})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	const a, b = "ecosystem:Debian aaa@1.0-1", "ecosystem:Debian bbb@1.0-1"
+	writeFile(t, state, `{"updated":"2026-11-01T00:00:00Z","leads":{"`+a+`":["S-1"],"`+b+`":["S-1","S-2"]},"seen":["`+a+`","`+b+`"]}`)
+	out, err := watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:deb/debian/aaa@1.0-1?distro=debian-12", "--package", "pkg:deb/debian/bbb@1.0-1?distro=debian-12")
+	if err == nil || out != "NEW   "+a+"  S-2\nGONE  "+b+"  S-2\n" {
+		t.Fatalf("a shared advisory is NEW and GONE per identity: err=%v\n%s", err, out)
+	}
+}
+
+// The first run names no identity: one line counts the leads it recorded and the identities holding them — an
+// identity answered with no lead holds none.
+func TestWatchFirstRunCountsWhatItRecords(t *testing.T) {
+	offline(t)
+	dump := osvDump(map[string]string{
+		"npm/GHSA-1.json": npmAdvisory("GHSA-1", "lodash", "4.17.21"),
+		"npm/GHSA-2.json": npmAdvisory("GHSA-2", "lodash", "4.17.21"),
+		"npm/GHSA-M.json": npmAdvisory("GHSA-M", "minimist", "1.2.6"),
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	out, err := watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:npm/lodash@4.17.20", "--package", "pkg:npm/minimist@1.2.5", "--package", "pkg:npm/lodash@4.17.21")
+	if err != nil || out != "first run: 3 lead(s) on 2 identit(ies) recorded; later runs name what changes\n" {
+		t.Fatalf("the first run must count the leads it records and the identities holding them: err=%v\n%s", err, out)
+	}
+	if got, want := stateLeads(t, state), map[string][]string{"ecosystem:npm lodash@4.17.20": {"GHSA-1", "GHSA-2"}, "ecosystem:npm minimist@1.2.5": {"GHSA-M"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the first run records what it counts: got %v, want %v", got, want)
 	}
 }

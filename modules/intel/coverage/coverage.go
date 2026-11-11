@@ -58,12 +58,14 @@ func orUnknown(s string) string {
 	return s
 }
 
-// ResultsReport counts one enrich run by honest state. Unanswered is never clean: it
-// is every result a source did not evaluate — off, failed, or an identity/version it
-// could not resolve.
+// ResultsReport counts one enrich run by honest state. LookedUp counts what a source looked
+// up in its data, a conclusion or not; Answered counts what reached a conclusion. Unanswered
+// is never clean: it is every result with no conclusion — off, failed, or an identity/version
+// the source could not resolve.
 type ResultsReport struct {
 	Total       int            `json:"total"`
-	Answered    int            `json:"answered"`   // affected, potentially affected, or not affected by advisory
+	LookedUp    int            `json:"looked_up"`  // Result.LookedUp: unknown_product, unknown_version and a whole-data miss included
+	Answered    int            `json:"answered"`   // State.Concluded: affected, potentially affected, or not affected by advisory
 	Unanswered  int            `json:"unanswered"` // not_checked, source_unavailable, unknown_product, unknown_version
 	ByState     map[string]int `json:"by_state"`   // every state, zeros included, so an absent state is visibly 0
 	ByFreshness map[string]int `json:"by_freshness"`
@@ -84,7 +86,10 @@ func Results(rs []unified.Result) ResultsReport {
 	for _, res := range rs {
 		r.ByState[res.State.String()]++
 		r.ByFreshness[res.Freshness.String()]++
-		if res.State.Answered() {
+		if res.LookedUp() {
+			r.LookedUp++
+		}
+		if res.State.Concluded() {
 			r.Answered++
 		} else {
 			r.Unanswered++
