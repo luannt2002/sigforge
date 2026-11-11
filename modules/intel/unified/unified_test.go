@@ -58,3 +58,33 @@ func TestAnswered(t *testing.T) {
 		}
 	}
 }
+
+// LookedUp (the source looked the identity up in its data) and Concluded (that lookup decided whether an
+// advisory applies) are two questions: unknown_product, unknown_version and a whole-data miss are looked up
+// yet concluded nothing. The first names keep their meaning: Result.Answered is LookedUp, State.Answered is Concluded.
+func TestLookedUpAndConcluded(t *testing.T) {
+	notes := []string{"", NoteNoClearance, "stale; " + NoteNoClearance}
+	for _, tc := range []struct {
+		state     State
+		lookedUp  [3]bool // per note above
+		concluded bool
+	}{
+		{StateNotChecked, [3]bool{false, true, true}, false},
+		{StateSourceUnavailable, [3]bool{false, false, false}, false},
+		{StateUnknownProduct, [3]bool{true, true, true}, false},
+		{StateUnknownVersion, [3]bool{true, true, true}, false},
+		{StatePotentiallyAffected, [3]bool{true, true, true}, true},
+		{StateAffectedByAdvisory, [3]bool{true, true, true}, true},
+		{StateNotAffectedByAdvisory, [3]bool{true, true, true}, true},
+	} {
+		for i, note := range notes {
+			r := Result{State: tc.state, Err: note}
+			if r.LookedUp() != tc.lookedUp[i] || r.State.Concluded() != tc.concluded {
+				t.Errorf("%v %q: LookedUp() = %v, Concluded() = %v, want %v, %v", tc.state, note, r.LookedUp(), r.State.Concluded(), tc.lookedUp[i], tc.concluded)
+			}
+			if r.Answered() != r.LookedUp() || r.State.Answered() != r.State.Concluded() {
+				t.Errorf("%v %q: Result.Answered() = %v, State.Answered() = %v: the first names changed meaning", tc.state, note, r.Answered(), r.State.Answered())
+			}
+		}
+	}
+}

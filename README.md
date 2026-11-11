@@ -99,7 +99,7 @@ sigforge coverage [--db merged.json] [--json]   # how much of a DB can reach a C
 sigforge sync                                   # refresh every configured catalog into SIGFORGE_CACHE_DIR; with SIGFORGE_CACHE_MAX_AGE later runs use it with no request (labelled snapshot)
 sigforge sync --osv Debian --osv npm            # also keep those OSV dumps in the store, reduced once into an index file each scan reads (Ubuntu: 807MB dump → 19MB index)
 sigforge sources --max-age 26h                  # what the last sync left per source: ok / FAILED (why) / never synced / off — exit 1 when one in use is failing or stale (schedule it: docs/cli.md §3.2)
-sigforge watch --state watch.json --sbom inventory.cdx.json --fail-on-new   # after each sync: NEW / GONE advisories for the inventory since the last run, UNCHECKED when a source did not answer (exit 1 on NEW, when no source answered at all, or when there is nothing to look up)
+sigforge watch --state watch.json --sbom inventory.cdx.json --fail-on-new   # after each sync: NEW / GONE advisories for the inventory since the last run (GONE only from a source's whole data), UNCHECKED when a source did not answer or cannot rule a lead out, REMOVED when an identity with leads left the inventory (exit 1 on NEW, when no source answered at all, or when there is nothing to look up)
 ```
 
 `diff`, `eol` and `cve` are the depth layer: `diff` is pure; `eol` and `cve` query

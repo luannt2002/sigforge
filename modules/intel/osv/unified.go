@@ -31,6 +31,7 @@ func ToUnified(res Result, eco, name, version string, fetchedAt time.Time) unifi
 		Version:   version,
 		Source:    unifiedSource,
 		Freshness: unified.FreshnessLive,
+		FullData:  !res.Partial,
 	}
 	if !fetchedAt.IsZero() {
 		u.FetchedAt = fetchedAt.UTC().Format(time.RFC3339)

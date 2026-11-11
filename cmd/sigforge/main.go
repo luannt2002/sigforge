@@ -1075,8 +1075,8 @@ func printEnrich(results []unified.Result) {
 		}
 	}
 	c := coverage.Results(results)
-	fmt.Printf("answered %d/%d · unanswered %d (not_checked %d, source_unavailable %d, unknown_product %d, unknown_version %d) — unanswered is not clean\n",
-		c.Answered, c.Total, c.Unanswered, c.ByState["not_checked"], c.ByState["source_unavailable"],
+	fmt.Printf("looked up %d/%d · concluded %d/%d · not concluded %d (not_checked %d, source_unavailable %d, unknown_product %d, unknown_version %d) — not concluded is not clean\n",
+		c.LookedUp, c.Total, c.Answered, c.Total, c.Unanswered, c.ByState["not_checked"], c.ByState["source_unavailable"],
 		c.ByState["unknown_product"], c.ByState["unknown_version"])
 }
 

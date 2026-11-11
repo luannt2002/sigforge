@@ -131,6 +131,37 @@ cycle as `not_checked` with `NoteNoClearance`; `kev` is CVE-centric (`InKEV` →
 EPSS-only → potentially, neither → `not_checked` — with `NoteNoClearance` against a whole
 catalog, with the partial-data reason when only the small embedded KEV sample is in use).
 
+### Looked up, concluded, whole data
+
+"Answered" once meant two things. Three questions now have a name each:
+
+- **Looked up** — `Result.LookedUp()`: the source looked the identity up in its data and gave a
+  state for it. `Result.Answered()` is the same function under its first name.
+- **Concluded** — `State.Concluded()`: the lookup decided whether an advisory applies.
+  `State.Answered()` is the same function under its first name.
+- **Whole data** — `Result.FullData`: the answer came from the source's whole data, so a lead
+  absent from it is not listed there. `false`, the default, proves nothing. Only `osv` sets it
+  (`!Partial`: every entry of the dump was read); a source that cannot prove its data whole
+  (`wpcve`, `jslib`, `cve` in the table above) never does.
+
+| state | looked up | concluded | a lead absent from the answer is gone (`watch` GONE) |
+|---|---|---|---|
+| `not_checked` (off, unsupported, data cut short) | no | no | no: `UNCHECKED`, leads kept |
+| `not_checked` + `NoteNoClearance` (a whole-data miss) | yes | no | with `FullData` |
+| `source_unavailable` | no | no | no: `UNCHECKED`, leads kept |
+| `unknown_product` | yes | no | with `FullData` (a package absent from a whole OSV dump) |
+| `unknown_version` | yes | no | never: the version was not compared |
+| `potentially_affected` / `affected_by_advisory` | yes | yes | with `FullData` |
+| `not_affected_by_advisory` (not issued) | yes | yes | with `FullData` |
+
+`TestLookedUpAndConcluded` holds the first two columns and that the first names keep their
+meaning; `TestLeadsByIdentitySplitsWhatAnAnswerCanRuleOut` (`cmd/sigforge`) holds the last one.
+`coverage.Results` counts looked up (`looked_up`) apart from concluded (`answered`), and `enrich`
+ends with `looked up X/N · concluded Y/N` (`TestEnrichTallyCountsLookedUpApartFromConcluded`). In
+`watch`, a lead recorded before that an answer without whole data, or for a version not compared,
+leaves out is kept and named `UNCHECKED` with why, never `GONE`, while a new lead in that answer is
+still `NEW`. No WordPress or JavaScript answer sets `FullData`, so their leads are never `GONE`.
+
 ## 3. Freshness — a snapshot is never live truth
 
 `Result.Freshness` travels with every result so a stale offline snapshot is never read
@@ -169,7 +200,8 @@ fabricated when the source did not carry them.
 `Result` carries everything a consumer needs to decide "is this a lead, how sure, from
 where, how fresh" without knowing which provider ran: `State`, `Scope`
 (`"cpe"` / `"ecosystem:npm"` / `"wordpress:plugin"` / `"jslib"` / `"eol"` / `"cve"`),
-`Identity`, `Version`, `Leads`, `Source`, `Freshness`, `FetchedAt`, and the CPE
+`Identity`, `Version`, `Leads`, `Source`, `Freshness`, `FetchedAt`, `FullData` (the answer
+came from the source's whole data; `false` proves nothing), and the CPE
 provenance pair `CPEState` / `CPEEvidence` — which records HOW the CPE was resolved
 (`verified` from the NVD dictionary, `attested` from a source fingerprint, `candidate`
 borrowed and never queried, or `none`) kept **apart from** `Err` so a resolution note

@@ -136,3 +136,30 @@ func TestNoKnownVulnWithoutPinnedVersionIsNotClean(t *testing.T) {
 		t.Fatalf("a pinned version clear of every record reaches the whole-data branch, got %v %q", u.State, u.Err)
 	}
 }
+
+// FullData says the answer came from the whole dump, on every branch: a dump with an entry it could not read
+// carries false, so what is absent from it is never read as gone.
+func TestToUnifiedSaysWhetherTheDumpWasWhole(t *testing.T) {
+	for _, res := range []Result{
+		{Status: StatusVulnerable, Vulns: []Vuln{{ID: "GHSA-1"}}, PackageKnown: true, VersionPinned: true},
+		{Status: StatusVulnerable, Vulns: []Vuln{{ID: "GHSA-1"}}, PackageKnown: true},
+		{Status: StatusNoKnownVuln, PackageKnown: true, VersionPinned: true},
+		{Status: StatusNoKnownVuln, PackageKnown: true},
+		{Status: StatusUnknown, Vulns: []Vuln{{ID: "GHSA-1"}}, PackageKnown: true, VersionPinned: true},
+		{Status: StatusUnknown},
+	} {
+		for _, partial := range []bool{false, true} {
+			res.Partial = partial
+			if u := ToUnified(res, "npm", "lodash", "4.17.20", time.Time{}); u.FullData == partial {
+				t.Errorf("%s known=%v pinned=%v partial=%v: FullData = %v (%s)", res.Status, res.PackageKnown, res.VersionPinned, partial, u.FullData, u.State)
+			}
+		}
+	}
+	// npmIndex carries a corrupt entry, buildNpm reads every entry
+	if u := ToUnified(npmIndex(t).Lookup("totally-unseen-pkg", "1.0.0"), "npm", "totally-unseen-pkg", "1.0.0", time.Time{}); u.FullData {
+		t.Errorf("a package absent from a dump with an unreadable entry must not be FullData: %+v", u)
+	}
+	if u := ToUnified(buildNpm(t, "GHSA-35jh-r3h4-6jhm", advLodash).Lookup("totally-unseen-pkg", "1.0.0"), "npm", "totally-unseen-pkg", "1.0.0", time.Time{}); !u.FullData {
+		t.Errorf("a package absent from a whole dump is FullData: %+v", u)
+	}
+}

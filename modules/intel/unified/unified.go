@@ -56,12 +56,16 @@ func (s State) Applicable() bool {
 	return s == StatePotentiallyAffected || s == StateAffectedByAdvisory
 }
 
-// Answered reports whether the source gave an answer for this identity — affected, potentially, or a
-// lookup in its data that matched nothing — rather than being off, unavailable or short of its data: a
-// caller reports an unanswered result as a gap, never as "no advisories".
-func (r Result) Answered() bool {
+// LookedUp reports whether the source looked this identity up in its data — affected, potentially, not
+// recognised, a version it could not place, or a lookup that matched nothing — rather than being off,
+// unavailable or short of its data. It is not a conclusion (State.Concluded) and does not say the data was
+// whole (FullData): a caller reports a result not looked up as a gap, never as "no advisories".
+func (r Result) LookedUp() bool {
 	return r.State != StateSourceUnavailable && (r.State != StateNotChecked || strings.Contains(r.Err, NoteNoClearance))
 }
+
+// Answered is LookedUp under its first name.
+func (r Result) Answered() bool { return r.LookedUp() }
 
 // Evidence is what a source knows when nothing matched; Clean turns it into the named gap.
 // Both holding is what a "not affected" answer would rest on — this release still issues none.
@@ -93,9 +97,12 @@ func Clean(ev Evidence) (State, string) {
 	return StateNotChecked, NoteNoClearance
 }
 
-// Answered reports whether the lookup reached a conclusion — affected, potentially affected,
+// Concluded reports whether the lookup reached a conclusion — affected, potentially affected,
 // or not affected; every other state is a gap, never read as clean.
-func (s State) Answered() bool { return s.Applicable() || s == StateNotAffectedByAdvisory }
+func (s State) Concluded() bool { return s.Applicable() || s == StateNotAffectedByAdvisory }
+
+// Answered is Concluded under its first name.
+func (s State) Answered() bool { return s.Concluded() }
 
 // MarshalJSON writes the state as its readable name ("potentially_affected"), not an
 // opaque integer — a consumer must never mistake one state for another.
@@ -232,6 +239,9 @@ type Result struct {
 	ObservedAt string    `json:"observed_at,omitempty"` // when the evidence was observed (consumer-supplied)
 	FetchedAt  string    `json:"fetched_at,omitempty"`  // when the feed data was fetched (RFC3339), if known
 	SnapshotID string    `json:"snapshot_id,omitempty"` //
+	// FullData: the answer came from the source's whole data, so a lead absent from it is not listed there.
+	// False — the default — proves nothing: a source sets it only where it can prove its data whole.
+	FullData bool `json:"full_data,omitempty"`
 	// CPEState records HOW the CPE in Identity was resolved, kept apart from Err so a
 	// resolution note is never mistaken for a lookup failure: "verified" (NVD dictionary),
 	// "attested" (source fingerprint), "candidate" (borrowed, never queried) or "none".

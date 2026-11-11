@@ -86,3 +86,21 @@ func TestResults(t *testing.T) {
 		t.Fatalf("by_freshness = %v, want %v", got.ByFreshness, wantFresh)
 	}
 }
+
+// Looked up and concluded are counted apart: an identity the source did not recognise, a version it could
+// not place and a miss in its whole data were looked up, yet none of them is a conclusion.
+func TestResultsCountsLookedUpApart(t *testing.T) {
+	got := Results([]unified.Result{
+		{}, // off
+		{State: unified.StateNotChecked, Err: unified.NoteNoClearance},
+		{State: unified.StateSourceUnavailable},
+		{State: unified.StateUnknownProduct},
+		{State: unified.StateUnknownVersion},
+		{State: unified.StatePotentiallyAffected},
+		{State: unified.StateAffectedByAdvisory},
+		{State: unified.StateNotAffectedByAdvisory},
+	})
+	if got.Total != 8 || got.LookedUp != 6 || got.Answered != 3 || got.Unanswered != 5 {
+		t.Fatalf("total/looked up/concluded/not concluded = %d/%d/%d/%d, want 8/6/3/5", got.Total, got.LookedUp, got.Answered, got.Unanswered)
+	}
+}
