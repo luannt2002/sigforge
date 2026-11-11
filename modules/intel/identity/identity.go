@@ -222,6 +222,13 @@ func ParseDict(b []byte) ([]Entry, error) {
 	return e, err
 }
 
+// ReadDict is ParseDict over a reader, decoded as it is read — the way the resolver loads a
+// dictionary too large for memory — so a caller can check one without holding it whole.
+func ReadDict(r io.Reader) ([]Entry, error) {
+	e, _, _, err := parseDict(r)
+	return e, err
+}
+
 // parseDict is ParseDict over a reader, plus the feed's delivered and declared product
 // counts, which Status needs to tell one page of a paged feed from the whole dictionary.
 // It walks the document token by token so only one product row is in memory at a time.

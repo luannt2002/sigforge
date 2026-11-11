@@ -67,7 +67,7 @@ func cmdSources(args []string) error {
 		return fmt.Errorf("sources: set %s to the local store directory", EnvCacheDir)
 	}
 	st := readStatus(dir)
-	rows := append([]struct{ name, env string }(nil), syncSources...)
+	rows := append([]syncSource(nil), syncSources...)
 	var dumps []string
 	for name := range st {
 		if strings.HasPrefix(name, "OSV ") {
@@ -76,7 +76,7 @@ func cmdSources(args []string) error {
 	}
 	sort.Strings(dumps)
 	for _, name := range dumps {
-		rows = append(rows, struct{ name, env string }{name, osv.EnvOSVURL})
+		rows = append(rows, syncSource{name: name, env: osv.EnvOSVURL})
 	}
 	bad := 0
 	for _, r := range rows {

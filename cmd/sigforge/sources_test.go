@@ -21,7 +21,7 @@ func TestSourcesReportsEachSourceAndFailsOnABadOne(t *testing.T) {
 	store := t.TempDir()
 	t.Setenv(EnvCacheDir, store)
 	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"count":0,"vulnerabilities":[]}`))
+		_, _ = w.Write([]byte(`{"count":1,"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}`))
 	}))
 	defer ok.Close()
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusForbidden) }))

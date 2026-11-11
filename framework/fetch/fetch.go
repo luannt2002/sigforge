@@ -172,7 +172,13 @@ type Meta struct {
 // transport failure, a non-2xx status (with the code), or a body over MaxBytes. It
 // always asks the source; a stored body is reused only when the source answers 304.
 func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
-	b, _, err := c.get(ctx, url, false)
+	return c.GetChecked(ctx, url, nil)
+}
+
+// GetChecked is Get that stores a new body only when check accepts it: a body check refuses is
+// an error, and the store keeps the copy it held.
+func (c *Client) GetChecked(ctx context.Context, url string, check func([]byte) error) ([]byte, error) {
+	b, _, err := c.get(ctx, url, false, check)
 	return b, err
 }
 
@@ -180,12 +186,12 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 // younger than MaxAge is returned WITHOUT a request (Meta.Cached), so a synced catalog
 // costs a scan nothing — and the caller must report it as a snapshot of Meta.FetchedAt.
 func (c *Client) GetMeta(ctx context.Context, url string) ([]byte, Meta, error) {
-	return c.get(ctx, url, true)
+	return c.get(ctx, url, true, nil)
 }
 
 // catalog marks a GetMeta call: MaxAge applies, and a failing source falls back to the
 // stored copy (stale-if-error) instead of erroring.
-func (c *Client) get(ctx context.Context, url string, catalog bool) ([]byte, Meta, error) {
+func (c *Client) get(ctx context.Context, url string, catalog bool, check func([]byte) error) ([]byte, Meta, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, Meta{}, errors.New("fetch: empty url")
 	}
@@ -227,6 +233,11 @@ func (c *Client) get(ctx context.Context, url string, catalog bool) ([]byte, Met
 	if int64(len(b)) > max {
 		return nil, Meta{}, fmt.Errorf("fetch: %q body exceeds %d bytes", url, max)
 	}
+	if check != nil {
+		if err := check(b); err != nil {
+			return staleOr(catalog, cached, fmt.Errorf("fetch: %q: unusable body: %w", url, err))
+		}
+	}
 	c.storeCached(url, resp.Header, b, at)
 	return b, Meta{FetchedAt: at}, nil
 }
@@ -238,6 +249,13 @@ func (c *Client) get(ctx context.Context, url string, catalog bool) ([]byte, Met
 // release when done reading (it removes a temp file, keeps a stored one). The transfer is
 // bounded by ctx, not by the client's Timeout, which is sized for small catalogs.
 func (c *Client) Download(ctx context.Context, url string, max int64) (path string, m Meta, release func(), err error) {
+	return c.DownloadChecked(ctx, url, max, nil)
+}
+
+// DownloadChecked is Download that moves a new body into the store only when check accepts the
+// file holding it: a body check refuses is removed and counts as the source failing, so the
+// stored copy stays as it was.
+func (c *Client) DownloadChecked(ctx context.Context, url string, max int64, check func(path string) error) (path string, m Meta, release func(), err error) {
 	release = func() {}
 	if strings.TrimSpace(url) == "" {
 		return "", Meta{}, release, errors.New("fetch: empty url")
@@ -299,6 +317,12 @@ func (c *Client) Download(ctx context.Context, url string, max int64) (path stri
 	if err != nil {
 		os.Remove(tmp.Name())
 		return fail(fmt.Errorf("fetch: read %q: %w", url, err))
+	}
+	if check != nil {
+		if err := check(tmp.Name()); err != nil {
+			os.Remove(tmp.Name())
+			return fail(fmt.Errorf("fetch: %q: unusable body: %w", url, err))
+		}
 	}
 	removeTmp := func() { os.Remove(tmp.Name()) }
 	if c.CacheDir == "" {

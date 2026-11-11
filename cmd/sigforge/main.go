@@ -825,17 +825,29 @@ const EnvCacheMaxAge = feedset.EnvCacheMaxAge
 
 // syncCatalog stores one catalog and returns its size. The CPE dictionary may outgrow the in-memory
 // body cap, so it is streamed to the store — as the identity resolver itself reads it — like an OSV dump.
-func syncCatalog(ctx context.Context, client *fetch.Client, env, u string) (int64, error) {
-	if env != identity.EnvCPEDictURL {
-		b, err := client.Get(ctx, u)
+// It puts a new copy in the store only once the parser a run reads the catalog with accepts it and finds an entry in it.
+func syncCatalog(ctx context.Context, client *fetch.Client, s syncSource, u string) (int64, error) {
+	if s.env != identity.EnvCPEDictURL {
+		b, err := client.GetChecked(ctx, u, s.check)
 		return int64(len(b)), err
 	}
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	path, meta, release, err := client.Download(dctx, u, 2<<30)
+	path, meta, release, err := client.DownloadChecked(dctx, u, 2<<30, func(p string) error {
+		f, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		e, err := identity.ReadDict(f) // decodes the saved file as it reads it, as the resolver loads it, not reading it whole first
+		if err == nil && len(e) == 0 {
+			err = errors.New("lists no usable CPE entries")
+		}
+		return err
+	})
 	defer release()
 	if err == nil && meta.Stale {
-		err = errors.New(meta.Err) // the store kept its copy, but the source did not answer
+		err = errors.New(meta.Err) // the store kept its copy: the source did not answer, or the check refused its answer
 	}
 	if err != nil {
 		return 0, err
@@ -847,13 +859,30 @@ func syncCatalog(ctx context.Context, client *fetch.Client, env, u string) (int6
 	return st.Size(), nil
 }
 
+type syncSource struct {
+	name, env string
+	check     func([]byte) error // what a run needs of the catalog: its parser reads it and finds an entry
+}
+
 // syncSources are the catalogs a run loads whole and once — the ones a synced store can
 // serve with no request. Per-query sources (CVE, per-product EOL, EPSS) are not here.
-var syncSources = []struct{ name, env string }{
-	{"endoflife bundle", lifecycle.EnvBundleURL},
-	{"KEV catalog", kev.EnvKEVURL},
-	{"Retire.js repository", jslib.EnvRetireJSURL},
-	{"CPE dictionary", identity.EnvCPEDictURL},
+var syncSources = []syncSource{
+	{"endoflife bundle", lifecycle.EnvBundleURL, func(b []byte) error { _, err := lifecycle.ParseBundle(b); return err }},
+	{"KEV catalog", kev.EnvKEVURL, func(b []byte) error {
+		m, err := kev.ParseKEV(b)
+		if err == nil && len(m) == 0 {
+			err = errors.New("lists no entries")
+		}
+		return err
+	}},
+	{"Retire.js repository", jslib.EnvRetireJSURL, func(b []byte) error {
+		m, err := jslib.ParseRepo(b)
+		if err == nil && len(m) == 0 {
+			err = errors.New("lists no libraries")
+		}
+		return err
+	}},
+	{"CPE dictionary", identity.EnvCPEDictURL, nil}, // checked in syncCatalog, which decodes the saved file as it reads it
 }
 
 // cmdSync refreshes every configured catalog — and, with --osv, each named ecosystem's OSV
@@ -886,7 +915,7 @@ func cmdSync(args []string) error {
 			continue
 		}
 		configured++
-		size, err := syncCatalog(ctx, client, s.env, u)
+		size, err := syncCatalog(ctx, client, s, u)
 		outcomes[s.name] = err
 		if err != nil {
 			failed++

@@ -594,7 +594,8 @@ func dumpIndex(ctx context.Context, eco, zipPath string, st os.FileInfo, keep fu
 
 // Sync refreshes one ecosystem's dump in the client's store — with the client's MaxAge at 0
 // it always asks the source, so an unchanged dump costs a 304 — cuts its index file when the
-// dump changed, and returns the stored size. Later runs read that index.
+// dump changed, and returns the stored size. Later runs read that index. Sync replaces the
+// stored dump only once the new one's index is cut from it and holds an advisory.
 func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
 	eco, ok := Ecosystem(ecosystem)
 	switch {
@@ -621,10 +622,26 @@ func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
 	}
 	dctx, cancel := context.WithTimeout(ctx, downloadLimit)
 	defer cancel()
-	path, meta, release, err := a.client.Download(dctx, dumpURL, maxZipBytes)
+	var cut string // the new dump's index: rename keeps the dump's mtime, so moved beside it, it stays stamped for it
+	path, meta, release, err := a.client.DownloadChecked(dctx, dumpURL, maxZipBytes, func(tmp string) error {
+		st, err := os.Stat(tmp)
+		if err != nil {
+			return err
+		}
+		cut = tmp + ".idx.gz"
+		rows := 0
+		_, err = dumpIndex(ctx, eco, tmp, st, func(*record) bool { rows++; return false }, true)
+		if err == nil && rows == 0 {
+			err = errBuiltNothing // what LoadIndex refuses for a whole dump
+		}
+		return err
+	})
 	defer release()
 	if err == nil && meta.Stale {
-		err = errors.New(meta.Err) // the store kept its copy, but the source did not answer
+		err = errors.New(meta.Err) // the store kept its copy: the source did not answer, or the check refused its answer
+	}
+	if cut != "" && (err != nil || os.Rename(cut, path+".idx.gz") != nil) {
+		os.Remove(cut)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("osv %s: %w", eco, err)

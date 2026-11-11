@@ -358,7 +358,9 @@ func TestSync(t *testing.T) {
 	if err := cmdSync(nil); err == nil || !strings.Contains(err.Error(), "no catalog source") {
 		t.Fatalf("sync with nothing configured must say so, got %v", err)
 	}
-	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"vulnerabilities":[]}`)) }))
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"vulnerabilities":[{"cveID":"CVE-2021-44228"}]}`))
+	}))
 	defer ok.Close()
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", http.StatusInternalServerError) }))
 	defer down.Close()
