@@ -27,7 +27,7 @@ func ParsePackageRef(s string) (PkgRef, error) {
 	if at := strings.LastIndex(rest, "@"); at > 0 || at == 0 && !strings.Contains(rest, "/") { // at 0 is an npm scope only with a "/"
 		name, version = rest[:at], rest[at+1:]
 	}
-	if name == "" {
+	if strings.TrimSpace(name) == "" {
 		return PkgRef{}, fmt.Errorf("package %q: empty name", s)
 	}
 	return PkgRef{Ecosystem: eco, Name: name, Version: version}, nil
@@ -68,7 +68,7 @@ func parsePURLSource(s, source string) (PkgRef, error) {
 	if err != nil {
 		return PkgRef{}, fmt.Errorf("purl %q: %w", s, err)
 	}
-	if len(segs) < 2 || segs[0] == "" || segs[len(segs)-1] == "" {
+	if len(segs) < 2 || segs[0] == "" || strings.TrimSpace(segs[len(segs)-1]) == "" {
 		return PkgRef{}, fmt.Errorf("purl %q: want pkg:type/[namespace/]name[@version]", s)
 	}
 	typ, ns, name := strings.ToLower(segs[0]), strings.Join(segs[1:len(segs)-1], "/"), segs[len(segs)-1]

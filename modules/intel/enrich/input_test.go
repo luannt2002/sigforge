@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,43 @@ func TestParsePackageRefRefusesAnEmptyName(t *testing.T) {
 		"npm:@angular/core@12.0.0": {"npm", "@angular/core", "12.0.0"},
 		"npm:@angular/core":        {"npm", "@angular/core", ""},
 		"npm:lodash@":              {"npm", "lodash", ""},
+	} {
+		if got, err := ParsePackageRef(in); err != nil || got != want {
+			t.Errorf("%q = %+v, %v; want %+v", in, got, err, want)
+		}
+	}
+}
+
+// A template like "npm:$NAME@$VER" with NAME set to blanks names nothing, as an empty name does: refused, not looked up as " ".
+func TestParsePackageRefRefusesABlankName(t *testing.T) {
+	for _, in := range []string{"npm: @1.0", "npm:\t@1.0", "pypi: \t @2.19.0", "npm: @"} {
+		if got, err := ParsePackageRef(in); err == nil || !strings.Contains(err.Error(), "empty name") {
+			t.Errorf("%q = %+v, %v; want an empty-name error", in, got, err)
+		}
+	}
+	for _, in := range []string{"npm: ", "npm:\t", "pkg:npm/%20@1.0", "pkg:npm/\t@1.0", "pkg:npm/%09", "pkg:npm/%20%09",
+		"pkg:maven/org.apache.logging.log4j/%20@2.14.1"} {
+		if got, err := ParsePackageRef(in); err == nil {
+			t.Errorf("%q: want an error, got %+v", in, got)
+		}
+	}
+}
+
+// Only an all-blank name is refused: blanks inside a name or an ecosystem, and around the input, parse as before.
+func TestParsePackageRefKeepsValidForms(t *testing.T) {
+	for in, want := range map[string]PkgRef{
+		"pkg:generic/my%20tool@1.0":                     {"generic", "my tool", "1.0"},
+		"pkg:npm/%40angular/core@12.0.0":                {"npm", "@angular/core", "12.0.0"},
+		"pkg:nuget/Newtonsoft.Json@12.0.1":              {"nuget", "Newtonsoft.Json", "12.0.1"},
+		"pkg:apk/alpine/libssl3@3.0.8-r0?distro=3.17.2": {"Alpine:v3.17", "libssl3", "3.0.8-r0"},
+		" \tpkg:npm/lodash@4.17.20\n":                   {"npm", "lodash", "4.17.20"},
+		"\tnpm:lodash@4.17.20 ":                         {"npm", "lodash", "4.17.20"},
+		"Go:github.com/gin-gonic/gin@v1.6.0":            {"Go", "github.com/gin-gonic/gin", "v1.6.0"},
+		"PyPI:requests[security]@2.19.0":                {"PyPI", "requests[security]", "2.19.0"},
+		"crates.io:serde_json@1.0.0":                    {"crates.io", "serde_json", "1.0.0"},
+		"Packagist:laravel/framework@8.0.0":             {"Packagist", "laravel/framework", "8.0.0"},
+		"Rocky Linux:openssl@1:1.1.1k-7.el8_6":          {"Rocky Linux", "openssl", "1:1.1.1k-7.el8_6"},
+		"npm:@babel/core@7.0.0":                         {"npm", "@babel/core", "7.0.0"},
 	} {
 		if got, err := ParsePackageRef(in); err != nil || got != want {
 			t.Errorf("%q = %+v, %v; want %+v", in, got, err, want)
