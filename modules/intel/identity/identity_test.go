@@ -330,3 +330,99 @@ func TestEmbeddedSampleNeverVerifies(t *testing.T) {
 		t.Fatalf("the embedded sample verified %q", cpe)
 	}
 }
+
+// The dictionary streams to disk and is reduced row by row, so a dictionary over the
+// client's in-memory body ceiling (64 MiB by default) is still used, not dropped.
+func TestDictOverBodyCeilingIsStreamed(t *testing.T) {
+	c := fetch.New()
+	c.MaxBytes = int64(len(dictTestJSON) / 4)
+	s := New(serveJSON(t, dictTestJSON), c).Status(context.Background())
+	if s.Source != "live" || s.Entries != 2 || s.Err != "" {
+		t.Fatalf("a dictionary over the client body ceiling must stream in, got %+v", s)
+	}
+}
+
+// One page of a paged feed cannot prove a match is unique (the other "widget" may be on
+// page 2), so it never verifies — and the resolver asks the source once, it does not walk pages.
+func TestPartialDictNeverVerifies(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{"resultsPerPage": 1, "startIndex": 0, "totalResults": 2, "products": [
+		  {"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:acme:widget:1.0:*:*:*:*:*:*:*", "titles": [{"title": "Acme Widget", "lang": "en"}]}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	r := New(srv.URL, fetch.New())
+	if cpe, _, st := r.ResolveCPE(context.Background(), "", "", "widget"); st != StateUnknown || cpe != "" {
+		t.Fatalf("one page of 2 verified %q (state %v)", cpe, st)
+	}
+	if s := r.Status(context.Background()); !s.Partial() || s.Products != 1 || s.Total != 2 || hits.Load() != 1 {
+		t.Fatalf("want partial 1 of 2 from one request, got %+v after %d requests", s, hits.Load())
+	}
+}
+
+// A body cut after a whole row, or after the whole products array, is not a smaller
+// dictionary: it is not used at all.
+func TestTruncatedDictIsNotUsed(t *testing.T) {
+	for _, cut := range []string{
+		dictTestJSON[:strings.Index(dictTestJSON, `{"cpe": {"deprecated": false, "cpeName": "cpe:2.3:a:apache`)],
+		dictTestJSON[:strings.LastIndex(dictTestJSON, "}")],
+	} {
+		s := New(serveJSON(t, cut), fetch.New()).Status(context.Background())
+		if s.Source != "snapshot" || !strings.Contains(s.Err, "unparseable") {
+			t.Fatalf("a truncated dictionary must not be used, got %+v for %q", s, cut[len(cut)-20:])
+		}
+	}
+}
+
+// `sigforge sync` keeps the dictionary with Get; a run within MaxAge reads that copy with no request.
+func TestDictSyncedByGetIsReused(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(dictTestJSON))
+	}))
+	t.Cleanup(srv.Close)
+	c := fetch.New()
+	c.CacheDir = t.TempDir()
+	if _, err := c.Get(context.Background(), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	c.MaxAge = time.Hour
+	if s := New(srv.URL, c).Status(context.Background()); hits.Load() != 1 || !s.Cached || s.Entries != 2 {
+		t.Fatalf("the synced copy must be reused with no request: hits=%d %+v", hits.Load(), s)
+	}
+}
+
+// A dictionary over the download ceiling is not used, and Status names why.
+func TestDictOverDownloadCeilingIsNamed(t *testing.T) {
+	old := maxDictBytes
+	maxDictBytes = int64(len(dictTestJSON) / 2)
+	t.Cleanup(func() { maxDictBytes = old })
+	r := New(serveJSON(t, dictTestJSON), fetch.New())
+	s := r.Status(context.Background())
+	if s.Source != "snapshot" || !strings.Contains(s.Err, "ceiling") {
+		t.Fatalf("an over-ceiling dictionary must be named, got %+v", s)
+	}
+	if _, _, st := r.ResolveCPE(context.Background(), "", "apache", "http_server"); st == StateVerified {
+		t.Fatal("an over-ceiling dictionary must not verify")
+	}
+}
+
+// A 429 on the dictionary is named, and a second resolver on the same client sends nothing
+// while the host asked to wait.
+func TestDictRateLimitedIsNamedNotRetried(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+	c := fetch.New()
+	s1 := New(srv.URL, c).Status(context.Background())
+	s2 := New(srv.URL, c).Status(context.Background())
+	if hits.Load() != 1 || !strings.Contains(s1.Err, "429") || !strings.Contains(s2.Err, "rate limited") || s2.Source != "snapshot" {
+		t.Fatalf("want one request and both failures named: hits=%d %+v / %+v", hits.Load(), s1, s2)
+	}
+}

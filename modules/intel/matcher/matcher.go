@@ -8,11 +8,12 @@
 // means a single weak signature carried the detection.
 //
 // Scope: raw HTTP only — headers, cookies, HTML, meta tags and script srcs. The
-// schema's `dom` rules are evaluated passively (see matcher_dom.go): with no real
-// DOM, a selector's distinguishing token and its attribute/text patterns are tested
-// as substrings/regexes over the raw HTML. This is a pragmatic approximation, not a
-// DOM query, so it can miss a rule that depends on element structure or JS runtime
-// properties; a browser-backed consumer can still read Fingerprint.Dom itself.
+// schema's `dom` rules are evaluated passively (see matcher_dom.go) against the
+// page's start tags, with no real DOM: every test of a selector compound must hold on
+// one start tag, and an attribute pattern runs on that attribute's value. Relations
+// between compounds are not checked and a text pattern is not evaluated, so a rule can
+// be missed (or, for relations, fire where a browser would not); a browser-backed
+// consumer can still read Fingerprint.Dom itself.
 package matcher
 
 import (
@@ -94,6 +95,7 @@ func Match(db *schema.DB, page Page) []Detection {
 	headers := lowerHeaders(page.Headers)
 	cookies := parseCookies(page.Cookies)
 	metas := parseMetas(html)
+	dom := &domPage{html: html, low: lowHTML}
 
 	hits := make(map[string]*hit)
 	for name, fp := range db.Fingerprints {
@@ -110,7 +112,7 @@ func Match(db *schema.DB, page Page) []Detection {
 			}
 		}
 		if len(fp.Dom) > 0 {
-			matchDom(fp.Dom, html, lowHTML, fp, h)
+			matchDom(fp.Dom, dom, fp, h)
 		}
 		if h.conf > 0 {
 			h.version, h.conflict = resolveVersion(h.claims)

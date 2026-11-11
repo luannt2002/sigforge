@@ -79,12 +79,19 @@ func New(client *fetch.Client) *Set {
 		CVE: cve.New(os.Getenv(cve.EnvVar), client),
 		EOL: NewEOL(client),
 		KEV: kevUse{s.kev, &s.kevUsed},
-		OSV: osv.New(os.Getenv(osv.EnvOSVURL), client).Lookuper(),
 		WP: func(ctx context.Context, slug, version, kind string) unified.Result {
-			if kind == "theme" {
+			switch kind {
+			case "", "plugin": // enrich.WPLookup documents plugin as the default kind
+				return wpcve.ToUnified(wp.LookupPlugin(ctx, slug, version))
+			case "theme":
 				return wpcve.ToUnified(wp.LookupTheme(ctx, slug, version))
+			case "core":
+				return wpcve.CoreToUnified(wp.LookupCore(ctx, version))
 			}
-			return wpcve.ToUnified(wp.LookupPlugin(ctx, slug, version))
+			// a plugin answer for any other kind would be about a different product
+			r := unified.Unknown("wordpress:"+kind, slug, unified.StateNotChecked, fmt.Sprintf("WordPress kind %q is not plugin, theme or core: not looked up", kind))
+			r.Source, r.Version = "wpcve", version
+			return r
 		},
 		JS: func(ctx context.Context, name, version string) unified.Result {
 			return jslib.ToUnified(js.LookupOne(ctx, name, version))
@@ -93,6 +100,10 @@ func New(client *fetch.Client) *Set {
 			s.identityUsed.Store(true)
 			return s.resolver.ResolveCPE(ctx, name, vendor, product)
 		},
+	}
+	// unset: enrich names the gap for a package it is asked about; a detected platform is not looked up
+	if u := strings.TrimSpace(os.Getenv(osv.EnvOSVURL)); u != "" {
+		s.Options.OSV, s.Options.OSVRelease = osv.New(u, client).Lookupers()
 	}
 	return s
 }
@@ -128,9 +139,11 @@ func (k kevUse) EnrichUnified(ctx context.Context, ids []string) map[string]unif
 }
 
 // kevNote explains that the configured live KEV catalog is not what prioritized the
-// leads; "" when it is in use.
+// leads, or what in it needs a look though it is in use; "" when there is nothing to say.
 func kevNote(s kev.CatalogStatus) string {
 	switch {
+	case s.Err == "" && s.Warn != "":
+		return "note: KEV catalog in use, but " + s.Warn
 	case s.Err == "":
 		return ""
 	case s.Source == "live": // the source failed, but the last synced copy is in use
@@ -151,7 +164,7 @@ func dictNote(s identity.DictStatus) string {
 	case s.Err != "": // the source failed, but the last synced copy is in use
 		return fmt.Sprintf("note: CPE dictionary source failed (%s) — identity matched against the last synced copy (stale, %d CPE bases)", s.Err, s.Entries)
 	case s.Partial():
-		return fmt.Sprintf("note: CPE dictionary is one page of a paged feed (%d of %d products) — identity coverage is partial",
+		return fmt.Sprintf("note: CPE dictionary is one page of a paged feed (%d of %d products) — no identity is verified against it (one page cannot show a match is unique)",
 			s.Products, s.Total)
 	}
 	return ""

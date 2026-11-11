@@ -61,9 +61,19 @@ func ToUnified(pr PluginResult) unified.Result {
 	return r
 }
 
+// CoreToUnified maps a CoreResult the way ToUnified maps a plugin, so core keeps the same honest states
+// (off / unavailable / not listed / a miss is never a clearance) under scope wordpress:core.
+func CoreToUnified(cr CoreResult) unified.Result {
+	return ToUnified(PluginResult{Slug: coreSlug, Version: cr.Version, Kind: "core", Vulns: cr.Vulns, Resolved: cr.Resolved,
+		UnparsedVersion: cr.UnparsedVersion, Unpositioned: cr.Unpositioned, reason: cr.reason})
+}
+
 func scopeFor(kind string) string {
 	if kind == "theme" {
 		return "wordpress:theme"
+	}
+	if kind == "core" {
+		return "wordpress:core"
 	}
 	return "wordpress:plugin"
 }

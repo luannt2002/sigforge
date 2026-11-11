@@ -12,6 +12,7 @@ package unified
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // State — the one dimension a consumer must never collapse. A lead that is
@@ -53,6 +54,13 @@ func (s State) String() string {
 // (potentially- or advisory-affected). Everything else is unknown/clean-for-source/off.
 func (s State) Applicable() bool {
 	return s == StatePotentiallyAffected || s == StateAffectedByAdvisory
+}
+
+// Answered reports whether the source gave an answer for this identity — affected, potentially, or a
+// lookup in its data that matched nothing — rather than being off, unavailable or short of its data: a
+// caller reports an unanswered result as a gap, never as "no advisories".
+func (r Result) Answered() bool {
+	return r.State != StateSourceUnavailable && (r.State != StateNotChecked || strings.Contains(r.Err, NoteNoClearance))
 }
 
 // Evidence is what a source knows when nothing matched; Clean turns it into the named gap.
@@ -179,6 +187,36 @@ type Lead struct {
 	EPSS       *float64 `json:"epss,omitempty"`            // nullable EPSS probability — nil ≠ 0.0
 	KnownExpl  bool     `json:"known_exploited,omitempty"` // in CISA KEV
 	References []string `json:"references,omitempty"`
+	CWE        []string `json:"cwe,omitempty"`       // weakness ids the source names (CWE-79…), empty when it names none
+	Published  string   `json:"published,omitempty"` // when the source published the advisory, as it gave it
+	DueDate    string   `json:"due_date,omitempty"`  // CISA KEV: the remediation due date (YYYY-MM-DD)
+	// RequiredAction is what CISA KEV requires of an affected operator.
+	RequiredAction string `json:"required_action,omitempty"`
+	// Note is why this lead may not apply, when the source has a reason to doubt it ("" otherwise).
+	Note string `json:"note,omitempty"`
+}
+
+// CWEIDs keeps the well-formed weakness ids of a list ("CWE-<n>", upper-cased, no leading zeros, each once), so a
+// source's placeholders (NVD-CWE-noinfo, NVD-CWE-Other) never pass for a weakness.
+func CWEIDs(ids []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = strings.ToUpper(strings.TrimSpace(id))
+		n := strings.TrimPrefix(id, "CWE-")
+		if n == id || n == "" || strings.Trim(n, "0123456789") != "" {
+			continue
+		}
+		if n = strings.TrimLeft(n, "0"); n == "" {
+			continue // CWE-0 names nothing
+		}
+		if id = "CWE-" + n; seen[id] { // CWE-079 is CWE-79
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // Result — the unified intelligence result. Every field a consumer needs to decide

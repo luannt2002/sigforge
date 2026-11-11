@@ -1,7 +1,9 @@
 // Package refresh is the regression gate between a live fingerprint DB and a freshly
 // built candidate. A re-sync of third-party sources can quietly make the data WORSE —
-// drop a fingerprint, lose a tech's verified CPE (its CVE bridge) or its version-
-// capturing signal — and a plain overwrite would publish that downgrade silently.
+// drop a fingerprint, lose a tech's verified CPE (its CVE bridge), its version-
+// capturing signal or every pattern that detects it on its own (still listed, but no
+// page matches it directly) — and a plain overwrite would publish that downgrade
+// silently.
 // Gate measures the downgrade from the two DBs alone (no corpus, no network) and names
 // exactly what would regress, so the operator never trades a good DB for a worse one by
 // accident.
@@ -21,9 +23,10 @@ import (
 type Reason string
 
 const (
-	ReasonRemoved     Reason = "removed"            // a fingerprint present in current is gone from the candidate
-	ReasonLostCPE     Reason = "lost-cpe"           // a tech kept in both lost its verified CPE (the CVE bridge)
-	ReasonLostVersion Reason = "lost-version-regex" // a tech kept in both lost its version-capturing signal
+	ReasonRemoved       Reason = "removed"            // a fingerprint present in current is gone from the candidate
+	ReasonLostCPE       Reason = "lost-cpe"           // a tech kept in both lost its verified CPE (the CVE bridge)
+	ReasonLostVersion   Reason = "lost-version-regex" // a tech kept in both lost its version-capturing signal
+	ReasonLostDetection Reason = "lost-detection"     // a tech kept in both lost every detection channel of its own
 )
 
 // Finding is one regression, naming the tech and what it lost — the evidence the
@@ -47,10 +50,11 @@ func (r Report) OK() bool { return len(r.Findings) == 0 }
 
 // Gate compares the current DB against a candidate and reports regressions that must
 // block a publish: fingerprints removed beyond allowRemoved, and — for a tech kept in
-// both — a lost verified CPE or lost version-capturing signal. A nil current (first
-// publish) has nothing to regress against, so the candidate always passes. allowRemoved
-// is the operator's escape hatch for removals they intend; it never relaxes the lost-
-// CPE / lost-version checks, which are always regressions for a tech that stays.
+// both — a lost verified CPE, lost version-capturing signal or the loss of every
+// detection channel. A nil current (first publish) has nothing to regress against, so
+// the candidate always passes. allowRemoved is the operator's escape hatch for removals
+// they intend; it never relaxes the lost-CPE / lost-version / lost-detection checks,
+// which are always regressions for a tech that stays.
 func Gate(current, candidate *schema.DB, allowRemoved int) Report {
 	d := diff.Diff(current, candidate)
 	r := Report{Added: len(d.Added), Removed: len(d.Removed), Changed: len(d.Changed)}
@@ -63,8 +67,9 @@ func Gate(current, candidate *schema.DB, allowRemoved int) Report {
 		}
 	}
 
-	// A tech kept across the refresh must not silently lose its CVE bridge (CPE) or its
-	// version-capturing signal — honest-data downgrades even though the entry survives.
+	// A tech kept across the refresh must not silently lose its CVE bridge (CPE), its
+	// version-capturing signal or every detection channel — honest-data downgrades even
+	// though the entry survives.
 	cur := fingerprints(current)
 	cand := fingerprints(candidate)
 	for _, tech := range sortedKeys(cur) {
@@ -78,6 +83,11 @@ func Gate(current, candidate *schema.DB, allowRemoved int) Report {
 		}
 		if o.CapturesVersion() && !c.CapturesVersion() {
 			r.Findings = append(r.Findings, Finding{Tech: tech, Reason: ReasonLostVersion})
+		}
+		// Only a tech that could be detected can lose it: an implied-only entry (no
+		// channel of its own on either side) is valid metadata, not a regression.
+		if o.HasDetection() && !c.HasDetection() {
+			r.Findings = append(r.Findings, Finding{Tech: tech, Reason: ReasonLostDetection})
 		}
 	}
 	return r

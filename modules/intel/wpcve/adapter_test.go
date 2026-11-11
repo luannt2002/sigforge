@@ -125,3 +125,40 @@ func TestToUnifiedLeadScore(t *testing.T) {
 		t.Errorf("no CVE ⇒ empty slice, got %v", unscored.CVE)
 	}
 }
+
+// Core maps like a plugin under scope wordpress:core: each LookupCore branch lands on its own state, the
+// reasons it keeps (off, down, core not listed) stay apart, and nothing is ever a clearance.
+func TestCoreToUnifiedStates(t *testing.T) {
+	ctx := context.Background()
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+	listed := `{"wordpress":{"vulnerabilities":[{"id":"C1","min_version":"6.0","max_version":"6.4.3"}]}}`
+	for _, c := range []struct {
+		name  string
+		res   CoreResult
+		state unified.State
+		fresh unified.Freshness
+		leads int
+	}{
+		{"in range", vulnFeed(t, listed).LookupCore(ctx, "6.1"), unified.StateAffectedByAdvisory, unified.FreshnessLive, 1},
+		{"no version", vulnFeed(t, listed).LookupCore(ctx, ""), unified.StatePotentiallyAffected, unified.FreshnessLive, 1},
+		{"past every range", vulnFeed(t, listed).LookupCore(ctx, "6.8"), unified.StateNotChecked, unified.FreshnessLive, 0},
+		{"unparseable version", vulnFeed(t, listed).LookupCore(ctx, "trunk"), unified.StateUnknownVersion, unified.FreshnessLive, 0},
+		{"unreadable bound", vulnFeed(t, `{"wordpress":{"vulnerabilities":[{"id":"C9","max_version":"trunk"}]}}`).LookupCore(ctx, "6.1"), unified.StatePotentiallyAffected, unified.FreshnessLive, 1},
+		{"core not listed", vulnFeed(t, `{"other":{"vulnerabilities":[]}}`).LookupCore(ctx, "6.1"), unified.StateUnknownProduct, unified.FreshnessLive, 0},
+		{"core entry null", vulnFeed(t, `{"wordpress":null}`).LookupCore(ctx, "6.1"), unified.StateUnknownProduct, unified.FreshnessLive, 0},
+		{"feed off", New("", "", fetch.New()).LookupCore(ctx, "6.1"), unified.StateNotChecked, unified.FreshnessUnknown, 0},
+		{"feed down", New(down.URL+"/{kind}/{slug}", "", fetch.New()).LookupCore(ctx, "6.1"), unified.StateSourceUnavailable, unified.FreshnessUnknown, 0},
+	} {
+		u := CoreToUnified(c.res)
+		if u.State != c.state || u.Freshness != c.fresh || len(u.Leads) != c.leads || u.Scope != "wordpress:core" || u.Identity != "wordpress" || u.Source != "wpcve" {
+			t.Errorf("%s: got state=%s fresh=%s leads=%d scope=%q id=%q src=%q; want %s, %s, %d leads on wordpress:core",
+				c.name, u.State, u.Freshness, len(u.Leads), u.Scope, u.Identity, u.Source, c.state, c.fresh, c.leads)
+		}
+		if u.State == unified.StateNotChecked && u.Err == "" {
+			t.Errorf("%s: not_checked must say why", c.name)
+		}
+	}
+}
