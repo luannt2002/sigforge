@@ -43,6 +43,38 @@ func TestVersionAffected(t *testing.T) {
 	}
 }
 
+// TestVersionAffectedEq covers the eq operator: an advisory pinned to a single
+// affected version must match ONLY that version, never a wider range (the old
+// CRITICAL false positive). Unreadable versions stay indeterminate (unknown≠clean).
+func TestVersionAffectedEq(t *testing.T) {
+	cases := []struct {
+		name            string
+		ver             string
+		rec             feedVuln
+		want            bool
+		wantDeterminate bool
+	}{
+		// AC1 — eq on the lower bound: exact only.
+		{"eq min exact", "1.2.3", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, true, true},
+		{"eq min below", "1.2.2", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, false, true},
+		{"eq min above", "1.2.4", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, false, true},
+		// AC2 — eq on the upper bound, symmetric.
+		{"eq max exact", "1.2.3", feedVuln{MaxVersion: "1.2.3", MaxOp: "eq"}, true, true},
+		{"eq max below", "1.2.2", feedVuln{MaxVersion: "1.2.3", MaxOp: "eq"}, false, true},
+		{"eq max above", "1.2.4", feedVuln{MaxVersion: "1.2.3", MaxOp: "eq"}, false, true},
+		// AC4 — version that cannot be ordered (build-date / hash) ⇒ indeterminate.
+		{"eq unreadable version", "nightly-20231001", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, false, false},
+		// AC5 — the old FP: eq advisory, version just outside ⇒ not affected.
+		{"eq fp regression", "1.2.4", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, false, true},
+	}
+	for _, c := range cases {
+		got, det := versionAffected(c.ver, &c.rec)
+		if got != c.want || det != c.wantDeterminate {
+			t.Errorf("%s: versionAffected(%q)=(%v,%v) want (%v,%v)", c.name, c.ver, got, det, c.want, c.wantDeterminate)
+		}
+	}
+}
+
 func TestParseableVersion(t *testing.T) {
 	cases := []struct {
 		ver  string
@@ -407,6 +439,81 @@ func TestBoundsUnderPHPOrderAndUncomparableBounds(t *testing.T) {
 	res := New(srv.URL+"/{slug}", "", fetch.New()).LookupPlugin(context.Background(), "acme", "1.2.2")
 	if u := ToUnified(res); u.State != unified.StatePotentiallyAffected || len(u.Leads) != 1 || u.Err == "" {
 		t.Fatalf("an advisory with an uncomparable bound must be a potential lead, got %v %+v %q", u.State, u.Leads, u.Err)
+	}
+}
+
+// ── WordPress CORE vulnerability lookup (T3.3) ──────────────────────────────────
+
+// AC1 — a core version sitting inside a published vulnerable range is a LEAD, via
+// the SAME feed shape + versionAffected mechanism as plugins.
+func TestLookupCoreWithVuln(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"wordpress":{"vulnerabilities":[
+			{"id":"C1","title":"core XSS","cve":"CVE-2024-9001","min_version":"6.0","min_operator":"ge",
+			 "max_version":"6.4.3","max_operator":"lt","cvss_score":"7.5"},
+			{"id":"C2","title":"old core","min_version":"4.0","max_version":"4.5"}]}}`)
+	}))
+	defer srv.Close()
+
+	res := New(srv.URL+"/{kind}/{slug}", "", fetch.New()).LookupCore(context.Background(), "6.4.1")
+	if !res.Resolved {
+		t.Fatal("feed knew core ⇒ Resolved must be true")
+	}
+	if len(res.Vulns) != 1 || res.Vulns[0].ID != "C1" {
+		t.Fatalf("only C1 brackets 6.4.1, got %d vulns %+v", len(res.Vulns), res.Vulns)
+	}
+	if res.Vulns[0].CVE != "CVE-2024-9001" || res.Vulns[0].Severity != "high" {
+		t.Errorf("core lead cve/severity wrong: %+v", res.Vulns[0])
+	}
+}
+
+// AC2 — feed OFF ⇒ UNKNOWN (Resolved=false), never "0 CVE = clean", and zero network.
+func TestLookupCoreFeedOffIsUnknown(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		io.WriteString(w, "{}")
+	}))
+	defer srv.Close()
+	res := New("", "", fetch.New()).LookupCore(context.Background(), "6.4.1")
+	if res.Resolved {
+		t.Error("off feed ⇒ UNKNOWN (Resolved=false), not clean")
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Errorf("off ⇒ 0 network calls, got %d", n)
+	}
+}
+
+// AC2 negative — a NEW core version the feed KNOWS but none of its ranges bracket ⇒
+// measured not-affected (Resolved=true, no vulns), distinct from UNKNOWN above.
+func TestLookupCoreNewVersionNotAffected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"wordpress":{"vulnerabilities":[
+			{"id":"C1","title":"core XSS","min_version":"6.0","max_version":"6.4.3"}]}}`)
+	}))
+	defer srv.Close()
+	res := New(srv.URL+"/{kind}/{slug}", "", fetch.New()).LookupCore(context.Background(), "6.8")
+	if !res.Resolved {
+		t.Fatal("feed answered ⇒ Resolved=true (measured, not UNKNOWN)")
+	}
+	if len(res.Vulns) != 0 {
+		t.Errorf("6.8 is past every range ⇒ not-affected, got %d vulns", len(res.Vulns))
+	}
+}
+
+// Honest-verdict: a core version string present but not semver-comparable is UNKNOWN
+// coverage, never a false-clean.
+func TestLookupCoreUnparseableVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"wordpress":{"vulnerabilities":[{"id":"C1","min_version":"1.0","max_version":"9.0"}]}}`)
+	}))
+	defer srv.Close()
+	res := New(srv.URL+"/{kind}/{slug}", "", fetch.New()).LookupCore(context.Background(), "trunk")
+	if res.Resolved || !res.UnparsedVersion {
+		t.Errorf("unparseable core version ⇒ UnparsedVersion UNKNOWN, got resolved=%v unparsed=%v", res.Resolved, res.UnparsedVersion)
+	}
+	if len(res.Vulns) != 0 {
+		t.Errorf("unparsed version is coverage UNKNOWN, not fabricated vulns, got %d", len(res.Vulns))
 	}
 }
 

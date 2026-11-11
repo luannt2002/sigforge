@@ -131,8 +131,8 @@ type Lead struct {
 	CVE        string  // CVE id when the feed maps one; may be empty
 	MinVersion string  // lower bound of the vulnerable range ("" = open below)
 	MaxVersion string  // upper bound ("" = open above, see Unfixed)
-	MinOp      string  // gt|ge (default ge)
-	MaxOp      string  // lt|le (default lt — "fixed_in" semantics: vulnerable strictly below)
+	MinOp      string  // gt|ge|eq (default ge)
+	MaxOp      string  // lt|le|eq (default lt — "fixed_in" semantics: vulnerable strictly below)
 	Unfixed    bool    // no fixed release exists ⇒ anything at/above MinVersion stays vulnerable
 	Severity   string  // low|medium|high|critical, or "" when the feed gives no numeric CVSS (null, never invented)
 	Score      float64 // CVSS base score (0 = none/unknown)
@@ -291,6 +291,66 @@ func (p *Provider) lookup(ctx context.Context, slug, version, kind string) Plugi
 	return res
 }
 
+// coreSlug is the product key WordPress CORE is addressed by on the WPVULN feed —
+// the core analogue of a plugin/theme slug, combined with kind "core" by the
+// operator's {slug}/{kind} template. The feed URL itself stays operator-chosen
+// (env); this is only the query key, never a vendor endpoint.
+const coreSlug = "wordpress"
+
+// CoreResult is the vulnerability answer for one WordPress CORE version. Like
+// PluginResult it keeps the honest tri-state: Resolved=false is UNKNOWN (feed off,
+// unreachable, does not list core, or the version is not semver-comparable), which
+// the caller renders as not-measured — NEVER "0 CVE = clean". Resolved=true with an
+// empty Vulns is a MEASURED miss (the version matched no published range).
+type CoreResult struct {
+	Version         string
+	Vulns           []Lead // version-range LEADs (empty + Resolved ⇒ no range matched)
+	Resolved        bool   // false ⇒ UNKNOWN ⇒ not-measured, never clean
+	UnparsedVersion bool   // version present but not semver-comparable ⇒ distinct UNKNOWN
+	Unpositioned    bool   // Vulns are advisories whose bounds could not be compared with Version
+}
+
+// LookupCore resolves known vulnerabilities for a WordPress CORE version from the
+// SAME operator-supplied WPVULN feed used for plugins, via the SAME version-range
+// mechanism (versionAffected). The feed is queried once for the core product (kind
+// "core"); each advisory is positioned against version. Feed off / unreachable / not
+// listing core ⇒ UNKNOWN (Resolved=false), never a clearance.
+func (p *Provider) LookupCore(ctx context.Context, version string) CoreResult {
+	res := CoreResult{Version: strings.TrimSpace(version)}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	entry, _ := p.fetchVulns(ctx, coreSlug, "core")
+	if entry == nil {
+		return res // Resolved stays false ⇒ UNKNOWN
+	}
+	res.Resolved = true
+
+	// A version present but not semver-comparable can't be positioned ⇒ UNKNOWN, never
+	// false-clean (same rule as the plugin path).
+	if res.Version != "" && !parseableVersion(res.Version) {
+		res.UnparsedVersion = true
+		res.Resolved = false
+		return res
+	}
+
+	var unpositioned []Lead
+	for i := range entry.Vulnerabilities {
+		v := &entry.Vulnerabilities[i]
+		switch affected, determinate := versionAffected(res.Version, v); {
+		case affected:
+			res.Vulns = append(res.Vulns, leadFrom(v))
+		case !determinate:
+			unpositioned = append(unpositioned, leadFrom(v))
+		}
+	}
+	if len(res.Vulns) == 0 && len(unpositioned) > 0 {
+		res.Vulns, res.Unpositioned = unpositioned, true
+	}
+	return res
+}
+
 // feedEntry / feedVuln — the generic shape the community WP vulnerability feed is
 // expected to deliver for a slug: either a bare entry ({"vulnerabilities":[...]})
 // or an object keyed by slug ({"<slug>":{"vulnerabilities":[...]}}); parseVulns
@@ -306,8 +366,8 @@ type feedVuln struct {
 	CVE        string `json:"cve"`
 	MinVersion string `json:"min_version"`
 	MaxVersion string `json:"max_version"`
-	MinOp      string `json:"min_operator"` // gt|ge
-	MaxOp      string `json:"max_operator"` // lt|le
+	MinOp      string `json:"min_operator"` // gt|ge|eq
+	MaxOp      string `json:"max_operator"` // lt|le|eq
 	Unfixed    bool   `json:"unfixed"`
 	CVSSVector string `json:"cvss_vector"`
 	CVSSScore  string `json:"cvss_score"`
@@ -500,7 +560,11 @@ func versionAffected(installed string, rec *feedVuln) (affected, determinate boo
 
 	if mv := strings.TrimSpace(rec.MinVersion); mv != "" {
 		if c, ok := cmp(mv); ok {
-			if strings.EqualFold(strings.TrimSpace(rec.MinOp), "gt") {
+			if strings.EqualFold(strings.TrimSpace(rec.MinOp), "eq") {
+				if c != 0 { // eq: the single affected version is this bound exactly
+					return false, true
+				}
+			} else if strings.EqualFold(strings.TrimSpace(rec.MinOp), "gt") {
 				if c <= 0 {
 					return false, true
 				}
@@ -513,9 +577,15 @@ func versionAffected(installed string, rec *feedVuln) (affected, determinate boo
 	if !rec.Unfixed { // Unfixed: no fixed release ⇒ no upper bound
 		if xv := strings.TrimSpace(rec.MaxVersion); xv != "" {
 			if c, ok := cmp(xv); ok {
-				le := strings.EqualFold(strings.TrimSpace(rec.MaxOp), "le")
-				if (le && c > 0) || (!le && c >= 0) { // lt (default): "fixed_in" ⇒ vulnerable strictly below
-					return false, true
+				if strings.EqualFold(strings.TrimSpace(rec.MaxOp), "eq") {
+					if c != 0 { // eq: the single affected version is this bound exactly
+						return false, true
+					}
+				} else {
+					le := strings.EqualFold(strings.TrimSpace(rec.MaxOp), "le")
+					if (le && c > 0) || (!le && c >= 0) { // lt (default): "fixed_in" ⇒ vulnerable strictly below
+						return false, true
+					}
 				}
 			}
 		}
