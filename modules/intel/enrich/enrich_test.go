@@ -574,11 +574,14 @@ func TestPrioritizeKeepsCVSSApartFromEPSS(t *testing.T) {
 	}
 }
 
-type countingKEV struct{ calls [][]string }
+type countingKEV struct {
+	calls [][]string
+	m     map[string]unified.Result
+}
 
 func (k *countingKEV) EnrichUnified(_ context.Context, ids []string) map[string]unified.Result {
 	k.calls = append(k.calls, append([]string(nil), ids...))
-	return map[string]unified.Result{}
+	return k.m
 }
 
 type cvePerCPE map[string][]cve.CVE
@@ -725,5 +728,223 @@ func TestEnrichUnifiedVersionConflictIsNeverClean(t *testing.T) {
 	}
 	if !scopes["jslib"] {
 		t.Fatalf("the JS library detection must be looked up too, got scopes %v", scopes)
+	}
+}
+
+// A lead from any source that names a CVE — OSV, WordPress and JS-library advisories carry
+// it as an alias — gets the KEV/EPSS signal, in the same one ask as the CVE source's leads.
+func TestKEVMarksEveryLeadThatNamesACVE(t *testing.T) {
+	db := &schema.DB{SchemaVersion: schema.SchemaVersion, Fingerprints: map[string]schema.Fingerprint{
+		"Nginx": {CPE: []string{"cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"}},
+	}}
+	epss := 0.97
+	k := &countingKEV{m: map[string]unified.Result{
+		"CVE-2021-44228": {Leads: []unified.Lead{{ID: "CVE-2021-44228", KnownExpl: true, EPSS: &epss}}},
+	}}
+	osvLead := func(ctx context.Context, eco, name, version string) unified.Result {
+		return unified.Result{State: unified.StateAffectedByAdvisory, Source: "osv", Identity: name, Version: version,
+			Leads: []unified.Lead{{ID: "GHSA-jfh8-c2jp-5v3q", CVE: []string{"CVE-2021-44228"}}}}
+	}
+	out := EnrichUnifiedExt(context.Background(), []matcher.Detection{{Tech: "Nginx", Version: "1.18.0"}}, db,
+		EnrichInput{Packages: []PkgRef{{Ecosystem: "Maven", Name: "org.apache.logging.log4j:log4j-core", Version: "2.14.1"}}},
+		Options{CVE: cvePerCPE{"cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*": {{ID: "CVE-2021-23017"}}}, KEV: k, OSV: osvLead})
+	if len(k.calls) != 1 {
+		t.Fatalf("KEV/EPSS must be asked once for the whole run, asked %d times: %v", len(k.calls), k.calls)
+	}
+	got := append([]string(nil), k.calls[0]...)
+	sort.Strings(got)
+	if want := []string{"CVE-2021-23017", "CVE-2021-44228"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the one ask must carry the OSV lead's CVE alias too, got %v want %v", got, want)
+	}
+	for _, r := range out {
+		if r.Source != "osv" {
+			continue
+		}
+		if l := r.Leads[0]; !l.KnownExpl || l.EPSS == nil || *l.EPSS != epss {
+			t.Fatalf("an OSV lead aliasing a KEV CVE must be marked: %+v", l)
+		}
+		return
+	}
+	t.Fatal("no OSV result")
+}
+
+// The KEV due date and required action reach every lead naming that CVE; KEV's weakness ids fill
+// a lead that names none, and never replace the source's own.
+func TestKEVRemediationReachesLeads(t *testing.T) {
+	k := &countingKEV{m: map[string]unified.Result{"CVE-2021-44228": {Leads: []unified.Lead{{ID: "CVE-2021-44228", KnownExpl: true,
+		DueDate: "2021-12-24", RequiredAction: "Apply updates.", CWE: []string{"CWE-502"}}}}}}
+	osvLead := func(ctx context.Context, eco, name, version string) unified.Result {
+		return unified.Result{State: unified.StateAffectedByAdvisory, Source: "osv", Identity: name, Version: version,
+			Leads: []unified.Lead{{ID: "GHSA-a", CVE: []string{"CVE-2021-44228"}}, {ID: "GHSA-b", CVE: []string{"CVE-2021-44228"}, CWE: []string{"CWE-917"}}}}
+	}
+	out := EnrichUnifiedExt(context.Background(), nil, &schema.DB{SchemaVersion: schema.SchemaVersion},
+		EnrichInput{Packages: []PkgRef{{Ecosystem: "Maven", Name: "log4j-core", Version: "2.14.1"}}}, Options{KEV: k, OSV: osvLead})
+	ls := out[0].Leads
+	if ls[0].DueDate != "2021-12-24" || ls[0].RequiredAction != "Apply updates." || !reflect.DeepEqual(ls[0].CWE, []string{"CWE-502"}) {
+		t.Errorf("lead without CWEs = %+v", ls[0])
+	}
+	if !reflect.DeepEqual(ls[1].CWE, []string{"CWE-917"}) || ls[1].DueDate != "2021-12-24" {
+		t.Errorf("lead with its own CWE = %+v, want CWE-917 kept and the due date added", ls[1])
+	}
+}
+
+// A PHP platform detected with a version is also looked up as its core Composer packages in OSV;
+// an advisory the CVE source (or an earlier package) already named is not repeated, so one CVE
+// never becomes two findings. No version, one without its patch level ("Drupal 9" in a header,
+// "Magento/2.4": every 9.x or 2.4.x range would match), or OSV off: no package lookup.
+func TestEnrichLooksUpPlatformCorePackagesInOSV(t *testing.T) {
+	db := &schema.DB{SchemaVersion: schema.SchemaVersion, Fingerprints: map[string]schema.Fingerprint{
+		"Drupal": {CPE: []string{"cpe:2.3:a:drupal:drupal:*:*:*:*:*:*:*:*"}},
+	}}
+	var asked []string
+	osvLook := func(ctx context.Context, eco, name, version string) unified.Result {
+		asked = append(asked, eco+":"+name+"@"+version)
+		leads := map[string][]unified.Lead{
+			"drupal/core":   {{ID: "GHSA-a", CVE: []string{"CVE-2023-1"}}, {ID: "GHSA-b", CVE: []string{"CVE-2023-2"}}},
+			"drupal/drupal": {{ID: "GHSA-b", CVE: []string{"CVE-2023-2"}}},
+		}[name]
+		return unified.Result{State: unified.StateAffectedByAdvisory, Source: "osv", Identity: name, Version: version, Leads: leads}
+	}
+	opt := Options{CVE: cvePerCPE{"cpe:2.3:a:drupal:drupal:*:*:*:*:*:*:*:*": {{ID: "CVE-2023-1"}}}, OSVRelease: osvLook}
+	out := EnrichUnified(context.Background(), []matcher.Detection{{Tech: "Drupal", Version: "9.5.0"}}, db, opt)
+	if want := []string{"Packagist:drupal/core@9.5.0", "Packagist:drupal/drupal@9.5.0"}; !reflect.DeepEqual(asked, want) {
+		t.Fatalf("OSV asked %v, want %v", asked, want)
+	}
+	var osvRes []unified.Result
+	for _, r := range out {
+		if r.Source == "osv" {
+			osvRes = append(osvRes, r)
+		}
+	}
+	if len(osvRes) != 1 || len(osvRes[0].Leads) != 1 || osvRes[0].Leads[0].ID != "GHSA-b" || osvRes[0].Tech != "Drupal" {
+		t.Fatalf("OSV results = %+v, want drupal/core with GHSA-b only (CVE-2023-1 came from the CVE source; drupal/drupal repeats GHSA-b)", osvRes)
+	}
+	asked = nil
+	noVersion := EnrichUnified(context.Background(), []matcher.Detection{{Tech: "Drupal"}, {Tech: "Drupal", Version: "9"}, {Tech: "Magento", Version: "2.4"}}, db, opt)
+	off := EnrichUnified(context.Background(), []matcher.Detection{{Tech: "Drupal", Version: "9.5.0"}}, db, Options{CVE: opt.CVE, OSV: osvLook}) // a package lookup is not a release lookup
+	if len(asked) != 0 {
+		t.Fatalf("no version or OSV off must ask OSV nothing, asked %v", asked)
+	}
+	for _, r := range append(noVersion, off...) {
+		if r.Source == "osv" {
+			t.Fatalf("no version or OSV off must add no OSV result (an unanswered one only inflates the gaps): %+v", r)
+		}
+	}
+	EnrichUnified(context.Background(), []matcher.Detection{{Tech: "Drupal", Version: "7.59"}}, db, opt)
+	if want := []string{"Packagist:drupal/drupal@7.59"}; !reflect.DeepEqual(asked, want) { // drupal/core is Drupal 8+
+		t.Fatalf("a Drupal 7 release is 7.<n>, a full version: asked %v, want %v", asked, want)
+	}
+}
+
+// Platforms of other ecosystems are looked up the same way: a JavaScript framework as its npm
+// package, a Java server as its Maven artifacts, a .NET CMS as its NuGet packages. A Jenkins weekly
+// release is 2.<n>, a full version.
+func TestEnrichLooksUpPlatformPackagesOfEveryEcosystem(t *testing.T) {
+	var asked []string
+	opt := Options{OSVRelease: func(ctx context.Context, eco, name, version string) unified.Result {
+		asked = append(asked, eco+":"+name+"@"+version)
+		return unified.Result{State: unified.StateNotChecked, Source: "osv", Identity: name, Version: version, Err: unified.NoteNoClearance}
+	}}
+	db := &schema.DB{SchemaVersion: schema.SchemaVersion, Fingerprints: map[string]schema.Fingerprint{}}
+	for tech, want := range map[string][]string{
+		"Angular":       {"npm:@angular/core@17.3.1"},
+		"Apache Tomcat": {"Maven:org.apache.tomcat:tomcat@17.3.1", "Maven:org.apache.tomcat.embed:tomcat-embed-core@17.3.1"},
+		"Umbraco":       {"NuGet:Umbraco.Cms@17.3.1", "NuGet:UmbracoCms.Core@17.3.1"},
+	} {
+		asked = nil
+		EnrichUnified(context.Background(), []matcher.Detection{{Tech: tech, Version: "17.3.1"}}, db, opt)
+		if !reflect.DeepEqual(asked, want) {
+			t.Errorf("%s: asked %v, want %v", tech, asked, want)
+		}
+	}
+	asked = nil
+	EnrichUnified(context.Background(), []matcher.Detection{{Tech: "Jenkins", Version: "2.400"}}, db, opt)
+	if want := []string{"Maven:org.jenkins-ci.main:jenkins-core@2.400"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("Jenkins weekly: asked %v, want %v", asked, want)
+	}
+}
+
+// A package covers its own release line only: drupal/core is Drupal 8 and later (a Drupal 7 site's
+// advisories are filed under drupal/drupal), @angular/core is Angular 2 and later (1.x is AngularJS,
+// the npm "angular" package), magento/community-edition is Magento 2 (1.x is magento/magento1ce).
+// Looking a version up in a package of another line matches its "from the start" ranges: affected
+// by advisories of a product it is not.
+func TestPlatformPackagesCoverTheirOwnReleaseLine(t *testing.T) {
+	var asked []string
+	opt := Options{OSVRelease: func(ctx context.Context, eco, name, version string) unified.Result {
+		asked = append(asked, eco+":"+name+"@"+version)
+		return unified.Result{State: unified.StateNotChecked, Source: "osv", Identity: name, Version: version, Err: unified.NoteNoClearance}
+	}}
+	db := &schema.DB{SchemaVersion: schema.SchemaVersion, Fingerprints: map[string]schema.Fingerprint{}}
+	for _, tc := range []struct {
+		tech, version string
+		want          []string
+	}{
+		{"Drupal", "7.103", []string{"Packagist:drupal/drupal@7.103"}},
+		{"Drupal", "10.2.3", []string{"Packagist:drupal/core@10.2.3", "Packagist:drupal/drupal@10.2.3"}},
+		{"Drupal", "9.5", nil}, // 8 and later release at major.minor.patch: "9.5" names a branch
+		{"Jenkins", "2.440", []string{"Maven:org.jenkins-ci.main:jenkins-core@2.440"}},
+		{"Angular", "1.8.2", []string{"npm:angular@1.8.2"}},
+		{"Angular", "16.0.0", []string{"npm:@angular/core@16.0.0"}},
+		{"Magento", "1.9.4.1", []string{"Packagist:magento/magento1ce@1.9.4.1"}},
+		{"Magento", "1.9.4", nil}, // Magento 1 releases at four parts
+		{"Shopware", "6.5.8", nil},
+		{"Shopware", "6.5.8.15", []string{"Packagist:shopware/platform@6.5.8.15", "Packagist:shopware/core@6.5.8.15", "Packagist:shopware/shopware@6.5.8.15"}},
+		{"Shopware", "5.7.17", []string{"Packagist:shopware/platform@5.7.17", "Packagist:shopware/core@5.7.17", "Packagist:shopware/shopware@5.7.17"}},
+		{"PrestaShop", "1.7.8", nil},
+		{"PrestaShop", "1.7.8.11", []string{"Packagist:prestashop/prestashop@1.7.8.11"}},
+		{"PrestaShop", "8.1.2", []string{"Packagist:prestashop/prestashop@8.1.2"}},
+		{"Magento", "2.4.6", []string{"Packagist:magento/community-edition@2.4.6", "Packagist:magento/project-community-edition@2.4.6"}},
+		{"Magento", "dev.4.6", nil}, // no numeric major: no release line to place it in
+	} {
+		asked = nil
+		EnrichUnified(context.Background(), []matcher.Detection{{Tech: tc.tech, Version: tc.version}}, db, opt)
+		if !reflect.DeepEqual(asked, tc.want) {
+			t.Errorf("%s %s: asked %v, want %v", tc.tech, tc.version, asked, tc.want)
+		}
+	}
+}
+
+// A platform release's lead the source doubts (a note: the version may not be one of the package's) is
+// still reported — never dropped — but apart, as potentially affected with that reason, so a scanner
+// sizes the finding on the leads that do apply and lists the doubtful ones to confirm.
+func TestPlatformLeadsTheSourceDoubtsAreKeptApart(t *testing.T) {
+	opt := Options{OSVRelease: func(ctx context.Context, eco, name, version string) unified.Result {
+		return unified.Result{State: unified.StateAffectedByAdvisory, Source: "osv", Scope: "ecosystem:" + eco, Identity: name, Version: version,
+			Leads: []unified.Lead{{ID: "GHSA-sure", Severity: "high"}, {ID: "GHSA-doubt", Severity: "critical", Note: "may not be this package's release"}}}
+	}}
+	db := &schema.DB{SchemaVersion: schema.SchemaVersion, Fingerprints: map[string]schema.Fingerprint{}}
+	var states []string
+	for _, r := range EnrichUnified(context.Background(), []matcher.Detection{{Tech: "Liferay", Version: "6.2.10"}}, db, opt) {
+		if r.Source != "osv" {
+			continue
+		}
+		var ids []string
+		for _, l := range r.Leads {
+			ids = append(ids, l.ID)
+		}
+		states = append(states, r.State.String()+":"+strings.Join(ids, ",")+":"+r.Err)
+	}
+	want := []string{"affected_by_advisory:GHSA-sure:", "potentially_affected:GHSA-doubt:may not be this package's release"}
+	if !reflect.DeepEqual(states, want) {
+		t.Fatalf("results = %q, want %q", states, want)
+	}
+}
+
+// An OSV lead is dropped only when an earlier result already reported the same advisory at least as
+// firmly: a version-pinned OSV match is not hidden behind an unpinned mention of the same CVE.
+func TestDropRepeatedKeepsAFirmerLead(t *testing.T) {
+	lead := func(id string) []unified.Lead { return []unified.Lead{{ID: id, CVE: []string{"CVE-2023-1"}}} }
+	rs := dropRepeated([]unified.Result{
+		{Source: "cve", State: unified.StatePotentiallyAffected, Leads: lead("CVE-2023-1")},
+		{Source: "osv", State: unified.StateAffectedByAdvisory, Leads: lead("GHSA-pinned")},
+		{Source: "osv", State: unified.StatePotentiallyAffected, Leads: lead("GHSA-again")},
+	})
+	var got []string
+	for _, r := range rs {
+		got = append(got, r.Source+":"+r.State.String())
+	}
+	if want := []string{"cve:potentially_affected", "osv:affected_by_advisory"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("results = %v, want %v (the pinned OSV lead kept, the weaker repeat dropped)", got, want)
 	}
 }

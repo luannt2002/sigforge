@@ -34,6 +34,11 @@ stdin JSON Page ─▶ matcher.Match(db, page) ─▶ []Detection
                                                  │  + prioritize(KEV/EPSS) per lead
                                                  │  + applyVersionConflict (downgrade)
                         eolResult:  opt.EOL.EOLStatus(tech, version) ─▶ lifecycle.ToUnified
+                        platformResults: a release version (Drupal 7.59, Magento 2.4.6, Jetty 9.4.51.v…)
+                                    ─▶ opt.OSVRelease per core package (platformPackages; releaseLine keeps a
+                                       version out of a package that holds another release line; the
+                                       release lookup drops a version older than all the package names)
+                                    ─▶ dropRepeated (a lead an earlier result named is not reported twice)
                                                  ▼
                                         []unified.Result
 
@@ -65,6 +70,7 @@ caller wires the real operator-gated adapters and a test wires fakes:
 | `KEV` | `kev.Adapter` (`KEVProvider`) | leads pass through unranked, never dropped |
 | `IdentityResolver` | `identity.Resolver.ResolveCPE` | falls back to the source-attested CPE |
 | `OSV` / `WP` / `JS` | the OSV/wpcve/jslib lookups | the dispatched identity yields `not_checked` |
+| `OSVRelease` | OSV for a detected platform's release (`osv.Adapter.Lookupers`) | the platform is not looked up as its packages |
 
 The CLI (`sigforge enrich`) wires these from env URLs only (`cve.EnvVar`,
 `lifecycle.EnvVar`, `kev.EnvKEVURL` / `kev.EnvEPSSURL`, `identity.EnvCPEDictURL`). With

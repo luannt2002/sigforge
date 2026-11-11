@@ -89,8 +89,11 @@ type Options struct {
 	IdentityResolver IdentityResolver
 	KEV              KEVProvider
 	OSV              OSVLookup
-	WP               WPLookup
-	JS               JSLookup
+	// OSVRelease looks a detected platform's release up in its core packages — a version the
+	// package may not hold (osv.Adapter.Lookupers' release). nil = platforms are not looked up.
+	OSVRelease OSVLookup
+	WP         WPLookup
+	JS         JSLookup
 }
 
 // PkgRef is one ecosystem package to dispatch to OSV (operator/ASIE supplied, not
@@ -203,6 +206,10 @@ func Enrich(ctx context.Context, dets []matcher.Detection, db *schema.DB, opt Op
 // confirms one, else the source-ATTESTED fingerprint CPE; an unverified CPECandidate
 // is NEVER used (identity contamination).
 func EnrichUnified(ctx context.Context, dets []matcher.Detection, db *schema.DB, opt Options) []unified.Result {
+	return prioritize(ctx, enrichDetections(ctx, dets, db, opt), opt)
+}
+
+func enrichDetections(ctx context.Context, dets []matcher.Detection, db *schema.DB, opt Options) []unified.Result {
 	out := make([]unified.Result, 0, len(dets)*2)
 	for _, d := range dets {
 		from := len(out)
@@ -212,11 +219,13 @@ func EnrichUnified(ctx context.Context, dets []matcher.Detection, db *schema.DB,
 		if opt.JS != nil && isJSLib(db, d.Tech) {
 			out = append(out, applyVersionConflict(dispatchJS(ctx, LibRef{Name: d.Tech, Version: d.Version}, opt), d))
 		}
+		out = append(out, platformResults(ctx, d, opt)...)
 		for i := from; i < len(out); i++ {
 			out[i].Tech = d.Tech
 		}
+		out = out[:from+len(dropRepeated(out[from:]))]
 	}
-	return prioritize(ctx, out, opt)
+	return out
 }
 
 // jsCategories are the fingerprint categories (Wappalyzer numbering) of client-side
@@ -244,7 +253,7 @@ func isJSLib(db *schema.DB, tech string) bool {
 // (unknown, never a fabricated "clean"). The detection half is unchanged, so callers that
 // only pass detections get exactly EnrichUnified's output.
 func EnrichUnifiedExt(ctx context.Context, dets []matcher.Detection, db *schema.DB, inp EnrichInput, opt Options) []unified.Result {
-	out := EnrichUnified(ctx, dets, db, opt)
+	out := enrichDetections(ctx, dets, db, opt)
 	seenJS := map[string]bool{} // a library the page already revealed is not looked up again
 	for _, d := range dets {
 		if opt.JS != nil && isJSLib(db, d.Tech) {
@@ -263,7 +272,7 @@ func EnrichUnifiedExt(ctx context.Context, dets []matcher.Detection, db *schema.
 		}
 		out = append(out, dispatchJS(ctx, l, opt))
 	}
-	return out
+	return prioritize(ctx, out, opt)
 }
 
 func dispatchOSV(ctx context.Context, p PkgRef, opt Options) unified.Result {
@@ -371,10 +380,11 @@ func eolResult(ctx context.Context, d matcher.Detection, cpes []string, opt Opti
 	return applyVersionConflict(lifecycle.ToUnified(st, err), d)
 }
 
-// prioritize upgrades every CVE lead of the run with the KEV/EPSS exploitation signal so
-// a consumer can rank leads — in ONE ask for the whole run, because the EPSS API takes
-// many CVEs per request and asking per detection turns N detections into N requests.
-// KEV off or no CVE leads → results pass through unchanged (never dropped).
+// prioritize upgrades every lead of the run that names a CVE — the CVE source's own leads
+// and the CVE aliases OSV, WordPress and JS-library advisories carry — with the KEV/EPSS
+// exploitation signal so a consumer can rank leads, in ONE ask for the whole run, because
+// the EPSS API takes many CVEs per request and asking per detection turns N into N requests.
+// KEV off or no CVE named → results pass through unchanged (never dropped).
 func prioritize(ctx context.Context, rs []unified.Result, opt Options) []unified.Result {
 	if opt.KEV == nil {
 		return rs
@@ -382,13 +392,12 @@ func prioritize(ctx context.Context, rs []unified.Result, opt Options) []unified
 	seen := map[string]bool{}
 	var ids []string
 	for _, r := range rs {
-		if r.Source != "cve" {
-			continue
-		}
 		for _, l := range r.Leads {
-			if l.ID != "" && !seen[l.ID] {
-				seen[l.ID] = true
-				ids = append(ids, l.ID)
+			for _, id := range leadCVEs(l) {
+				if !seen[id] {
+					seen[id] = true
+					ids = append(ids, id)
+				}
 			}
 		}
 	}
@@ -397,26 +406,45 @@ func prioritize(ctx context.Context, rs []unified.Result, opt Options) []unified
 	}
 	sig := opt.KEV.EnrichUnified(ctx, ids)
 	for ri := range rs {
-		if rs[ri].Source != "cve" {
-			continue
-		}
 		for i := range rs[ri].Leads {
 			l := &rs[ri].Leads[i]
-			k, ok := sig[strings.ToUpper(l.ID)]
-			if !ok || len(k.Leads) == 0 {
-				continue
-			}
-			kl := k.Leads[0]
-			l.KnownExpl = kl.KnownExpl
-			if kl.EPSS != nil {
-				l.EPSS = kl.EPSS // added beside the CVSS Score, never over it
-			}
-			if l.Title == "" {
-				l.Title = kl.Title
+			for _, id := range leadCVEs(*l) {
+				k, ok := sig[id]
+				if !ok || len(k.Leads) == 0 {
+					continue
+				}
+				kl := k.Leads[0]
+				l.KnownExpl = l.KnownExpl || kl.KnownExpl
+				if kl.EPSS != nil && (l.EPSS == nil || *kl.EPSS > *l.EPSS) {
+					l.EPSS = kl.EPSS // added beside the CVSS Score, never over it; the highest of its CVEs
+				}
+				if l.Title == "" {
+					l.Title = kl.Title
+				}
+				if l.DueDate == "" {
+					l.DueDate, l.RequiredAction = kl.DueDate, kl.RequiredAction
+				}
+				if len(l.CWE) == 0 {
+					l.CWE = kl.CWE // the source's own weakness ids win; KEV's fill a lead that names none
+				}
 			}
 		}
 	}
 	return rs
+}
+
+// leadCVEs is every CVE a lead names, upper-cased: its id when that is a CVE, and its aliases.
+func leadCVEs(l unified.Lead) []string {
+	var out []string
+	if id := strings.ToUpper(strings.TrimSpace(l.ID)); strings.HasPrefix(id, "CVE-") {
+		out = append(out, id)
+	}
+	for _, c := range l.CVE {
+		if c = strings.ToUpper(strings.TrimSpace(c)); strings.HasPrefix(c, "CVE-") {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // applyVersionConflict honours Detection.VersionConflict: a conflicted version cannot
