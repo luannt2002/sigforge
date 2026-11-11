@@ -1,6 +1,7 @@
 // Package schema defines the on-disk fingerprint contract that sigforge publishes
 // and that scanners read. The JSON form is Wappalyzer-compatible — the
-// cats/headers/cookies/meta/html/scriptSrc/implies/dom fields and the inline
+// cats/headers/cookies/meta/html/scriptSrc/implies/requires/requiresCategory/excludes/dom
+// fields and the inline
 // `\;version:\1` / `\;confidence:N` pattern suffixes follow the de-facto standard,
 // so any source normalizes into it and a consumer writes one loader. It is
 // extended with per-entry provenance, license, confidence and alternate version
@@ -42,7 +43,11 @@ type Fingerprint struct {
 	HTML      StringList            `json:"html,omitempty"`
 	ScriptSrc StringList            `json:"scriptSrc,omitempty"`
 	Implies   StringList            `json:"implies,omitempty"`
-	Dom       json.RawMessage       `json:"dom,omitempty"` // carried through for consumers with a DOM; this repo's reference matcher does not evaluate it
+	Dom       json.RawMessage       `json:"dom,omitempty"` // carried through for consumers with a DOM; the reference matcher reads only what is observable without one (matcher_dom.go)
+	// Conditions on other detections, not detection channels (HasDetection ignores them).
+	Requires         StringList `json:"requires,omitempty"`         // this tech's own match counts only once one of these techs is resolved; implied, it is returned regardless
+	RequiresCategory []int      `json:"requiresCategory,omitempty"` // as Requires, met by a resolved tech with one of these cats
+	Excludes         StringList `json:"excludes,omitempty"`         // once this tech is resolved (detected or implied), these techs, never itself, are labeled excludedBy it, not dropped
 
 	Confidence        int      `json:"confidence,omitempty"`         // declared confidence (1..100) when a pattern carries no `\;confidence:N`; absent = 100
 	Provenance        string   `json:"provenance,omitempty"`         // source id the entry came from, e.g. "baseline"
@@ -89,6 +94,18 @@ func (fp Fingerprint) CapturesVersion() bool {
 		}
 	}
 	return hasVersionSuffix(fp.HTML) || hasVersionSuffix(fp.ScriptSrc)
+}
+
+// HasDetection reports whether the entry can detect its tech on its own: at least one
+// channel the matcher evaluates (headers, cookies, meta, html, scriptSrc, and dom —
+// evaluated passively by matcher_dom.go) is present. Implies, version_regex and the
+// metadata fields never detect, so an entry without these channels is found only when
+// another tech implies it. The refresh gate uses this one definition.
+// shortcut: a present field counts even when none of its patterns can fire (html [""],
+// a header name with no pattern, dom null/{}); upgrade if a normalized source emits such.
+func (fp Fingerprint) HasDetection() bool {
+	return len(fp.Headers) > 0 || len(fp.Cookies) > 0 || len(fp.Meta) > 0 ||
+		len(fp.HTML) > 0 || len(fp.ScriptSrc) > 0 || len(fp.Dom) > 0
 }
 
 func hasVersionSuffix(raws []string) bool {

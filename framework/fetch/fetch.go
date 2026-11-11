@@ -397,6 +397,24 @@ func (c *Client) storeCached(url string, h http.Header, b []byte, at time.Time) 
 	}
 }
 
+// Stored reports the store's copy of url without asking the source: its path, when the source last
+// served or confirmed it, and the Last-Modified it gave; ok is false when there is none.
+func (c *Client) Stored(url string) (path string, fetchedAt time.Time, lastModified string, ok bool) {
+	p, m, at := c.storedFile(url)
+	return p, at, m.LastModified, p != ""
+}
+
+// Confirm records that url's stored copy is current as of now — what a 304 does — for a caller that
+// brought the copy up to date another way; false when there is no stored copy.
+func (c *Client) Confirm(url string) bool {
+	p, m, _ := c.storedFile(url)
+	if p == "" {
+		return false
+	}
+	c.storeMeta(url, m, now().UTC())
+	return true
+}
+
 func (c *Client) storeMeta(url string, m cacheMeta, at time.Time) {
 	m.FetchedAt = at.UTC().Format(time.RFC3339)
 	mb, err := json.Marshal(m)

@@ -16,7 +16,8 @@ headers, cookies, HTML, meta tags and script srcs — and get back the technolog
 
 ## 3. Acceptance criteria
 
-- A technology whose header/cookie/meta/html/scriptSrc pattern matches is returned.
+- A technology whose header/cookie/meta/html/scriptSrc pattern matches is returned,
+  subject to the `requires` / `requiresCategory` gate below.
 - A captured version (`\;version:\1`) is populated when the matching pattern
   provides one.
 - Confidence is the sum of matched patterns' confidences, each defaulting to the
@@ -24,6 +25,20 @@ headers, cookies, HTML, meta tags and script srcs — and get back the technolog
   capped at 100.
 - `implies` relations are expanded (WordPress ⇒ PHP), and an implied technology is
   never more confident than the one that implied it.
+- `requires` / `requiresCategory` gate a technology's own pattern match: it counts only
+  once one of its required techs, or a tech in one of its required categories, is
+  resolved (detected or implied) — any one of them suffices, as in Wappalyzer. The match
+  never resolves its own requirement; once another resolved tech implies the technology,
+  though, the techs it implies and its own categories do meet the gate. A gated
+  technology that another resolved tech implies is returned even when its requirement is
+  not resolved, as an implied detection: no evidence or version from its held-back match.
+- `excludes` never removes a detection: the excluded tech stays, labeled `excludedBy`
+  with the resolved techs (detected or implied) that exclude it.
+- A tech present only through other techs — implied by them, or admitted by a
+  `requires` / `requiresCategory` gate they meet — carries all their labels, over any
+  number of steps, unless one of those techs is unlabeled and present on its own or
+  through unlabeled techs. A tech with its own ungated match never inherits a label, and a
+  tech never labels itself: an edition that requires and excludes its base stays unlabeled.
 - A script-src pattern must not fire on its letters embedded mid-filename in a
   hashed bundle (token-boundary guard).
 - A blank/irrelevant page yields zero detections (no false positives).
@@ -45,9 +60,10 @@ extracts `<meta>` tags from the HTML. For each fingerprint it runs the entry's
 patterns against the matching evidence, accumulating confidence and the longest
 captured version. Patterns are split on the `\;` suffix syntax into
 (regex, version-template, confidence); a regex RE2 rejects is dropped rather than
-failing the set. After per-entry matching it expands `implies` with a depth bound,
-then emits sorted `Detection`s carrying each entry's `provenance` and `license` so
-the operator knows the license posture of every lead.
+failing the set. After per-entry matching it admits the `requires`-gated entries whose
+requirement is resolved (expanding `implies` with a depth bound each round), labels
+`excludes` (`excludedBy`, never a removal), then emits sorted `Detection`s carrying each
+entry's `provenance` and `license` so the operator knows the license posture of every lead.
 
 Honesty: a detection is a LEAD. Banner/meta versions are attacker-controllable.
 The schema's `dom` rules are evaluated passively (see `matcher_dom.go`): with no
@@ -65,7 +81,7 @@ page ─┬─ headers ──▶ lower(name)→values ─┐
       ├─ html ─────▶ meta name→content ──┼─▶ for each fingerprint:
       └─ scriptSrcs ──────────────────────┘     match patterns → (conf += , version = longest)
                                                        │
-                                                 expand implies (depth-bounded)
+                                                 resolve requires + expand implies (depth-bounded) · label excludes
                                                        │
                                                  refine version from version_regex (if detected, missing)
                                                        ▼

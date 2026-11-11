@@ -59,6 +59,11 @@ type FP struct {
 	CNAMEs      []string // CNAME suffixes identifying the provider (lowercased, trailing dot removed)
 	Fingerprint string   // a string/regex that appears ONLY when the resource is abandoned
 	Vulnerable  bool     // upstream confirms this provider is actually reclaimable
+	// NXDomain marks a provider whose takeover is a DNS-LAYER signal: the resource is
+	// reclaimable when the CNAME target itself resolves to NXDOMAIN, leaving no HTTP body
+	// to fingerprint. Such entries carry Fingerprint "NXDOMAIN" and are invisible to
+	// body-based Match (see bodySignature); MatchNXDomain is their evidence path.
+	NXDomain bool
 }
 
 // fpRaw is the exact upstream schema; other fields (discussion, http_status…) are ignored.
@@ -68,6 +73,7 @@ type fpRaw struct {
 	Fingerprint string   `json:"fingerprint"`
 	Vulnerable  bool     `json:"vulnerable"`
 	Status      string   `json:"status"`
+	NXDomain    bool     `json:"nxdomain"`
 }
 
 //go:embed data/fingerprints.json
@@ -138,6 +144,7 @@ func ParseFingerprints(b []byte) ([]FP, error) {
 			// fewer false positives. Don't test == "Vulnerable", so a reworded status
 			// doesn't silently drop the whole table.
 			Vulnerable: r.Vulnerable && !deniedStatus(r.Status),
+			NXDomain:   r.NXDomain,
 		})
 	}
 	return out, nil
@@ -159,6 +166,29 @@ func Match(fps []FP, cname, body string) (FP, bool) {
 			continue
 		}
 		if bodyMatch(fp.Fingerprint, body) {
+			return fp, true
+		}
+	}
+	return FP{}, false
+}
+
+// MatchNXDomain is the DNS-LAYER analog of Match for providers whose takeover leaves no
+// HTTP body to fingerprint (Fingerprint "NXDOMAIN"): it returns the provider IF AND ONLY
+// IF fp.NXDomain ∧ fp.Vulnerable ∧ cname matches a suffix. The caller passes a CNAME it
+// has ALREADY observed resolving to NXDOMAIN; this supplies the provider half of the
+// evidence (a reclaimable provider whose takeover triggers on NXDOMAIN). It does NOT look
+// at a body — that is the whole point, and why body-based Match rejects these. Missing any
+// term → (FP{}, false), same honesty discipline as Match.
+func MatchNXDomain(fps []FP, cname string) (FP, bool) {
+	host := normalize(cname)
+	if host == "" {
+		return FP{}, false
+	}
+	for _, fp := range fps {
+		if !fp.NXDomain || !fp.Vulnerable {
+			continue
+		}
+		if cnameMatch(fp.CNAMEs, host) {
 			return fp, true
 		}
 	}

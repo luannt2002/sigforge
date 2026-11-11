@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luannt2002/sigforge/modules/intel/unified"
 	"github.com/luannt2002/sigforge/modules/intel/versioncmp"
 )
 
@@ -57,12 +58,18 @@ type affectedRange struct {
 type record struct {
 	pkg       string
 	ecosystem string
-	id        string // native OSV id (GHSA-/GO-/PYSEC-…)
-	cve       string // CVE alias if any
-	severity  string // upstream text label mapped to low|medium|high|critical, or "" if unscored
+	id        string   // native OSV id (GHSA-/GO-/PYSEC-…)
+	cve       string   // CVE alias if any
+	severity  string   // upstream text label mapped to low|medium|high|critical (else the score's band), or "" if unscored
+	score     *float64 // CVSS v3 base score computed from the record's vector, nil when it has none
+	vector    string   // that CVSS v3 vector, as the record gives it
+	cwe       []string // the weakness ids the record names
+	published string   // when the record was published, as it gives it
 	ranges    []affectedRange
 	versions  []string // listed versions no range places (OSV: a listed version is affected)
 	truncated bool     // versions holds only the first maxExactVersions of the advisory's list
+	floor     string   // the lowest version the record names: a listed version or a range bound other than "introduced 0"
+	listed    bool     // the record lists the package's affected versions
 	// vulnKeys is the normalized dedup set (own id + every alias) so one logical vuln reported
 	// under several ids (OSV id + CVE/GHSA aliases) is folded to one lookup result, not counted twice.
 	vulnKeys []string
@@ -73,19 +80,23 @@ type rawRecord struct {
 	ID        string          `json:"id"`
 	Aliases   []string        `json:"aliases"`
 	Withdrawn json.RawMessage `json:"withdrawn"`
+	Published json.RawMessage `json:"published"` // read leniently, like severity
 	DBSpec    rawDBSpecific   `json:"database_specific"`
+	Severity  json.RawMessage `json:"severity"` // read leniently: a malformed one costs the score, not the entry
 	Affected  []*rawAffected  `json:"affected"`
 }
 
 type rawDBSpecific struct {
-	Severity string `json:"severity"` // GHSA text label: LOW|MODERATE|HIGH|CRITICAL
+	Severity string          `json:"severity"` // GHSA text label: LOW|MODERATE|HIGH|CRITICAL
+	CWEIDs   json.RawMessage `json:"cwe_ids"`  // GHSA weakness ids, read leniently
 }
 
 type rawAffected struct {
-	Package  rawPackage    `json:"package"`
-	Ranges   []rawRange    `json:"ranges"`
-	Versions []string      `json:"versions"`
-	DBSpec   rawDBSpecific `json:"database_specific"`
+	Package  rawPackage      `json:"package"`
+	Ranges   []rawRange      `json:"ranges"`
+	Versions []string        `json:"versions"`
+	DBSpec   rawDBSpecific   `json:"database_specific"`
+	Severity json.RawMessage `json:"severity"`
 }
 
 type rawPackage struct {
@@ -128,6 +139,10 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 		}
 	}
 	base := mapSeverity(raw.DBSpec.Severity)
+	baseScore, baseVector := vectorScore(raw.Severity)
+	cwe := lenientStrings(raw.DBSpec.CWEIDs)
+	var published string
+	_ = json.Unmarshal(raw.Published, &published) // not a string: no date, still a readable entry
 
 	out := make([]record, 0, len(raw.Affected))
 	for i := range raw.Affected {
@@ -149,12 +164,23 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 		if s := mapSeverity(af.DBSpec.Severity); s != "" {
 			sev = s
 		}
+		score, vector := baseScore, baseVector
+		if s, v := vectorScore(af.Severity); s != nil {
+			score, vector = s, v
+		}
+		if sev == "" && score != nil {
+			sev = cvssBand(*score)
+		}
 		r := record{
 			pkg:       name,
 			ecosystem: recEco, // keeps a distro release suffix ("Debian:12") for LookupIn
 			id:        strings.TrimSpace(raw.ID),
 			cve:       cve,
 			severity:  sev,
+			score:     score,
+			vector:    vector,
+			cwe:       cwe,
+			published: strings.TrimSpace(published),
 			ranges:    rangesFrom(af.Ranges),
 			vulnKeys:  vulnKeys,
 		}
@@ -162,7 +188,11 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 		// (MAL- records list versions their range does not reach): keep the listed versions
 		// no range places — all of them when only commit ranges exist — capped.
 		for _, v := range af.Versions {
-			if v = strings.TrimSpace(v); v == "" || placedByRange(v, &r) {
+			if v = strings.TrimSpace(v); v == "" {
+				continue
+			}
+			r.floor, r.listed = lower(recEco, r.floor, v), true
+			if placedByRange(v, &r) {
 				continue
 			}
 			if len(r.versions) == maxExactVersions {
@@ -171,12 +201,30 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 			}
 			r.versions = append(r.versions, v)
 		}
+		for _, rg := range r.ranges {
+			if rg.typ == rangeGit {
+				continue
+			}
+			for _, v := range []string{rg.introduced, rg.fixed, rg.lastAffected} {
+				if v != "" && v != "0" {
+					r.floor = lower(recEco, r.floor, v)
+				}
+			}
+		}
 		out = append(out, r)
 	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// lower is the lower of two versions under eco's order; "" is no version, an uncomparable one is ignored.
+func lower(eco, a, b string) string {
+	if c, ok := versioncmp.Compare(eco, b, a); a == "" || (ok && c < 0) {
+		return b
+	}
+	return a
 }
 
 // rangesFrom collapses each OSV range's event sequence into introduced→fixed/lastAffected pairs,
@@ -253,11 +301,44 @@ func repositoryLevel(af *rawAffected) bool {
 	return len(af.Ranges) > 0
 }
 
+// vectorScore is the base score of the first CVSS v3 vector in an OSV severity list and the
+// vector itself, nil when there is none (or the list is not one).
+func vectorScore(raw json.RawMessage) (*float64, string) {
+	var list []struct {
+		Type  string `json:"type"`
+		Score string `json:"score"`
+	}
+	if json.Unmarshal(raw, &list) != nil {
+		return nil, ""
+	}
+	for _, s := range list {
+		if strings.EqualFold(s.Type, "CVSS_V3") {
+			if v, ok := cvss3BaseScore(s.Score); ok {
+				return &v, strings.TrimSpace(s.Score)
+			}
+		}
+	}
+	return nil, ""
+}
+
+// lenientStrings reads a JSON list of weakness ids, nothing when it is not one.
+func lenientStrings(raw json.RawMessage) []string {
+	var list []string
+	if json.Unmarshal(raw, &list) != nil {
+		return nil
+	}
+	return unified.CWEIDs(list)
+}
+
 // isWithdrawn reports whether the advisory carries a withdrawal timestamp (null is still in effect;
 // readZipEntry has already refused any other non-timestamp value).
 func isWithdrawn(raw json.RawMessage) bool {
-	s := strings.TrimSpace(string(raw))
-	return s != "" && s != "null" && s != `""`
+	var at string
+	if json.Unmarshal(raw, &at) != nil {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, at)
+	return err == nil && !t.After(time.Now()) // a withdrawal dated in the future has not happened yet
 }
 
 // mapSeverity maps an upstream text label to the internal scale; "" when unrecognized or empty, so
@@ -299,7 +380,11 @@ func reduceZip(ctx context.Context, r io.ReaderAt, size int64, eco string, emit 
 			default:
 			}
 		}
-		if zf == nil || zf.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(zf.Name), ".json") {
+		if zf == nil || zf.FileInfo().IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(strings.ToLower(zf.Name), ".json") {
+			skipped++ // a dump holds records only: anything else leaves it unproven, counted like a corrupt entry
 			continue
 		}
 		recs, err := readZipEntry(zf, eco)
@@ -324,18 +409,25 @@ func readZipEntry(zf *zip.File, eco string) ([]record, error) {
 		return nil, err
 	}
 	defer rc.Close()
+	recs, _, err := decodeEntry(rc, eco)
+	return recs, err
+}
+
+// decodeEntry reads one OSV record — a dump entry or a record fetched on its own — under the same
+// strict rules, and returns its rows and id (rows are nil for a withdrawn record).
+func decodeEntry(r io.Reader, eco string) ([]record, string, error) {
 	var raw rawRecord
-	dec := json.NewDecoder(io.LimitReader(rc, maxEntryBytes))
+	dec := json.NewDecoder(io.LimitReader(r, maxEntryBytes))
 	if err := dec.Decode(&raw); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return nil, errors.New("osv: entry holds more than one JSON value")
+		return nil, "", errors.New("osv: entry holds more than one JSON value")
 	}
 	if err := checkRecord(&raw); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return reduceRecord(&raw, eco), nil
+	return reduceRecord(&raw, eco), strings.TrimSpace(raw.ID), nil
 }
 
 // checkRecord rejects an entry the OSV schema does not allow — null, no id, a withdrawn

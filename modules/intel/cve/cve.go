@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
 
 // EnvVar is the environment variable the operator uses to supply the CVE API base
@@ -79,10 +80,13 @@ func (s State) String() string {
 // the feed's own values (the highest-precedence CVSS metric present); Source is the
 // feed's attribution for that metric (e.g. "nvd@nist.gov").
 type CVE struct {
-	ID       string
-	CVSS     float64
-	Severity string
-	Source   string
+	ID          string
+	CVSS        float64
+	Severity    string
+	Source      string
+	CWE         string // the weakness ids NVD lists for it, comma-separated (a string keeps CVE comparable)
+	Published   string // NVD's publication timestamp, as given
+	Description string // NVD's English description (descriptions[lang=en]); "" when the feed gives none — never fabricated
 }
 
 // Result is one lookup's outcome. CPE is the exact CPE queried (version filled in);
@@ -93,6 +97,7 @@ type Result struct {
 	State     State
 	CVEs      []CVE
 	Total     int       // CVEs the feed says match (totalResults); more than len(CVEs) when it returned one page
+	Partial   bool      // the feed counts more matches (Total) than this page returned — results are "N of M", NOT the full/clean list
 	FetchedAt time.Time // when the feed answered (UTC); zero when no fetch happened (feed off / no CPE)
 }
 
@@ -128,15 +133,40 @@ func (a *Adapter) Lookup(ctx context.Context, cpe, version string) (Result, erro
 	if a.baseURL == "" {
 		return res, ErrFeedOff
 	}
-	raw, err := a.client.Get(ctx, a.baseURL+"?virtualMatchString="+url.QueryEscape(query))
+	return a.fetchInto(ctx, a.baseURL+"?virtualMatchString="+url.QueryEscape(query), query, res)
+}
+
+// LookupID returns the CVE lead the feed attests for a single CVE-ID (NVD's cveId
+// query). Honesty mirrors Lookup: an empty id yields StateUnknown with a nil error
+// (nothing to query); a feed that is off yields StateUnknown with ErrFeedOff; a queried
+// feed that lists the CVE yields StateHasCVE, one that lists nothing StateNoKnownCVE
+// (never "safe"); fetch/decode failures return StateUnknown with an error.
+func (a *Adapter) LookupID(ctx context.Context, id string) (Result, error) {
+	id = strings.TrimSpace(id)
+	res := Result{State: StateUnknown}
+	if id == "" {
+		return res, nil // nothing to query → unknown, honestly (not an operator error)
+	}
+	if a.baseURL == "" {
+		return res, ErrFeedOff
+	}
+	return a.fetchInto(ctx, a.baseURL+"?cveId="+url.QueryEscape(id), id, res)
+}
+
+// fetchInto queries queryURL, decodes an NVD answer into res, and sets the honest
+// tri-state and Partial flag; label names the lookup in errors. A fetch failure — which
+// the client reports for 429/5xx/timeout too — or a decode failure leaves res
+// StateUnknown with an error, never downgraded to StateNoKnownCVE ("clean").
+func (a *Adapter) fetchInto(ctx context.Context, queryURL, label string, res Result) (Result, error) {
+	raw, err := a.client.Get(ctx, queryURL)
 	if err != nil {
-		return res, fmt.Errorf("cve: fetch %q: %w", query, err)
+		return res, fmt.Errorf("cve: fetch %q: %w", label, err)
 	}
 	cves, total, err := parse(raw)
 	if err != nil {
-		return res, fmt.Errorf("cve: %q: %w", query, err)
+		return res, fmt.Errorf("cve: %q: %w", label, err)
 	}
-	res.CVEs, res.Total = cves, total
+	res.CVEs, res.Total, res.Partial = cves, total, total > len(cves)
 	res.FetchedAt = time.Now().UTC()
 	if len(cves) == 0 {
 		res.State = StateNoKnownCVE
@@ -162,15 +192,18 @@ func withVersion(cpe, version string) string {
 	return strings.Join(parts, ":")
 }
 
-// nvdResponse is the slice of the NVD CVE API 2.0 response this adapter reads: the
-// CVE id and its CVSS metrics. Every other field (descriptions, references,
-// configurations, weaknesses) is intentionally ignored.
+// nvdResponse is the slice of the NVD CVE API 2.0 response this adapter reads: the CVE id,
+// its CVSS metrics, and — read leniently, a malformed one costs only itself — its weaknesses
+// and publication date. Every other field (descriptions, references, configurations) is ignored.
 type nvdResponse struct {
 	TotalResults    *int `json:"totalResults"` // the API pages results; more than len(Vulnerabilities) ⇒ one page came back; absent ⇒ not an NVD answer
 	Vulnerabilities []struct {
 		CVE struct {
-			ID      string `json:"id"`
-			Metrics struct {
+			ID           string          `json:"id"`
+			Published    json.RawMessage `json:"published"`
+			Weaknesses   json.RawMessage `json:"weaknesses"`
+			Descriptions json.RawMessage `json:"descriptions"`
+			Metrics      struct {
 				V40 []nvdMetric `json:"cvssMetricV40"`
 				V31 []nvdMetric `json:"cvssMetricV31"`
 				V30 []nvdMetric `json:"cvssMetricV30"`
@@ -178,6 +211,43 @@ type nvdResponse struct {
 			} `json:"metrics"`
 		} `json:"cve"`
 	} `json:"vulnerabilities"`
+}
+
+// nvdWeaknesses is the CVE's weakness ids, comma-separated; "" when the field is malformed.
+func nvdWeaknesses(raw json.RawMessage) string {
+	var ws []struct {
+		Description []struct {
+			Value string `json:"value"`
+		} `json:"description"`
+	}
+	if json.Unmarshal(raw, &ws) != nil {
+		return ""
+	}
+	var weak []string
+	for _, w := range ws {
+		for _, d := range w.Description {
+			weak = append(weak, d.Value)
+		}
+	}
+	return strings.Join(unified.CWEIDs(weak), ",")
+}
+
+// nvdDescription returns the English CVE description from NVD's descriptions array; ""
+// when the field is malformed or carries no English entry (never fabricated).
+func nvdDescription(raw json.RawMessage) string {
+	var ds []struct {
+		Lang  string `json:"lang"`
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(raw, &ds) != nil {
+		return ""
+	}
+	for _, d := range ds {
+		if d.Lang == "en" {
+			return d.Value
+		}
+	}
+	return ""
 }
 
 // nvdMetric is one CVSS metric. CVSS v3/v4 carry baseSeverity inside cvssData; CVSS
@@ -215,7 +285,8 @@ func parse(raw []byte) ([]CVE, int, error) {
 		if strings.TrimSpace(v.CVE.ID) == "" {
 			continue
 		}
-		c := CVE{ID: v.CVE.ID}
+		c := CVE{ID: v.CVE.ID, CWE: nvdWeaknesses(v.CVE.Weaknesses), Description: nvdDescription(v.CVE.Descriptions)}
+		_ = json.Unmarshal(v.CVE.Published, &c.Published)
 		if m, ok := pickMetric(v.CVE.Metrics.V40, v.CVE.Metrics.V31, v.CVE.Metrics.V30, v.CVE.Metrics.V2); ok {
 			c.CVSS = m.CVSSData.BaseScore
 			c.Severity = pickSeverity(m)

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"sort"
+	"strings"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
 	"github.com/luannt2002/sigforge/modules/intel/schema"
@@ -33,7 +36,10 @@ func (w *webappanalyzer) Fetch(ctx context.Context) ([]byte, error) {
 // Normalize decodes a Wappalyzer technologies document. It accepts both the wrapped
 // form ({"technologies": {...}, "categories": {...}}) and a bare technology map
 // ({"Nginx": {...}, ...}, as enthec's split src/technologies/*.json files use). A
-// single malformed entry is dropped so one bad record does not fail the whole set.
+// single malformed entry is dropped so one bad record does not fail the whole set. An
+// entry whose requires/requiresCategory/excludes cannot be read is QUARANTINED (not
+// emitted, counted and logged with its reason): emitted without its condition it would
+// fire where the source's rule never would.
 func (w *webappanalyzer) Normalize(raw []byte) (map[string]schema.Fingerprint, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
@@ -47,6 +53,7 @@ func (w *webappanalyzer) Normalize(raw []byte) (map[string]schema.Fingerprint, e
 		}
 	}
 	out := make(map[string]schema.Fingerprint, len(techs))
+	var quarantined []string
 	for name, r := range techs {
 		if name == "" {
 			continue
@@ -59,18 +66,62 @@ func (w *webappanalyzer) Normalize(raw []byte) (map[string]schema.Fingerprint, e
 		var e struct {
 			schema.Fingerprint
 			CPE schema.StringList `json:"cpe"`
+			// Shadowed like cpe: an unreadable condition is quarantined, not lost in a failed decode.
+			Requires         json.RawMessage `json:"requires"`
+			RequiresCategory json.RawMessage `json:"requiresCategory"`
+			Excludes         json.RawMessage `json:"excludes"`
 		}
 		if err := json.Unmarshal(r, &e); err != nil {
 			continue
 		}
 		fp := e.Fingerprint
 		fp.CPE = e.CPE
+		if reason := decodeConditions(&fp, e.Requires, e.RequiresCategory, e.Excludes); reason != "" {
+			quarantined = append(quarantined, name+": "+reason)
+			continue
+		}
 		fp.Provenance = w.Name()
 		fp.License = w.License()
 		out[name] = fp
+	}
+	if len(quarantined) > 0 {
+		sort.Strings(quarantined)
+		log.Printf("webappanalyzer: quarantined %d technolog(ies) whose requires/requiresCategory/excludes cannot be evaluated (not emitted, the condition would be lost): %v", len(quarantined), quarantined)
 	}
 	if len(out) == 0 {
 		return nil, errors.New("webappanalyzer: no technologies in input")
 	}
 	return out, nil
+}
+
+// decodeConditions sets fp's conditions or names the first unreadable one; null is absent, as in Wappalyzer.
+func decodeConditions(fp *schema.Fingerprint, requires, requiresCategory, excludes json.RawMessage) string {
+	var ok bool
+	if fp.Requires, ok = techNames(requires); !ok {
+		return "requires is not a list of technology names"
+	}
+	if fp.Excludes, ok = techNames(excludes); !ok {
+		return "excludes is not a list of technology names"
+	}
+	if len(requiresCategory) > 0 && json.Unmarshal(requiresCategory, &fp.RequiresCategory) != nil {
+		return "requiresCategory is not a list of category ids"
+	}
+	return ""
+}
+
+// techNames decodes a name or a list of names; a blank name refers to no technology.
+func techNames(raw json.RawMessage) (schema.StringList, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, true
+	}
+	var names schema.StringList
+	if json.Unmarshal(raw, &names) != nil {
+		return nil, false
+	}
+	for _, n := range names {
+		if strings.TrimSpace(n) == "" {
+			return nil, false
+		}
+	}
+	return names, true
 }

@@ -133,3 +133,12 @@ func TestUnvouchedSourcesNeverAnswerClean(t *testing.T) {
 		}
 	}
 }
+
+// The value types consumers compare with == stay comparable: a slice field would break them,
+// which is why weakness ids ride on them comma-separated (unified.Lead carries the list).
+func TestExportedValueTypesStayComparable(t *testing.T) {
+	_ = cve.CVE{} == cve.CVE{}
+	_ = osv.Vuln{} == osv.Vuln{}
+	_ = kev.KEVEntry{} == kev.KEVEntry{}
+	_ = kev.Signal{} == kev.Signal{}
+}

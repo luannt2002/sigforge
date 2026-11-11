@@ -32,6 +32,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"regexp"
 	"sort"
@@ -39,6 +40,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
 	"github.com/luannt2002/sigforge/modules/intel/unified"
@@ -73,6 +75,9 @@ type Signal struct {
 	EPSS       float64 // probability of exploitation in the next 30 days, 0..1
 	EPSSPct    float64 // the EPSS percentile across all CVEs, 0..1
 	HasEPSS    bool    // EPSS actually returned a score for this CVE — distinguishes a real 0.0 from "no score" (nil in unified)
+	// DueDate, RequiredAction and CWE come from the KEV entry, when the CVE is in KEV.
+	DueDate, RequiredAction string
+	CWE                     string // comma-separated
 }
 
 // KEVEntry is one normalized KEV row. It keeps a few descriptive fields so a caller
@@ -84,23 +89,33 @@ type KEVEntry struct {
 	Name          string // vulnerabilityName
 	DateAdded     string // YYYY-MM-DD, per the upstream catalog
 	Ransomware    bool   // knownRansomwareCampaignUse == "Known"
+	// DueDate and RequiredAction are what CISA requires of an affected operator, and by when.
+	DueDate, RequiredAction string
+	CWE                     string // the weakness ids the catalog names, comma-separated (a string keeps KEVEntry comparable)
 }
 
 //go:embed data/kev-snapshot.json
 var kevSnapshot []byte
 
 // kevDoc is the upstream KEV feed schema: an outer object with a vulnerabilities[]
-// array. Other top-level fields (title, catalogVersion, count) are ignored.
+// array. Other top-level fields (title, catalogVersion) are ignored.
 type kevDoc struct {
-	Count           *int `json:"count"` // the catalog's own entry count: what proves it whole
-	Vulnerabilities []struct {
-		CveID                      string `json:"cveID"`
-		VendorProject              string `json:"vendorProject"`
-		Product                    string `json:"product"`
-		VulnerabilityName          string `json:"vulnerabilityName"`
-		DateAdded                  string `json:"dateAdded"`
-		KnownRansomwareCampaignUse string `json:"knownRansomwareCampaignUse"`
-	} `json:"vulnerabilities"`
+	Count           *int              `json:"count"`           // the catalog's own entry count: what proves it whole
+	DateReleased    json.RawMessage   `json:"dateReleased"`    // read leniently: a mistyped date is named, not fatal
+	Vulnerabilities []json.RawMessage `json:"vulnerabilities"` // decoded row by row: one bad row costs that row, not the catalog
+}
+
+// kevRow is one vulnerabilities[] row of the upstream KEV feed.
+type kevRow struct {
+	CveID                      string          `json:"cveID"`
+	VendorProject              string          `json:"vendorProject"`
+	Product                    string          `json:"product"`
+	VulnerabilityName          string          `json:"vulnerabilityName"`
+	DateAdded                  string          `json:"dateAdded"`
+	KnownRansomwareCampaignUse string          `json:"knownRansomwareCampaignUse"`
+	DueDate                    string          `json:"dueDate"`
+	RequiredAction             string          `json:"requiredAction"`
+	CWEs                       json.RawMessage `json:"cwes"` // read leniently: a malformed list costs the CWEs, not the catalog
 }
 
 // epssDoc is the FIRST.org EPSS API schema: data[] with cve/epss/percentile, where
@@ -141,6 +156,8 @@ type CatalogStatus struct {
 	Entries int    // KEV entries available to prioritize against
 	Err     string // why the configured live catalog could not be fetched now (Cached: a stale synced copy is in use); "" otherwise
 	Cached  bool   // the operator's catalog came from the local store (synced copy), not a fetch now
+	Skipped int    // live catalog rows dropped: not an object, or no well-formed CVE id
+	Warn    string // what in the live catalog needs a look though it is in use (its release date, skipped rows); "" otherwise
 }
 
 // Status loads the catalog if needed (once per Adapter, shared with every lookup) and
@@ -174,8 +191,7 @@ func (a *Adapter) Enrich(ctx context.Context, cves []string) map[string]Signal {
 		s := epss[id] // zero-value Signal if EPSS had nothing
 		s.CVE = id
 		if e, ok := kev[id]; ok {
-			s.InKEV = true
-			s.Ransomware = e.Ransomware
+			markKEV(&s, e)
 		}
 		out[id] = s
 	}
@@ -209,7 +225,7 @@ func (a *Adapter) fetchKEV(ctx context.Context) (map[string]KEVEntry, unified.Fr
 		a.status.Err = err.Error()
 		return snap, unified.FreshnessSnapshot, time.Time{}
 	}
-	m, complete, err := parseKEVCatalog(raw)
+	m, complete, skipped, released, err := parseKEVCatalog(raw)
 	if err != nil {
 		a.status.Err = "live KEV catalog unparseable: " + err.Error()
 		return snap, unified.FreshnessSnapshot, time.Time{}
@@ -218,7 +234,7 @@ func (a *Adapter) fetchKEV(ctx context.Context) (map[string]KEVEntry, unified.Fr
 		a.status.Err = "live KEV catalog had no entries"
 		return snap, unified.FreshnessSnapshot, time.Time{}
 	}
-	a.status = CatalogStatus{Source: "live", Entries: len(m), Cached: meta.Cached, Err: meta.Err}
+	a.status = CatalogStatus{Source: "live", Entries: len(m), Cached: meta.Cached, Err: meta.Err, Skipped: skipped, Warn: catalogWarn(released, skipped, time.Now())}
 	a.complete = complete
 	switch {
 	case meta.Stale:
@@ -274,29 +290,31 @@ func (a *Adapter) fetchEPSSBatch(ctx context.Context, ids []string, out map[stri
 }
 
 // ParseKEV is the PURE decode of a KEV feed into a lookup map keyed by UPPER-cased
-// CVE (no network). A row without a valid CVE id is skipped.
+// CVE (no network). A row that is not an object or whose id is not a whole CVE id is skipped.
 func ParseKEV(b []byte) (map[string]KEVEntry, error) {
-	m, _, err := parseKEVCatalog(b)
+	m, _, _, _, err := parseKEVCatalog(b)
 	return m, err
 }
 
-// parseKEVCatalog is ParseKEV plus whether the catalog proves itself whole: it has as many
-// rows as the count it states, each row exactly one CVE id, no id repeated (a null,
-// id-less, multi-id or repeated row leaves it unproven).
-func parseKEVCatalog(b []byte) (map[string]KEVEntry, bool, error) {
+// parseKEVCatalog is ParseKEV plus what the catalog says about itself: whether it proves
+// itself whole (as many rows as the count it states, each row exactly one CVE id, no id
+// repeated), how many rows it skipped, and its stated release date ("" when it states none).
+func parseKEVCatalog(b []byte) (map[string]KEVEntry, bool, int, string, error) {
 	var doc kevDoc
 	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, false, err
+		return nil, false, 0, "", err
 	}
+	var released string
+	_ = json.Unmarshal(doc.DateReleased, &released) // not a string: stated as no date
 	out := make(map[string]KEVEntry, len(doc.Vulnerabilities))
-	exact := 0
-	for _, r := range doc.Vulnerabilities {
-		id := normalizeCVE(r.CveID)
-		if id == "" {
+	skipped := 0
+	for _, raw := range doc.Vulnerabilities {
+		var r kevRow
+		_ = json.Unmarshal(raw, &r) // a mistyped field costs that field; a row with no readable id is skipped below
+		id := strings.ToUpper(strings.TrimFunc(r.CveID, invisible))
+		if !cveIDRe.MatchString(id) {
+			skipped++
 			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(r.CveID), id) {
-			exact++
 		}
 		out[id] = KEVEntry{
 			CVE:           id,
@@ -306,11 +324,38 @@ func parseKEVCatalog(b []byte) (map[string]KEVEntry, bool, error) {
 			DateAdded:     strings.TrimSpace(r.DateAdded),
 			// Only an explicit "Known" counts as ransomware; "Unknown"/empty stays
 			// false — never recklessly guess true.
-			Ransomware: strings.EqualFold(strings.TrimSpace(r.KnownRansomwareCampaignUse), "Known"),
+			Ransomware:     strings.EqualFold(strings.TrimSpace(r.KnownRansomwareCampaignUse), "Known"),
+			DueDate:        strings.TrimSpace(r.DueDate),
+			RequiredAction: strings.TrimSpace(r.RequiredAction),
+			CWE:            lenientCWEs(r.CWEs),
 		}
 	}
 	rows := len(doc.Vulnerabilities)
-	return out, doc.Count != nil && *doc.Count == rows && exact == rows && len(out) == rows, nil
+	return out, doc.Count != nil && *doc.Count == rows && len(out) == rows, skipped, strings.TrimSpace(released), nil
+}
+
+// staleAfter: the catalog is released several times a week, so a month without one means a feed that stopped.
+const staleAfter = 30 * 24 * time.Hour
+
+// catalogWarn names what in an in-use catalog needs a look as of now: a release date that is
+// missing, unreadable, ahead of the clock or older than staleAfter, and rows it skipped.
+func catalogWarn(released string, skipped int, now time.Time) string {
+	var w []string
+	t, err := time.Parse(time.RFC3339, released)
+	switch {
+	case released == "":
+		w = append(w, "catalog states no release date")
+	case err != nil:
+		w = append(w, "catalog release date unreadable: "+released)
+	case t.After(now.Add(24 * time.Hour)): // a day of slack for clock skew
+		w = append(w, "catalog release date is in the future: "+released)
+	case now.Sub(t) > staleAfter:
+		w = append(w, fmt.Sprintf("catalog released %s, %d days ago", released, int(now.Sub(t).Hours()/24)))
+	}
+	if skipped > 0 {
+		w = append(w, fmt.Sprintf("%d rows skipped (not an object, or no well-formed CVE id)", skipped))
+	}
+	return strings.Join(w, "; ")
 }
 
 // ParseEPSS is the PURE decode of a FIRST.org EPSS response into Signals carrying
@@ -358,6 +403,9 @@ func PriorityFor(s Signal) string {
 // "SRV-CVE-CVE-2021-23017". A "CVE-" not followed by 4 digits simply does not match.
 var cveRe = regexp.MustCompile(`(?i)CVE-\d{4}-\d+`)
 
+// cveIDRe is a whole, UPPER-cased CVE id: a catalog row is keyed by its id, never by an id found inside it.
+var cveIDRe = regexp.MustCompile(`^CVE-\d{4}-\d+$`)
+
 // ExtractCVEs pulls EVERY CVE id out of the given strings (finding ids, details),
 // UPPER-cased and deduped, in first-appearance order (deterministic, stable logs).
 func ExtractCVEs(texts ...string) []string {
@@ -400,4 +448,22 @@ func normalizeCVEs(cves []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// lenientCWEs reads the catalog's weakness list, comma-joined; "" when it is not one.
+func lenientCWEs(raw json.RawMessage) string {
+	var list []string
+	if json.Unmarshal(raw, &list) != nil {
+		return ""
+	}
+	return strings.Join(unified.CWEIDs(list), ",")
+}
+
+// invisible is whitespace or a format character (zero-width space, BOM) that can wrap an id in hand-edited data.
+func invisible(r rune) bool { return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) }
+
+// markKEV records on s that its CVE is in KEV, with what the entry says about it.
+func markKEV(s *Signal, e KEVEntry) {
+	s.InKEV, s.Ransomware = true, e.Ransomware
+	s.DueDate, s.RequiredAction, s.CWE = e.DueDate, e.RequiredAction, e.CWE
 }
