@@ -2,12 +2,12 @@
 // to its KNOWN vulnerabilities using the Retire.js repository. It is a NEW intel
 // domain alongside cve/kev/wpcve, and it owns ONLY half of what Retire.js does:
 //
-//	Retire.js ships (a) fingerprints that recognize which library a script is, and
-//	(b) a library+version → known-vulnerability table. sigforge's matcher already
-//	performs (a), so this package deliberately does ONLY (b): given a (library,
-//	version) the matcher produced, it returns the published vulnerabilities (CVE ids,
-//	severity, affected range). The Retire.js `extractors` (the fingerprint half) are
-//	ignored on decode — part (a) is not rebuilt here.
+//	Retire.js ships (a) fingerprints — `extractors` — that recognize which library a
+//	script is, and (b) a library+version → known-vulnerability table. Lookup does (b):
+//	given a (library, version), it returns the published vulnerabilities (CVE ids,
+//	severity, affected range). Identify does (a) with the repository's own extractors
+//	over a script's URL, file name and content, so the libraries recognized grow with
+//	the data instead of with hand-written patterns.
 //
 // One source, supplied by the operator as a URL (never hardcoded, off by default):
 //
@@ -46,6 +46,10 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"net/url"
+	"path"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -228,10 +232,88 @@ type repoVuln struct {
 	} `json:"identifiers"`
 }
 
-// libEntry is one library's record. Only `vulnerabilities` is decoded; the Retire.js
-// `extractors` (the fingerprint half, part (a)) are intentionally ignored here.
+// libEntry is one library's record: its vulnerabilities, and the extractors that recognize it
+// (the static kinds; `func` and `hashes` need a JavaScript runtime or the exact file and are not used).
 type libEntry struct {
 	Vulnerabilities []repoVuln `json:"vulnerabilities"`
+	Extractors      struct {
+		URI         []string `json:"uri"`
+		Filename    []string `json:"filename"`
+		FileContent []string `json:"filecontent"`
+	} `json:"extractors"`
+	match [3][]*regexp.Regexp // compiled uri, filename, filecontent extractors
+}
+
+// extractorKinds names the compiled extractor kinds in libEntry.match order.
+var extractorKinds = [3]string{"uri", "filename", "filecontent"}
+
+// retireVersion is what Retire.js puts in place of §§version§§ in an extractor.
+const retireVersion = `[0-9][0-9.a-z_\-]+`
+
+// compileExtractors builds a library's extractors; one Go cannot compile (a JavaScript-only
+// construct such as a look-ahead) is skipped, never failing the repository.
+func (e *libEntry) compileExtractors() {
+	for i, pats := range [3][]string{e.Extractors.URI, e.Extractors.Filename, e.Extractors.FileContent} {
+		for _, p := range pats {
+			if re, err := regexp.Compile(strings.ReplaceAll(p, "§§version§§", retireVersion)); err == nil && re.NumSubexp() > 0 {
+				e.match[i] = append(e.match[i], re)
+			}
+		}
+	}
+}
+
+// Found is a library a script reveals to the repository's extractors.
+type Found struct {
+	Library string // the repository's name for it
+	Version string
+	Via     string // "uri", "filename" or "filecontent"
+}
+
+// Identify names the libraries — with their versions — a script reveals to the repository's own
+// extractors: its URL, its file name, or its content (content may be "", not fetched). Each library
+// is named once, from the first way that shows it. The repository is loaded once per Adapter, as for
+// Lookup; past that it is pure.
+func (a *Adapter) Identify(ctx context.Context, scriptURL, content string) []Found {
+	repo, _, _ := a.loadRepo(ctx)
+	return identify(repo, scriptURL, content)
+}
+
+func identify(repo map[string]libEntry, scriptURL, content string) []Found {
+	file := scriptURL
+	if u, err := url.Parse(scriptURL); err == nil && u.Path != "" {
+		file = path.Base(u.Path)
+	}
+	names := make([]string, 0, len(repo))
+	for name := range repo {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []Found
+	for _, name := range names {
+		e := repo[name]
+	kinds:
+		for i, input := range [3]string{scriptURL, file, content} {
+			if input == "" {
+				continue
+			}
+			for _, re := range e.match[i] {
+				if m := re.FindStringSubmatch(input); m != nil {
+					if v := cleanFoundVersion(m[1]); v != "" {
+						out = append(out, Found{Library: name, Version: v, Via: extractorKinds[i]})
+						break kinds
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// cleanFoundVersion drops what the version pattern can swallow past the version: a ".min"/"-min"
+// suffix of a minified file name, and trailing separators.
+func cleanFoundVersion(v string) string {
+	v = strings.TrimSuffix(strings.TrimSuffix(v, ".min"), "-min")
+	return strings.TrimRight(v, ".-_")
 }
 
 // ParseRepo is the PURE decode of a Retire.js repository body into a lookup map keyed
@@ -248,6 +330,7 @@ func ParseRepo(b []byte) (map[string]libEntry, error) {
 		if key == "" {
 			continue
 		}
+		e.compileExtractors()
 		out[key] = e
 	}
 	return out, nil
