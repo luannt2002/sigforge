@@ -43,8 +43,10 @@ importing sigforge does.
 
 | command | what it does |
 |---|---|
-| `refresh --out DB …` | `merge` behind a regression gate: re-syncs only if no entry is lost beyond `--allow-removed N`, else keeps the current DB and exits non-zero |
+| `refresh --out DB …` | `merge` behind a regression gate: re-syncs only if no entry is lost beyond `--allow-removed N` and no kept tech loses its verified CPE, version-capturing signal or every detection channel (`--allow-removed` never relaxes these), else keeps the current DB and exits non-zero |
 | `sync [--osv ECOSYSTEM …]` | refreshes every configured catalog (KEV, endoflife bundle, CPE dictionary, Retire.js) and the named OSV dumps into `SIGFORGE_CACHE_DIR`, cutting each dump's index once; with `SIGFORGE_CACHE_MAX_AGE` later runs read the store with no request |
+| `sources [--max-age D]` | each source the last `sync` left (it keeps `sync-status.json` in the store): ok · FAILED with why · never synced · off; exits 1 when a source in use is failing, never synced or older than `D` |
+| `watch --state FILE [--fail-on-new] [--package REF …] [--sbom FILE] [--wp-plugin …] [--jslib …]` | re-checks an inventory against the sources as they are now and names what changed since its last run: `NEW` (a new advisory for something in use) and `GONE` (one an answer from the source's whole data — an OSV dump read whole — no longer lists); `UNCHECKED` when a source did not answer, or when its answer cannot rule out a recorded lead it leaves out (data it cannot prove whole — WordPress, JavaScript, an OSV dump with an unreadable entry — or a version it could not compare): the lead is kept, not reported gone; an identity with leads that is no longer in the inventory is `REMOVED` (its leads leave the state; listed again, they are `NEW`); an identity's first answer is recorded (`FIRST`), not new — on the first run, after a run nothing answered, or for a package added later; a run no source answered for anything exits 1 and leaves an existing state file as it was; `--fail-on-new` exits 1 on a NEW lead. A run with nothing to look up (no inventory flag, an empty `--sbom` value, an SBOM without components) names no change, exits 1 and leaves the state file as it was. It reads the store `sync` keeps (a stored source up to a day old when `SIGFORGE_CACHE_MAX_AGE` is unset); without `SIGFORGE_CACHE_DIR` every run downloads each OSV dump whole |
 | `verify FILE` / `rollback FILE` | checks a DB against its `.sha256` sidecar, schema and manifest / restores the prior valid snapshot |
 | `diff OLD NEW` | what a re-sync added, removed or changed |
 | `eol [--explain] TECH VERSION` · `cve [--explain] CPE VERSION` | one end-of-life / CVE lookup, with the reasoning on `--explain` |
@@ -54,6 +56,50 @@ importing sigforge does.
 
 Every intel source is off until its `SIGFORGE_SOURCE_*_URL` is set (see
 `.env.example`); an off source answers `not_checked`, never "clean".
+A repeatable flag given a value that names nothing — empty, blank, or a version with no name
+(`--jslib @3.1.0`), as an unset variable leaves it — is refused with the flag's name before
+anything is looked up or written.
+
+### 3.2 Keeping the sources current
+
+Nothing runs by itself: schedule `sync` and watch `sources`. A source that did not change
+answers 304 (one small request); the OSV bucket marks its files `max-age=3600`, KEV's GitHub
+mirror `max-age=300`, so an hourly sync is the natural pace. With systemd (user units):
+
+```ini
+# ~/.config/systemd/user/sigforge-sync.service
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/sigforge/env        # SIGFORGE_CACHE_DIR, SIGFORGE_SOURCE_*_URL (SIGFORGE_CACHE_MAX_AGE optional)
+ExecStart=%h/bin/sigforge sync --osv npm --osv PyPI --osv Debian
+ExecStartPost=%h/bin/sigforge sources --max-age 26h
+ExecStartPost=%h/bin/sigforge watch --state %h/.local/state/sigforge/watch.json --sbom %h/inventory.cdx.json --fail-on-new
+
+# ~/.config/systemd/user/sigforge-sync.timer
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10m
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+`systemctl --user enable --now sigforge-sync.timer`; a failing or stale source fails the unit,
+so `systemctl --user status sigforge-sync` (or any monitor reading the exit code) shows it — and so
+does a new advisory for the inventory: `watch` re-checks it after each sync (an hourly OSV sync
+brings in what changed within the hour), reading the store sync just filled with no request, and
+fails on a NEW lead. This is how a new CVE reaches the assets it touches without a rescan.
+An OSV dump already in the store is not downloaded again each hour (OSV rebuilds its dumps all
+the time, so asking for one again would almost always mean its whole size): `sync` reads the head
+of `<ecosystem>/modified_id.csv` down to the last record it fetched and fetches each changed
+record on its own into an overlay beside the dump (measured 09/11/2026: npm 3 records in the last
+hour, 13 in a day, against a 220 MB dump). Runs read the dump's index with the overlay on top. The
+dump is taken whole again after a day, or when more than 500 records changed.
+
+Without systemd, a cron line does the same: `17 * * * * . ~/.config/sigforge/env && sigforge
+sync --osv npm --osv PyPI --osv Debian && sigforge sources --max-age 26h && sigforge watch --state
+~/.local/state/sigforge/watch.json --sbom ~/inventory.cdx.json --fail-on-new`. Scans then set `SIGFORGE_CACHE_MAX_AGE` (e.g. `2h`) to
+read the synced store with no request.
 
 ## 4. Definition of Done
 

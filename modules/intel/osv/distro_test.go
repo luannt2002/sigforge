@@ -525,3 +525,31 @@ func TestListedVersionNeedsTrueEquality(t *testing.T) {
 		}
 	}
 }
+
+// PyPI names compare as PEP 503 normalizes them (runs of -, _ and . are one -), so an advisory filed
+// under "python_jose" reaches "python-jose"; npm keeps them apart (lodash.merge is not lodash-merge).
+func TestPyPINamesNormalizeLikePEP503(t *testing.T) {
+	adv := func(eco, name string) string {
+		return `{"id":"X-1","affected":[{"package":{"name":"` + name + `","ecosystem":"` + eco + `"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"9.9"}]}]}]}`
+	}
+	if u := ToUnified(buildIdx(t, "PyPI", map[string]string{"PyPI/X-1.json": adv("PyPI", "Python_Jose")}).Lookup("python-jose", "3.3.0"), "PyPI", "python-jose", "3.3.0", time.Time{}); u.State != unified.StateAffectedByAdvisory {
+		t.Errorf("PyPI python_jose vs python-jose: %v, want affected", u.State)
+	}
+	if u := ToUnified(buildIdx(t, "npm", map[string]string{"npm/X-1.json": adv("npm", "lodash.merge")}).Lookup("lodash-merge", "3.3.0"), "npm", "lodash-merge", "3.3.0", time.Time{}); u.State == unified.StateAffectedByAdvisory {
+		t.Errorf("npm lodash.merge reached lodash-merge")
+	}
+}
+
+// A withdrawal dated in the future has not happened yet: the advisory still holds. A dump entry
+// that is not a JSON record counts as unreadable — the dump is not provably whole.
+func TestFutureWithdrawalAndNonJSONEntries(t *testing.T) {
+	future := `{"id":"X-1","withdrawn":"2999-01-01T00:00:00Z","affected":[{"package":{"name":"lodash","ecosystem":"npm"},` +
+		`"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"9.9.9"}]}]}]}`
+	if u := ToUnified(buildIdx(t, "npm", map[string]string{"npm/X-1.json": future}).Lookup("lodash", "4.17.21"), "npm", "lodash", "4.17.21", time.Time{}); u.State != unified.StateAffectedByAdvisory {
+		t.Errorf("a withdrawal in the future dropped the advisory: %v", u.State)
+	}
+	idx := buildIdx(t, "npm", map[string]string{"npm/GHSA-35jh-r3h4-6jhm.json": advLodash, "npm/X-2": `{"id":"X-2"}`})
+	if res := idx.Lookup("lodash", "4.17.21"); !res.Partial {
+		t.Error("an entry without the .json suffix was skipped without being counted")
+	}
+}

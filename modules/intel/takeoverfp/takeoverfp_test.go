@@ -13,9 +13,9 @@ import (
 const testJSON = `[
   {"service":"AWS/S3","cname":["s3.amazonaws.com"],"fingerprint":"The specified bucket does not exist","vulnerable":true,"status":"Vulnerable"},
   {"service":"Ghost","cname":["ghost.io"],"fingerprint":"Site unavailable\\.&#124;Failed to resolve DNS path for this host","vulnerable":true,"status":"Vulnerable"},
-  {"service":"AWS/Elastic Beanstalk","cname":["elasticbeanstalk.com"],"fingerprint":"NXDOMAIN","vulnerable":true,"status":"Vulnerable"},
+  {"service":"AWS/Elastic Beanstalk","cname":["elasticbeanstalk.com"],"fingerprint":"NXDOMAIN","nxdomain":true,"vulnerable":true,"status":"Vulnerable"},
   {"service":"LaunchRock","cname":["launchrock.com"],"fingerprint":"HTTP_STATUS=500","vulnerable":true,"status":"Vulnerable"},
-  {"service":"AWS/Load Balancer (ELB)","cname":["elb.amazonaws.com"],"fingerprint":"NXDOMAIN","vulnerable":false,"status":"Not vulnerable"},
+  {"service":"AWS/Load Balancer (ELB)","cname":["elb.amazonaws.com"],"fingerprint":"NXDOMAIN","nxdomain":true,"vulnerable":false,"status":"Not vulnerable"},
   {"service":"Cloudfront","cname":["cloudfront.net"],"fingerprint":"ERROR: The request could not be satisfied","vulnerable":false,"status":"Edge case"}
 ]`
 
@@ -211,6 +211,67 @@ func TestProviderNamesWithoutBody(t *testing.T) {
 	}
 	if _, ok := Provider(fps, ""); ok {
 		t.Fatal("an empty cname must not be identified")
+	}
+}
+
+// ---- NXDomain (DNS-layer signal is KEPT + flagged, not dropped) ----
+
+// AC1 + AC4: a provider whose takeover is NXDOMAIN is KEPT in the parsed table and is
+// DISTINGUISHABLE via the NXDomain flag — using only the data's own `nxdomain` field.
+func TestParseKeepsNXDomainFlag(t *testing.T) {
+	fps, err := ParseFingerprints([]byte(testJSON))
+	if err != nil {
+		t.Fatalf("ParseFingerprints: %v", err)
+	}
+	var eb, s3 *FP
+	for i := range fps {
+		switch fps[i].Service {
+		case "AWS/Elastic Beanstalk":
+			eb = &fps[i]
+		case "AWS/S3":
+			s3 = &fps[i]
+		}
+	}
+	if eb == nil {
+		t.Fatal("the NXDOMAIN provider was dropped from the table")
+	}
+	if !eb.NXDomain {
+		t.Fatal("an NXDOMAIN provider must be flagged NXDomain=true")
+	}
+	// AC2 parity: a CNAME-string provider must NOT be flagged NXDomain.
+	if s3 == nil || s3.NXDomain {
+		t.Fatalf("a body-fingerprint provider must have NXDomain=false, got %+v", s3)
+	}
+}
+
+// AC1: a consumer that observed NXDOMAIN for the CNAME gets the vulnerable provider back.
+func TestMatchNXDomainHitsVulnerableProvider(t *testing.T) {
+	fps := fixture(t)
+	fp, ok := MatchNXDomain(fps, "app.elasticbeanstalk.com.")
+	if !ok || fp.Service != "AWS/Elastic Beanstalk" {
+		t.Fatalf("want AWS/Elastic Beanstalk, got %+v ok=%v", fp, ok)
+	}
+	if !fp.NXDomain || !fp.Vulnerable {
+		t.Fatalf("returned FP must be an NXDOMAIN + vulnerable provider: %+v", fp)
+	}
+}
+
+// AC1 negative: an NXDOMAIN provider upstream marks NOT vulnerable must NOT hit (ELB),
+// and a body-fingerprint provider must NOT hit via the DNS-layer path (S3), and a CNAME
+// outside the table is no hit.
+func TestMatchNXDomainNegatives(t *testing.T) {
+	fps := fixture(t)
+	if fp, ok := MatchNXDomain(fps, "x.elb.amazonaws.com"); ok {
+		t.Fatalf("a not-vulnerable NXDOMAIN provider must not hit, got %s", fp.Service)
+	}
+	if fp, ok := MatchNXDomain(fps, "assets.s3.amazonaws.com"); ok {
+		t.Fatalf("a body-fingerprint provider must not hit via NXDomain, got %s", fp.Service)
+	}
+	if _, ok := MatchNXDomain(fps, "www.example.com"); ok {
+		t.Fatal("a CNAME outside the table must not hit")
+	}
+	if _, ok := MatchNXDomain(fps, ""); ok {
+		t.Fatal("an empty cname must not hit")
 	}
 }
 

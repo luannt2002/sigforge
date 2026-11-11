@@ -29,6 +29,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/luannt2002/sigforge/modules/intel/feedset"
@@ -74,6 +75,10 @@ func main() {
 		err = cmdMerge(os.Args[2:])
 	case "sync":
 		err = cmdSync(os.Args[2:])
+	case "sources":
+		err = cmdSources(os.Args[2:])
+	case "watch":
+		err = cmdWatch(os.Args[2:])
 	case "refresh":
 		err = cmdRefresh(os.Args[2:])
 	case "validate":
@@ -118,6 +123,8 @@ usage:
   sigforge merge --out DB [--source name=path ...] [--fetch name[=url] ...] [--manifest FILE]
   sigforge refresh --out DB [--source ...] [--fetch ...] [--allow-removed N]   (re-sync only if no regression; else keep current, exit non-zero)
   sigforge sync [--osv ECOSYSTEM ...]   (refresh every configured catalog, and the named OSV dumps, into SIGFORGE_CACHE_DIR; with SIGFORGE_CACHE_MAX_AGE later runs use it with no request)
+  sigforge sources [--max-age D]   (each source the last sync left: ok / FAILED (why) / never synced / off; exit 1 when one in use is failing or older than D)
+  sigforge watch --state FILE [--fail-on-new] [--package REF ...] [--sbom FILE] [--wp-plugin ...] [--jslib ...]   (re-check an inventory after sync: NEW / GONE leads since the last run)
   sigforge validate FILE
   sigforge verify FILE   (checks the DB against its <FILE>.sha256 sidecar + schema + <FILE>.manifest.json compat)
   sigforge rollback FILE (restores the prior snapshot from <FILE>.prev*, if valid)
@@ -411,9 +418,9 @@ func runFetches(fetches fetchFlag, manifestPath string) ([]merge.Source, *source
 // sources + fetch path as `merge`) in memory, validate it, diff it against the live DB
 // at --out, and publish ONLY when no regression is found. A candidate that is schema-
 // invalid, or that would drop fingerprints past --allow-removed, or that would strip a
-// kept tech's CPE or version signal, is refused: the live DB is left untouched and the
-// command exits non-zero, printing exactly what regressed. Nothing is written until the
-// gate passes, so a bad re-sync can never overwrite good data.
+// kept tech's CPE, version signal or every detection channel, is refused: the live DB is
+// left untouched and the command exits non-zero, printing exactly what regressed. Nothing
+// is written until the gate passes, so a bad re-sync can never overwrite good data.
 func cmdRefresh(args []string) error {
 	fs := flag.NewFlagSet("refresh", flag.ContinueOnError)
 	out := fs.String("out", "", "the live DB to refresh in place (required)")
@@ -816,6 +823,30 @@ const EnvCacheDir = feedset.EnvCacheDir
 // its source (a Go duration, e.g. 24h). Unset = every run asks (304 when unchanged).
 const EnvCacheMaxAge = feedset.EnvCacheMaxAge
 
+// syncCatalog stores one catalog and returns its size. The CPE dictionary may outgrow the in-memory
+// body cap, so it is streamed to the store — as the identity resolver itself reads it — like an OSV dump.
+func syncCatalog(ctx context.Context, client *fetch.Client, env, u string) (int64, error) {
+	if env != identity.EnvCPEDictURL {
+		b, err := client.Get(ctx, u)
+		return int64(len(b)), err
+	}
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	path, meta, release, err := client.Download(dctx, u, 2<<30)
+	defer release()
+	if err == nil && meta.Stale {
+		err = errors.New(meta.Err) // the store kept its copy, but the source did not answer
+	}
+	if err != nil {
+		return 0, err
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return st.Size(), nil
+}
+
 // syncSources are the catalogs a run loads whole and once — the ones a synced store can
 // serve with no request. Per-query sources (CVE, per-product EOL, EPSS) are not here.
 var syncSources = []struct{ name, env string }{
@@ -846,6 +877,8 @@ func cmdSync(args []string) error {
 	}
 	ctx := context.Background()
 	var configured, failed int
+	outcomes := map[string]error{}
+	defer func() { recordSyncStatus(client.CacheDir, outcomes) }()
 	for _, s := range syncSources {
 		u := strings.TrimSpace(os.Getenv(s.env))
 		if u == "" {
@@ -853,13 +886,14 @@ func cmdSync(args []string) error {
 			continue
 		}
 		configured++
-		b, err := client.Get(ctx, u)
+		size, err := syncCatalog(ctx, client, s.env, u)
+		outcomes[s.name] = err
 		if err != nil {
 			failed++
 			fmt.Printf("  %-22s FAILED: %v\n", s.name, err)
 			continue
 		}
-		fmt.Printf("  %-22s ok — %d bytes in the store\n", s.name, len(b))
+		fmt.Printf("  %-22s ok — %d bytes in the store\n", s.name, size)
 	}
 	for _, eco := range osvEcos {
 		name := "OSV " + eco
@@ -870,6 +904,7 @@ func cmdSync(args []string) error {
 		}
 		configured++
 		n, err := osv.New(u, client).Sync(ctx, eco)
+		outcomes[name] = err
 		if err != nil {
 			failed++
 			fmt.Printf("  %-22s FAILED: %v\n", name, err)
@@ -917,8 +952,17 @@ func requestsNote(stats map[string]fetch.HostStats) string {
 // listFlag is a repeatable string flag.
 type listFlag []string
 
-func (l *listFlag) String() string     { return strings.Join(*l, ",") }
-func (l *listFlag) Set(v string) error { *l = append(*l, strings.TrimSpace(v)); return nil }
+func (l *listFlag) String() string { return strings.Join(*l, ",") }
+
+// Set refuses a value that names nothing (an unset "$NAME@$VER"): looked up, its answer would let watch drop kept leads.
+func (l *listFlag) Set(v string) error {
+	v = strings.TrimSpace(v)
+	if name, _ := splitAtVersion(v); name == "" {
+		return errors.New("empty name (an unset variable?)")
+	}
+	*l = append(*l, v)
+	return nil
+}
 
 // buildEnrichInput turns the enrich flags into the identities the page does not reveal:
 // packages of any ecosystem (purls or ecosystem:name@version, plus every component of a
@@ -968,9 +1012,9 @@ func buildEnrichInput(packages []string, sbomPath string, wpPlugins, wpThemes, j
 	return inp, skipped, nil
 }
 
-// splitAtVersion splits "name@version" at its last "@" ("@" at 0 is an npm scope).
+// splitAtVersion splits "name@version" at its last "@" ("@" at 0 is an npm scope only with a "/": "@scope/name").
 func splitAtVersion(s string) (name, version string) {
-	if at := strings.LastIndex(s, "@"); at > 0 {
+	if at := strings.LastIndex(s, "@"); at > 0 || at == 0 && !strings.Contains(s, "/") {
 		return s[:at], s[at+1:]
 	}
 	return s, ""
@@ -1002,8 +1046,8 @@ func printEnrich(results []unified.Result) {
 		}
 	}
 	c := coverage.Results(results)
-	fmt.Printf("answered %d/%d · unanswered %d (not_checked %d, source_unavailable %d, unknown_product %d, unknown_version %d) — unanswered is not clean\n",
-		c.Answered, c.Total, c.Unanswered, c.ByState["not_checked"], c.ByState["source_unavailable"],
+	fmt.Printf("looked up %d/%d · concluded %d/%d · not concluded %d (not_checked %d, source_unavailable %d, unknown_product %d, unknown_version %d) — not concluded is not clean\n",
+		c.LookedUp, c.Total, c.Answered, c.Total, c.Unanswered, c.ByState["not_checked"], c.ByState["source_unavailable"],
 		c.ByState["unknown_product"], c.ByState["unknown_version"])
 }
 

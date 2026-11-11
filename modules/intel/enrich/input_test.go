@@ -42,6 +42,25 @@ func TestParsePackageRef(t *testing.T) {
 	}
 }
 
+// "ecosystem:$NAME@$VER" with the name unset leaves no name: it is refused, as the purl form already is,
+// not looked up as a package named "@1.0". A leading "@" followed by a "/" stays an npm scope.
+func TestParsePackageRefRefusesAnEmptyName(t *testing.T) {
+	for _, in := range []string{"npm:@1.0", "npm:@", "pypi:@2.19.0", "pkg:npm/@1.0"} {
+		if got, err := ParsePackageRef(in); err == nil {
+			t.Errorf("%q: want an error, got %+v", in, got)
+		}
+	}
+	for in, want := range map[string]PkgRef{
+		"npm:@angular/core@12.0.0": {"npm", "@angular/core", "12.0.0"},
+		"npm:@angular/core":        {"npm", "@angular/core", ""},
+		"npm:lodash@":              {"npm", "lodash", ""},
+	} {
+		if got, err := ParsePackageRef(in); err != nil || got != want {
+			t.Errorf("%q = %+v, %v; want %+v", in, got, err, want)
+		}
+	}
+}
+
 // An SBOM from any tool yields every component's package (nested ones too), once each;
 // components without a purl are counted, not silently dropped.
 func TestParseCycloneDX(t *testing.T) {

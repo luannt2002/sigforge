@@ -326,3 +326,54 @@ func TestConfidenceSuffixLowersAndSums(t *testing.T) {
 		t.Fatalf("Weak = %+v ok=%v", w, ok)
 	}
 }
+
+// "Apache-Coyote/1.1" names the HTTP/1.1 connector, not the Tomcat release: it detects Tomcat with
+// no version. The default error page's "Apache Tomcat/9.0.71" is the release.
+func TestBaselineTomcatVersionIsTheReleaseNotTheConnector(t *testing.T) {
+	db, err := baseline.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := func(p Page) (string, bool) {
+		for _, d := range Match(db, p) {
+			if d.Tech == "Apache Tomcat" {
+				return d.Version, true
+			}
+		}
+		return "", false
+	}
+	if v, ok := version(Page{Headers: map[string][]string{"Server": {"Apache-Coyote/1.1"}}}); !ok || v != "" {
+		t.Errorf("Coyote banner: detected=%v version=%q, want Tomcat with no version", ok, v)
+	}
+	if v, ok := version(Page{HTML: "<h3>Apache Tomcat/9.0.71</h3>"}); !ok || v != "9.0.71" {
+		t.Errorf("error page: detected=%v version=%q, want 9.0.71", ok, v)
+	}
+}
+
+// A version is taken whole and from the thing it names: Jetty's release keeps its build qualifier
+// (9.4.51.v20230217, not "9.4.51."), a file merely containing "bootstrap" (angular-ui-bootstrap) is
+// not Bootstrap, and Tomcat's version comes from its error page heading or title, not from any sentence.
+func TestBaselineVersionsAreWholeAndOwned(t *testing.T) {
+	db, err := baseline.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ver := func(p Page, tech string) (string, bool) {
+		d, ok := find(Match(db, p), tech)
+		return d.Version, ok
+	}
+	if v, _ := ver(Page{Headers: map[string][]string{"Server": {"Jetty(9.4.51.v20230217)"}}}, "Jetty"); v != "9.4.51.v20230217" {
+		t.Errorf("Jetty version = %q, want 9.4.51.v20230217", v)
+	}
+	if v, ok := ver(Page{ScriptSrcs: []string{"https://cdn.example/js/angular-ui-bootstrap-2.5.0.min.js"}}, "Bootstrap"); ok {
+		t.Errorf("angular-ui-bootstrap read as Bootstrap %q", v)
+	}
+	if v, _ := ver(Page{ScriptSrcs: []string{"https://cdn.example/js/bootstrap-4.6.2.min.js"}}, "Bootstrap"); v != "4.6.2" {
+		t.Errorf("bootstrap-4.6.2.min.js = %q, want 4.6.2", v)
+	}
+	for _, html := range []string{"<p>We migrated from Apache Tomcat/10.1.0 last year.</p>", "<p>Apache Tomcat/10.1.0</p>"} {
+		if v, ok := ver(Page{HTML: html}, "Apache Tomcat"); ok {
+			t.Errorf("%q gave Tomcat version %q", html, v)
+		}
+	}
+}
