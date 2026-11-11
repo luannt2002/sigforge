@@ -141,3 +141,29 @@ func TestHasDetection(t *testing.T) {
 		}
 	}
 }
+
+// requires/requiresCategory/excludes keep their Wappalyzer JSON names through a parse/render
+// round trip (requires also in its string form) and, being conditions on other detections,
+// never count as a detection channel.
+func TestConditionsRoundTripAndAreNotDetection(t *testing.T) {
+	db, err := Parse([]byte(`{"schema_version":"1.0.0","fingerprints":{"Gated":{"requires":"WordPress","requiresCategory":[6],"excludes":["Other"]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := back.Fingerprints["Gated"]
+	got, _ := json.Marshal(fp)
+	if want := `{"requires":["WordPress"],"requiresCategory":[6],"excludes":["Other"]}`; string(got) != want {
+		t.Errorf("round trip = %s, want %s", got, want)
+	}
+	if fp.HasDetection() {
+		t.Error("conditions alone must not count as a detection channel")
+	}
+}

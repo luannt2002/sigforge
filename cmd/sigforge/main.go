@@ -729,6 +729,9 @@ func cmdMatch(args []string) error {
 		if d.Provenance != "" {
 			fmt.Printf(", %s/%s", d.Provenance, orDash(d.License))
 		}
+		if len(d.ExcludedBy) > 0 { // the lead is kept, so the contradiction must be visible
+			fmt.Printf(", excluded by %s", strings.Join(d.ExcludedBy, ", "))
+		}
 		fmt.Println(")")
 		if !*explain {
 			continue

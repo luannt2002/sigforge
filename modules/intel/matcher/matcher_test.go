@@ -2,6 +2,8 @@ package matcher
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/luannt2002/sigforge/modules/intel/baseline"
@@ -374,6 +376,250 @@ func TestBaselineVersionsAreWholeAndOwned(t *testing.T) {
 	for _, html := range []string{"<p>We migrated from Apache Tomcat/10.1.0 last year.</p>", "<p>Apache Tomcat/10.1.0</p>"} {
 		if v, ok := ver(Page{HTML: html}, "Apache Tomcat"); ok {
 			t.Errorf("%q gave Tomcat version %q", html, v)
+		}
+	}
+}
+
+// parse builds a DB from Wappalyzer-shaped JSON, so a test goes through the on-disk field
+// names (requires / requiresCategory / excludes) a source actually writes.
+func parse(t *testing.T, fingerprints string) *schema.DB {
+	t.Helper()
+	d, err := schema.Parse([]byte(`{"schema_version":"1.0.0","fingerprints":` + fingerprints + `}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// detected lists the detected techs sorted by name; an implied one (no evidence) is marked "*"
+// and a labeled one is followed by its JSON excludedBy, e.g. "B<A,C" — the key a consumer reads.
+func detected(dets []Detection) string {
+	out := make([]string, 0, len(dets))
+	for _, d := range dets {
+		n := d.Tech
+		if len(d.Evidence) == 0 {
+			n += "*"
+		}
+		b, _ := json.Marshal(d)
+		var label struct {
+			ExcludedBy []string `json:"excludedBy"`
+		}
+		_ = json.Unmarshal(b, &label)
+		if len(label.ExcludedBy) > 0 {
+			n += "<" + strings.Join(label.ExcludedBy, ",")
+		}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return strings.Join(out, " ")
+}
+
+// A tech with requires counts only once a tech it requires is resolved, detected or implied.
+// Like Wappalyzer, any one of several required techs suffices, and chains settle.
+func TestRequiresGatesDetection(t *testing.T) {
+	d := parse(t, `{
+		"WordPress": {"meta": {"generator": "^WordPress"}},
+		"WP Plugin": {"html": "wp-plugin-marker", "implies": "WordPress"},
+		"Joomla":    {"meta": {"generator": "^Joomla"}},
+		"Dependent": {"html": "dependent-marker", "requires": ["WordPress"]},
+		"Child":     {"html": "child-marker", "requires": "Dependent"},
+		"Either":    {"html": "either-marker", "requires": ["Joomla", "WordPress"]}
+	}`)
+	wp := `<meta name="generator" content="WordPress 6.5">`
+	cases := []struct{ name, html, want string }{
+		{"required tech absent", `dependent-marker child-marker either-marker`, ""},
+		{"required tech detected", wp + `dependent-marker`, "Dependent WordPress"},
+		{"required tech implied", `wp-plugin-marker dependent-marker`, "Dependent WP Plugin WordPress*"},
+		{"chain settles", wp + `dependent-marker child-marker`, "Child Dependent WordPress"},
+		{"chain without its root", `dependent-marker child-marker`, ""},
+		{"any one required tech suffices", wp + `either-marker`, "Either WordPress"},
+	}
+	for _, c := range cases {
+		if got := detected(Match(d, Page{HTML: c.html})); got != c.want {
+			t.Errorf("%s: detected %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// A resolved tech labels, never drops, each tech it excludes (house rule: no lead is dropped or
+// hidden). The excluded tech stays with excludedBy whether present directly or implied, an
+// implied excluder labels too, a tech present only through implies from labeled techs inherits
+// their label, a labeled tech still meets a requires gate (an edition that requires and excludes
+// its base stays unlabeled: a tech never labels itself), and without the excluder nothing is labeled.
+func TestExcludesLabelsExcludedTech(t *testing.T) {
+	d := parse(t, `{
+		"A":       {"html": "a-marker", "excludes": ["B"]},
+		"B":       {"html": "b-marker", "implies": "BLang"},
+		"BLang":   {},
+		"C":       {"html": "c-marker", "implies": "B"},
+		"D":       {"html": "d-marker", "implies": "BLang"},
+		"E":       {"html": "e-source", "implies": "A"},
+		"Base":    {"html": "base-marker"},
+		"Edition": {"html": "edition-marker", "requires": ["Base"], "excludes": ["Base"]}
+	}`)
+	cases := []struct{ name, html, want string }{
+		{"excluder absent", `b-marker`, "B BLang*"},
+		{"excluder detected", `a-marker b-marker`, "A B<A BLang*<A"},
+		{"excluded tech present through implies", `a-marker c-marker`, "A B*<A BLang*<A C"},
+		{"implied tech also supported by an unlabeled tech", `a-marker b-marker d-marker`, "A B<A BLang* D"},
+		{"implied excluder", `e-source b-marker`, "A* B<A BLang*<A E"},
+		{"edition labels the base it requires", `base-marker edition-marker`, "Base<Edition Edition"},
+		{"edition without its base", `edition-marker`, ""},
+	}
+	for _, c := range cases {
+		if got := detected(Match(d, Page{HTML: c.html})); got != c.want {
+			t.Errorf("%s: detected %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The label only adds excludedBy: the excluded tech keeps its confidence, version and evidence,
+// and an unlabeled detection's JSON carries no excludedBy key.
+func TestExcludedTechKeepsItsLead(t *testing.T) {
+	d := parse(t, `{
+		"A": {"html": "a-marker", "excludes": ["B"]},
+		"B": {"html": "b-marker-([\\d.]+)\\;version:\\1\\;confidence:60"}
+	}`)
+	alone, _ := find(Match(d, Page{HTML: `b-marker-1.2`}), "B")
+	excluded, ok := find(Match(d, Page{HTML: `a-marker b-marker-1.2`}), "B")
+	if !ok {
+		t.Fatal("an excluded tech must stay in the result")
+	}
+	plain, _ := json.Marshal(alone)
+	if strings.Contains(string(plain), "excludedBy") {
+		t.Fatalf("an unlabeled detection carries excludedBy: %s", plain)
+	}
+	b, _ := json.Marshal(excluded)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(b, &fields)
+	if got := string(fields["excludedBy"]); got != `["A"]` {
+		t.Errorf(`excludedBy = %s, want ["A"]`, got)
+	}
+	delete(fields, "excludedBy")
+	rest, _ := json.Marshal(fields)
+	var want map[string]json.RawMessage
+	_ = json.Unmarshal(plain, &want)
+	if wantJSON, _ := json.Marshal(want); string(rest) != string(wantJSON) {
+		t.Errorf("labeling changed the lead:\n got  %s\n want %s", rest, wantJSON)
+	}
+}
+
+// Techs that exclude each other, all detected, are all kept and each labeled with the others
+// (real data: Angular/AngularJS, Lodash/Underscore.js) — the same on every run, no order decides.
+func TestMutualExcludesLabelBoth(t *testing.T) {
+	d := parse(t, `{
+		"Alpha": {"html": "alpha-marker", "excludes": ["Beta"]},
+		"Beta":  {"html": "beta-marker", "excludes": ["Alpha", "Gamma"]},
+		"Gamma": {"html": "gamma-marker", "excludes": ["Beta"]}
+	}`)
+	for i := 0; i < 50; i++ {
+		if got := detected(Match(d, Page{HTML: `alpha-marker beta-marker gamma-marker`})); got != "Alpha<Beta Beta<Alpha,Gamma Gamma<Beta" {
+			t.Fatalf("run %d: detected %q, want all three, each labeled", i, got)
+		}
+	}
+}
+
+// A tech never labels itself: not through its own excludes, and not by inheriting a label that
+// names it (A implies B, B excludes A, B present only through A: A carries B, B carries nothing).
+func TestTechNeverLabelsItself(t *testing.T) {
+	d := parse(t, `{
+		"A":    {"html": "a-marker", "implies": "B"},
+		"B":    {"excludes": ["A"]},
+		"Self": {"html": "self-marker", "excludes": ["Self"]}
+	}`)
+	cases := []struct{ name, html, want string }{
+		{"inherited label names the tech itself", `a-marker`, "A<B B*"},
+		{"tech excluding itself", `self-marker`, "Self"},
+	}
+	for _, c := range cases {
+		if got := detected(Match(d, Page{HTML: c.html})); got != c.want {
+			t.Errorf("%s: detected %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// requiresCategory is met by the cats of a resolved tech, an implied one included.
+func TestRequiresCategoryGatesDetection(t *testing.T) {
+	d := parse(t, `{
+		"Shop":     {"cats": [6], "headers": {"X-Shop": ""}},
+		"Theme":    {"cats": [80], "html": "shop-theme-marker", "implies": "Shop"},
+		"Blog":     {"cats": [1], "headers": {"X-Blog": ""}},
+		"Payments": {"cats": [41], "html": "pay-widget", "requiresCategory": [6]}
+	}`)
+	cases := []struct {
+		name string
+		page Page
+		want string
+	}{
+		{"no tech in the category", Page{HTML: "pay-widget", Headers: map[string][]string{"X-Blog": {"1"}}}, "Blog"},
+		{"tech in the category", Page{HTML: "pay-widget", Headers: map[string][]string{"X-Shop": {"1"}}}, "Payments Shop"},
+		{"implied tech in the category", Page{HTML: "shop-theme-marker pay-widget"}, "Payments Shop* Theme"},
+	}
+	for _, c := range cases {
+		if got := detected(Match(d, c.page)); got != c.want {
+			t.Errorf("%s: detected %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// A gated tech's own match never resolves its own requirement: not when it implies the very
+// tech it requires (real data: Quasar requires and implies Vue.js), nor when its own category is
+// the required one; with the requirement on the page it counts. A gated tech another resolved
+// tech implies is returned, as an implied detection, even when its requirement is not resolved.
+func TestGatedTechDoesNotMeetItsOwnRequirement(t *testing.T) {
+	d := parse(t, `{
+		"Vue":    {"html": "vue-marker"},
+		"Quasar": {"html": "quasar-marker", "requires": ["Vue"], "implies": "Vue"},
+		"Plugin": {"html": "plugin-marker", "implies": "Quasar"},
+		"Shop":   {"cats": [6], "html": "shopcat-marker", "requiresCategory": [6]},
+		"Dep":    {"html": "dep-marker", "requires": ["Vue"]},
+		"DepImplier": {"html": "depimplier-marker", "implies": "Dep"}
+	}`)
+	cases := []struct{ name, html, want string }{
+		{"own match implies its requirement", `quasar-marker`, ""},
+		{"own category is its required category", `shopcat-marker`, ""},
+		{"requirement on the page", `quasar-marker vue-marker`, "Quasar Vue"},
+		{"implied by another tech, which brings its implies along", `plugin-marker`, "Plugin Quasar* Vue*"},
+		{"implied by another tech, requirement not resolved", `depimplier-marker`, "Dep* DepImplier"},
+	}
+	for _, c := range cases {
+		if got := detected(Match(d, Page{HTML: c.html})); got != c.want {
+			t.Errorf("%s: detected %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// An inherited label follows every implies step: A excludes L, and L implies U implies T, each
+// present only through the one before, so L, U and T all carry A.
+func TestExcludedByFollowsImpliesChain(t *testing.T) {
+	d := parse(t, `{
+		"A": {"html": "a-marker", "excludes": ["L"]},
+		"L": {"html": "l-marker", "implies": "U"},
+		"U": {"implies": "T"},
+		"T": {}
+	}`)
+	if got := detected(Match(d, Page{HTML: `a-marker l-marker`})); got != "A L<A T*<A U*<A" {
+		t.Errorf("detected %q, want %q", got, "A L<A T*<A U*<A")
+	}
+}
+
+// A requires/excludes/implies reference may carry a `\;confidence:` or `\;version:` suffix (real
+// data: 12 of 1409 implies do); it still names the tech before the suffix.
+func TestReferencesIgnoreTheirSuffix(t *testing.T) {
+	d := parse(t, `{
+		"Base":  {"html": "base-marker"},
+		"Dep":   {"html": "dep-marker", "requires": "Base\\;confidence:50"},
+		"X":     {"html": "x-marker", "excludes": "Y\\;version:2"},
+		"Y":     {"html": "y-marker", "implies": "YLang\\;confidence:50"},
+		"YLang": {}
+	}`)
+	cases := []struct{ name, html, want string }{
+		{"requires with a suffix", `base-marker dep-marker`, "Base Dep"},
+		{"excludes and implies with a suffix", `x-marker y-marker`, "X Y<X YLang*<X"},
+	}
+	for _, c := range cases {
+		if got := detected(Match(d, Page{HTML: c.html})); got != c.want {
+			t.Errorf("%s: detected %q, want %q", c.name, got, c.want)
 		}
 	}
 }
