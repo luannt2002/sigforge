@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/luannt2002/sigforge/modules/intel/unified"
@@ -78,7 +79,7 @@ func (a *Adapter) LookupUnified(ctx context.Context, cpe, version string) unifie
 func leadsFromCVEs(cves []CVE) []unified.Lead {
 	out := make([]unified.Lead, 0, len(cves))
 	for _, c := range cves {
-		l := unified.Lead{ID: c.ID, Severity: c.Severity}
+		l := unified.Lead{ID: c.ID, Severity: c.Severity, CWE: unified.CWEIDs(strings.Split(c.CWE, ",")), Published: c.Published}
 		if c.ID != "" {
 			l.CVE = []string{c.ID}
 		}

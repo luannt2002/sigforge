@@ -178,3 +178,102 @@ func TestParseRejectsBodiesThatAreNotNVD(t *testing.T) {
 		t.Errorf("a real empty NVD answer must parse: %v", err)
 	}
 }
+
+// --- T3.12: honest descriptions, partial paging, lookup by id ---
+
+// AC1: the English description is filled from descriptions[lang=en]; a CVE without one
+// is "" (never fabricated), and a non-English-only entry does not leak in.
+func TestParseFillsEnglishDescription(t *testing.T) {
+	const body = `{"totalResults":2,"vulnerabilities":[
+	  {"cve":{"id":"CVE-A","descriptions":[
+	     {"lang":"es","value":"desbordamiento"},
+	     {"lang":"en","value":"Buffer overflow in resolver."}]}},
+	  {"cve":{"id":"CVE-B","descriptions":[{"lang":"es","value":"solo espanol"}]}}
+	]}`
+	got, err := Parse([]byte(body))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d CVEs, want 2", len(got))
+	}
+	if got[0].Description != "Buffer overflow in resolver." {
+		t.Errorf("CVE-A description = %q, want the English value", got[0].Description)
+	}
+	if got[1].Description != "" {
+		t.Errorf("CVE-B has no English description, want \"\" (never fabricated), got %q", got[1].Description)
+	}
+}
+
+// AC2: totalResults > records returned ⇒ Partial is set (results are "N of M", not the
+// full/clean list). Negative: totalResults == records ⇒ not partial.
+func TestLookupExposesPartialWhenTruncated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("virtualMatchString") {
+		case "cpe:2.3:a:x:y:9.9.9:*:*:*:*:*:*:*": // feed says 2500 match, returns one
+			w.Write([]byte(`{"totalResults":2500,"vulnerabilities":[{"cve":{"id":"CVE-2021-0001"}}]}`))
+		default: // feed returns everything it counted
+			w.Write([]byte(`{"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-0002"}}]}`))
+		}
+	}))
+	defer srv.Close()
+	a := New(srv.URL, fetch.New())
+
+	trunc, err := a.Lookup(context.Background(), "cpe:2.3:a:x:y:*:*:*:*:*:*:*:*", "9.9.9")
+	if err != nil || !trunc.Partial || trunc.Total != 2500 {
+		t.Fatalf("truncated page must be Partial with Total=2500: %+v err=%v", trunc, err)
+	}
+	full, err := a.Lookup(context.Background(), "cpe:2.3:a:x:y:*:*:*:*:*:*:*:*", "1.0.0")
+	if err != nil || full.Partial {
+		t.Fatalf("a complete page must NOT be Partial: %+v err=%v", full, err)
+	}
+}
+
+// AC3: lookup by CVE-ID uses the feed's cveId query and returns that record.
+func TestLookupIDReturnsThatRecord(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cveId") == "CVE-2023-1234" {
+			w.Write([]byte(`{"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2023-1234","descriptions":[{"lang":"en","value":"d"}],"metrics":{"cvssMetricV31":[{"source":"nvd@nist.gov","cvssData":{"baseScore":9.8,"baseSeverity":"CRITICAL"}}]}}}]}`))
+			return
+		}
+		w.Write([]byte(`{"totalResults":0,"vulnerabilities":[]}`))
+	}))
+	defer srv.Close()
+	a := New(srv.URL, fetch.New())
+
+	res, err := a.LookupID(context.Background(), "CVE-2023-1234")
+	if err != nil {
+		t.Fatalf("LookupID: %v", err)
+	}
+	if res.State != StateHasCVE || len(res.CVEs) != 1 || res.CVEs[0].ID != "CVE-2023-1234" || res.CVEs[0].CVSS != 9.8 {
+		t.Fatalf("LookupID(CVE-2023-1234) = %+v, want that single record", res)
+	}
+	// An unknown id the feed lists nothing for → no-known-cve, never "safe", never unknown.
+	none, err := a.LookupID(context.Background(), "CVE-9999-9999")
+	if err != nil || none.State != StateNoKnownCVE || len(none.CVEs) != 0 {
+		t.Fatalf("unknown id → %+v err=%v, want StateNoKnownCVE + no CVEs", none, err)
+	}
+	// An empty id has nothing to query → honestly unknown, not an error.
+	if res, err := a.LookupID(context.Background(), ""); err != nil || res.State != StateUnknown {
+		t.Fatalf("empty id → %+v err=%v, want StateUnknown + nil err", res, err)
+	}
+}
+
+// AC4: a rate-limited / failing feed (429, 5xx) is a failed lookup — StateUnknown with an
+// error — never downgraded to "no-known-cve" / clean.
+func TestLookupRateLimitedStaysUnknownNotClean(t *testing.T) {
+	for _, code := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "nope", code)
+		}))
+		a := New(srv.URL, fetch.New())
+		res, err := a.Lookup(context.Background(), "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*", "1.18.0")
+		srv.Close()
+		if err == nil {
+			t.Errorf("status %d must error, not report an empty/clean result", code)
+		}
+		if res.State != StateUnknown {
+			t.Errorf("status %d must stay StateUnknown (never no-known-cve/clean); got %v", code, res.State)
+		}
+	}
+}
