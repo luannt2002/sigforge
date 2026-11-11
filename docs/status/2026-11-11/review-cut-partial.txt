@@ -1,0 +1,80 @@
+===== R-G01-luot9 (bị cắt do hết hạn mức tuần, 10/11 tối)
+- Tôi bắt đầu bằng việc đọc brief.
+- Tiếp theo tôi đọc bảng chân trị, spec và ba báo cáo cũ.
+- Thư mục `SP/r-g01-r9/` chưa tồn tại. Tôi sẽ cố dùng memfd để không tạo tệp trên đĩa. Giờ tôi đọc bảng chân trị.
+- Giờ đến ba báo cáo soát cũ.
+- Các lượt trước đều dùng memfd qua `python3 -I -c`; tôi sẽ làm y vậy. Giờ xem các brief lượt 7–9 (để biết "Tệp được phép") và công cụ goslot.
+- Tệp được phép = 15 tệp của r6 + tệp test MỚI trong `modules/intel/matcher/`. Giờ kiểm bản vá r9: sha, danh sách tệp.
+- Xem cách J/worker dựng bản vá (chỉ đọc) để tự dựng lại độc lập theo cùng định dạng.
+- Tôi tự dựng lại bản vá theo cách riêng (vòng lặp `diff -u` đổ thẳng vào `sha256sum`, không ghi tệp) và kiểm base r9 = cây chính.
+- Dựng lại khớp từng byte. Giờ kiểm không có tệp lệch nào khác giữa hai cây.
+- Cây lệch đúng 17 tệp + `.claude`/`CLAUDE.md` (gitignore). Kiểm lượt nào thêm hai tệp test mới và delta r8→r9 chỉ chạm tài liệu.
+- r9 = r8 trừ base của tài liệu; dòng +/- trùng. Kiểm thêm lời khai "gộp 3 chiều 0 xung đột" bằng `git merge-file -p` (chỉ in ra stdout).
+- Gộp 3 chiều 0 xung đột. Xem cây chính có đổi gì ở các tệp G01 chạm so với base `wt-g04` (để biết bản sẽ vào cây chính có khác bản được test không).
+- `matcher_dom.go` có ở cả ba cây, không lệch. Giờ đọc code chính: `matcher.go` của `wt-g01`.
+- Đọc test bảng `conditions_test.go`.
+- Xem phần diff `matcher.go` và `matcher_test.go` trong bản vá.
+- Code rõ. Giờ xem overlay probe hiệu năng và tệp probe nó trỏ tới (đọc, không chạy).
+- Probe hiệu năng dùng được nguyên trạng. Giờ đối chiếu test bảng với tệp probe G01a gốc (`zz_g01a_probe_test.go`) để kiểm ánh xạ hàng.
+- Tôi so máy móc từng hàng: JSON DB và trang của test với probe G01a gốc, và chuỗi `want` với cột "Đo" (chép tay từ bảng, chỉnh theo LC-2 cho X1/X1c/X6).
+- 65/65 hàng G01a khớp từng ký tự (DB, trang, `want`), 12 hàng thêm X7–X16 cho LC-2. Kiểm các helper `parse`/`detected` mà test bảng dựa vào.
+- Helper lấy nhãn qua JSON `excludedBy`, không tính từ code được test. Xem phần diff `matcher_test.go` (kiểm có test cũ nào bị xoá/sửa yếu đi không).
+- Không xoá dòng test cũ nào (chỉ thêm). Giờ đọc các hunk tài liệu và comment (AC4).
+- Đọc test đầu ra (`match_label_test.go`, `label_test.go`) và các hunk `schema.go`, `webappanalyzer.go`, README.
+- Xem hunk `webappanalyzer.go` và các test N1b–N1e trong `adapters_test.go`.
+- Đã đọc xong đầu vào. Trước khi chạy Go, kiểm tải máy (RAM, tiến trình Go đang chạy) vì máy dùng chung.
+- Một agent khác đang đo thời gian (G10b) — sẽ ảnh hưởng số đo hiệu năng; tôi sẽ đo xen kẽ và lấy số nhanh nhất. Kiểm toolchain qua goslot.
+- Chạy AC6: toàn bộ test hai cây (`wt-g04` và `wt-g01`) dạng `-json`, so tên trong bộ nhớ.
+- AC6 phần test: 621 pass / 0 fail / mất 0 (g04: 526), 25 gói ok. Tiếp: gofmt, vet, và `-race` cho ba gói.
+- AC6 xong (gofmt rỗng, vet rc=0, race ok 3 gói). Sang AC3: test chặn `-count=10`, rồi benchmark không cần dữ liệu thật.
+- Bản r7m của J đúng là `matcher.go` r7. Chạy test chặn trên r7 (kỳ vọng ĐỎ), rồi probe hiệu năng trên dữ liệu thật, xen kẽ r9 với r6 làm mốc tải máy.
+- Probe lỗi giải mã JSON ở hàng G5 — có thể do cách tôi nhúng chuỗi. Kiểm nhanh nội dung chuỗi Python sinh ra.
+- Tầng gọi lệnh gộp `\\;` thành `\;` (không phải lỗi của bản vá). Tôi thay bằng token rồi dựng dấu `\` bằng `chr(92)` trong Python và chạy lại probe.
+- You've hit your weekly limit · resets Nov 13, 1am (Asia/Ho_Chi_Minh)
+===== RD-G05b-luot5 (bị cắt do hết hạn mức tuần, 10/11 tối)
+- Tôi bắt đầu bằng việc đọc brief.
+- Đọc tiếp báo cáo R-Δ lượt 4, bảng G05a và lời khai J.
+- Đọc spec gốc (các mục G05b, G05a, R-Δ, Phần chung).
+- Kiểm sha của bản vá r5 và delta, rồi đọc lời khai J.
+- Sha khớp tiền tố brief. Giờ xem trạng thái worktree và `watch.go`.
+- `base-dot1` không phải repo git. Xem cách bản vá được dựng (script mkpatch / final-gate5).
+- Bản vá dựng từ `base-dot1` so `wt-g05b` theo danh sách tệp cố định. Đọc toàn bộ delta r4→r5.
+- Đọc `watch.go` (code đang chấm) toàn bộ.
+- Đọc phần test bảng trong `watch_test.go` và các helper mà test mô hình dùng.
+- Đọc test bảng cặp (`:694-884`) để đối chiếu với mô hình.
+- Bắt đầu AC1: liệt kê mọi tệp khác giữa `base-dot1` và `wt-g05b` (bỏ `.git`), so với danh sách tệp trong bản vá r5.
+- Tập tệp khác nhau đúng bằng 15 tệp của bản vá r5 (= 14 của r4 + tệp mô hình). Dựng lại bản vá r5 và delta qua pipe, không ghi tệp.
+- `README.md` báo DIFF — nghi do cách tách khối (dòng `--- /dev/null` của tệp mới dính vào cuối khối trước). Kiểm lại bằng cách tách đúng theo cặp header.
+- AC1 khớp hoàn toàn. Trước khi thiết kế đột biến, kiểm tài liệu xem lý do in trên dòng UNCHECKED có phải hợp đồng không, và đọc các test lẻ cho G05a #5.
+- Kiểm xem có test nào chốt chuỗi lý do của `unknown_version` không.
+- Không test nào chốt chuỗi lý do `unknown_version`. Đọc hai test thăm dò của R-Δ4 để so với P1/P2 worker đã đưa vào.
+- P1/P2 của worker chép nguyên văn hai test R-Δ4 đề xuất. Xem cổng cuối của worker (thời gian chạy gói, kết quả đột biến khai) để ước lượng chi phí chạy.
+- Dựng khung chạy đột biến bằng memfd (không tạo tệp trên đĩa). Thử trước tính khả thi: overlay đồng nhất + một mồi đổi hành vi.
+- memfd + overlay chạy được (mồi đổi hành vi ĐỎ, bản đồng nhất xanh). Xem cách worker đếm "tên" để đo AC5 cùng định nghĩa.
+- Danh sách r4 gồm cả subtest (95 dòng cho test bảng = 1 + 94). Giờ AC2: kiểm tĩnh xem tệp mô hình có dùng định danh nào khai báo trong mã không-phải-test của gói không.
+- 10 đột biến R-Δ4: 9 ĐỎ, C10-swap SỐNG (như brief dự kiến). Khớp lời khai worker. Giờ chạy 12 đột biến của riêng tôi trong lớp "tương tác giữa danh tính".
+- You've hit your weekly limit · resets Nov 13, 1am (Asia/Ho_Chi_Minh)
+===== R-G10b-luot2 (bị cắt do hết hạn mức tuần, 10/11 tối)
+- Tôi sẽ đọc brief trước.
+- Đọc spec và báo cáo R lượt 1.
+- Giờ tính sha của bản vá và xem các tệp J/worker.
+- sha khớp tiền tố `b1656cb6a0936171`. Đọc toàn bộ bản vá.
+- Đọc `matcher_dom.go` của worktree (bản r4).
+- Đọc tệp test mới.
+- Kiểm trạng thái hai cây (base-dot1, wt-g10b) để dựng lại bản vá.
+- Dựng lại bản vá từ base-dot1 → wt-g10b, tính sha qua pipe (không ghi tệp).
+- Bản dựng lại trùng từng byte. Giờ kiểm cây wt-g10b không có khác biệt nào ngoài 5 tệp.
+- Có 7 tệp khác ngoài bản vá (W2, như R lượt 1 đã thấy). Kiểm 7 tệp đó trùng cây chính.
+- Cây chính đã đi tiếp. Kiểm 7 tệp lạ đúng là W2 (như R lượt 1).
+- Chiều ngược lại: base-dot1 có W2, wt-g10b chưa có. Kiểm diff wt→base trùng w2-patch-J.
+- AC1 phạm vi rõ: wt-g10b = base-dot1 − W2 + G10b; bản vá chỉ 5 tệp. Đọc `matcher.go` của worktree.
+- Đọc `matcher_dom.go` gốc (base) để so.
+- Đọc `docs/matcher.md` của worktree.
+- Xem số đo worker lượt 4 (`g10b-r4/ac3`).
+- Đọc các script đo của worker (chỉ đọc).
+- Xem công cụ đo AC6/AC8 (compare.go, ac8, score.py).
+- Đọc test digest tương đương của worker (`zz_equiv_test.go`) và công cụ timing.
+- Kiểm tải máy trước khi chạy suite (goslot giới hạn 2 lệnh Go).
+- You've hit your weekly limit · resets Nov 13, 1am (Asia/Ho_Chi_Minh)
+===== W3b-luot1 (bị cắt do hết hạn mức tuần, 10/11 tối)
+- You've hit your weekly limit · resets Nov 13, 1am (Asia/Ho_Chi_Minh)

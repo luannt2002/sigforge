@@ -1,0 +1,29 @@
+nhóm  1 ·  2 tệp · feat(unified): Answered and CWE IDs on results
+nhóm  2 ·  2 tệp · feat(versioncmp): comparator updates for OSV ecosystems
+nhóm  3 ·  1 tệp · feat(fetch): Stored and Confirm for snapshot-backed lookups
+nhóm  4 ·  2 tệp · feat(baseline): Tomcat, Jetty and Bootstrap fingerprints
+nhóm  5 ·  4 tệp · feat(lifecycle): product name normalization
+nhóm  6 ·  2 tệp · feat(identity): CPE dictionary resolver updates
+nhóm  7 ·  2 tệp · feat(jslib): identify a JS library from its file
+nhóm  8 ·  2 tệp · feat(takeoverfp): NXDOMAIN takeover matching
+nhóm  9 ·  2 tệp · feat(wpcve): WordPress core lookups
+nhóm 10 ·  4 tệp · feat(cve): lookup by CVE ID with weaknesses
+nhóm 11 ·  4 tệp · feat(kev): catalog and remediation fields
+nhóm 12 · 11 tệp · feat(osv): CVSS from vectors and incremental dump sync
+nhóm 13 ·  4 tệp · feat(enrich): platform intel in the enrich pipeline
+nhóm 14 ·  2 tệp · feat(feedset): wire the new sources
+nhóm 15 ·  7 tệp · feat(cli): sources and watch commands
+nhóm 16 ·  1 tệp · test(accuracy): contract updates
+nhóm 17 ·  1 tệp · docs: code map for the new packages
+baseline: test xanh
+task W1   ·  4 tệp · fix(watch): a run that looked up nothing fails instead of reporting quiet
+task G04  ·  7 tệp · fix(refresh): block a refresh that leaves a tech with no detection pattern
+task G06  ·  7 tệp · fix(feedset): route WordPress core through the WordPress feed
+task G02  ·  3 tệp · fix(osv): keep the range limit instead of an open-ended range
+task W2   ·  7 tệp · fix(enrich): an empty inventory flag never becomes an identity
+task G08  ·  6 tệp · fix(osv): a release lookup below the floor keeps the lead
+task B9   ·  2 tệp · fix(enrich): reject a --package name made of whitespace
+task B2   ·  2 tệp · fix(osv): floor independent of entry order
+task B10  ·  1 tệp · test(osv): limit cases for every comparator family
+task w3   · 13 tệp · fix(sync): keep the stored copy when a source answers with junk
+XONG 57c893f8db2b7a6586e161e81a9b664947f09ab2
