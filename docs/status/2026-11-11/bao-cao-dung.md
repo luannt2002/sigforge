@@ -89,3 +89,19 @@ Lưu ý:
   - R G01 lượt 9: xác nhận `matcher.go` r7 do J tái tạo là đúng; đang chạy probe thì bị cắt — chưa có kết luận.
   - R G10b lượt 2: mới đọc công cụ đo; W3b: chưa làm gì.
 - `soat/`: báo cáo soát và output Q1 / đột biến của J; `ban-va/`: bản vá + `SHA256SUMS`.
+
+## 9. ASIE (repo anh em) — đã push 11/11, nhánh `wip/v0.5-gaps`
+- `origin/wip/v0.5-gaps` `9bc271f` = ASIE `main` v0.2.0 (`4c6594f`) + 17 commit: 16 commit theo phân hệ (phần code của đợt chạy đêm
+  09/11, 118 tệp) + 1 commit `docs/v0.5-gaps-status.md`. `main` ASIE KHÔNG đổi.
+- CHƯA soát độc lập: mỗi task mới có điều phối chấm (test + đột biến đỏ), giống G01 / G05b / G10b ⇒ không merge khi chưa có R DAT.
+- `go.mod` nâng sigforge `v0.4.0` ⇒ `v0.4.1-0.20261111080345-57c893f8db2b` (= sigforge `main` `57c893f`), vì code cần
+  `Lead.CWE` / `DueDate` / `RequiredAction`, `Result.Answered`. Với `v0.4.0`, build hỏng (đã chạy).
+- Cổng (đã chạy, `GOWORK=off`): mỗi commit `go build ./...` + `go vet ./...` trên cây riêng; nhánh cuối `go test ./...` 1673 pass,
+  0 fail, 55 gói.
+- So tên test với v0.2.0: mất 0. Một test đổi tên tại chỗ: `TestDNSEmailSPFFinding_ThreeStates` → `…Findings_ThreeStates`, vì hàm
+  được test giờ trả danh sách; đủ ca cũ, riêng `?all` thành mức `SPF-NEUTRAL-ALL` theo AC5 của task T2.7.
+- Quét: 3 chuỗi khoá GIẢ trong test (`AKIAIOSFODNN7EXAMPLE`, khoá OpenSSH / RSA tổng hợp) — GitHub không chặn. IP riêng chỉ là dữ liệu
+  test SSRF.
+- **Thư mục ASIE trên máy vẫn ở `main`, còn 118 thay đổi CHƯA commit** — cùng nội dung với nhánh, trừ `go.mod` và tệp trạng thái.
+  Điều phối không chuyển nhánh hộ, để khỏi đụng cây làm việc của bạn. Muốn đồng bộ: `git switch wip/v0.5-gaps` (tự kiểm trước).
+- Log: `luu-tru-2026-11-11/log/asie-commit.log`, `log/asie-go-test.json`.
