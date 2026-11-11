@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,13 +46,15 @@ const (
 
 // affectedRange is one affected range distilled from the OSV event sequence.
 // introduced empty/"0" means from the start; fixed is HALF-OPEN (version < fixed is affected);
-// lastAffected is CLOSED (version <= lastAffected is affected). typ is the OSV range type, which
-// selects the comparison scheme; a GIT typ carries no comparable bounds.
+// lastAffected is CLOSED (version <= lastAffected is affected); limits are the limits of the whole
+// OSV range the pair was cut from (a version must be below one of them; none means no limit). typ
+// is the OSV range type, which selects the comparison scheme; a GIT typ carries no comparable bounds.
 type affectedRange struct {
 	typ          string
 	introduced   string
 	fixed        string
 	lastAffected string
+	limits       []string
 }
 
 // record is one reduced advisory row, keyed in the index by package name.
@@ -113,6 +116,7 @@ type rawEvent struct {
 	Introduced   string `json:"introduced"`
 	Fixed        string `json:"fixed"`
 	LastAffected string `json:"last_affected"`
+	Limit        string `json:"limit"`
 }
 
 // reduceRecord turns one OSV advisory into 0..n index rows (one advisory can touch several
@@ -205,7 +209,7 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 			if rg.typ == rangeGit {
 				continue
 			}
-			for _, v := range []string{rg.introduced, rg.fixed, rg.lastAffected} {
+			for _, v := range append([]string{rg.introduced, rg.fixed, rg.lastAffected}, rg.limits...) {
 				if v != "" && v != "0" {
 					r.floor = lower(recEco, r.floor, v)
 				}
@@ -228,7 +232,8 @@ func lower(eco, a, b string) string {
 }
 
 // rangesFrom collapses each OSV range's event sequence into introduced→fixed/lastAffected pairs,
-// stamping the range type so the matcher picks the right comparison scheme. A GIT range has commit
+// stamping the range type so the matcher picks the right comparison scheme, and the range's limits
+// on every pair cut from it, wherever they sit in the sequence. A GIT range has commit
 // hashes, not versions: it is kept as a single indeterminate marker (so the package stays indexed
 // and the lookup is honestly UNKNOWN) rather than silently dropped into a false "no vuln".
 func rangesFrom(rs []rawRange) []affectedRange {
@@ -242,6 +247,7 @@ func rangesFrom(rs []rawRange) []affectedRange {
 		n := len(out)
 		cur := affectedRange{typ: typ}
 		open := false
+		var limits []string
 		for _, ev := range r.Events {
 			switch {
 			case strings.TrimSpace(ev.Introduced) != "":
@@ -258,10 +264,18 @@ func rangesFrom(rs []rawRange) []affectedRange {
 				cur.lastAffected = strings.TrimSpace(ev.LastAffected)
 				out = append(out, cur)
 				cur, open = affectedRange{typ: typ}, false
+			case strings.TrimSpace(ev.Limit) != "":
+				limits = append(limits, strings.TrimSpace(ev.Limit))
 			}
 		}
 		if open {
 			out = append(out, cur)
+		}
+		if slices.Contains(limits, "*") {
+			limits = nil // OSV's "*" is infinity: every version is below it
+		}
+		for i := n; i < len(out); i++ {
+			out[i].limits = limits
 		}
 		if len(out) == n {
 			out = append(out, affectedRange{typ: rangeBroken})
@@ -476,7 +490,8 @@ func CompareVersions(a, b string) int {
 
 // VersionInRange reports whether version falls inside r under the semver default. introduced
 // empty/"0" means from the start; fixed is HALF-OPEN (version < fixed); lastAffected is CLOSED
-// (version <= lastAffected). The internal matcher uses versionInRange with the record ecosystem.
+// (version <= lastAffected); with limits, version must also be below one of them. The internal
+// matcher uses versionInRange with the record ecosystem.
 func VersionInRange(version string, r affectedRange) bool {
 	in, _ := versionInRange(version, r, "")
 	return in
@@ -486,13 +501,44 @@ func VersionInRange(version string, r affectedRange) bool {
 // compared for this ecosystem, so membership is INDETERMINATE and the caller must keep the
 // version unknown rather than treat it as out of range. The range type selects the scheme: a
 // SEMVER range is ordered by semver whatever the ecosystem; a GIT range (commit hashes) is never
-// comparable, so it returns indeterminate rather than guessing membership.
+// comparable, so it returns indeterminate rather than guessing membership. As OSV evaluates a range,
+// its events place a version only below one of its limits, so either test alone can rule it out.
 func versionInRange(version string, r affectedRange, eco string) (in, ok bool) {
-	if r.typ == rangeGit || r.typ == rangeBroken {
-		return false, false
-	}
 	if r.typ == rangeSemver {
 		eco = ""
+	}
+	in, ok = eventsPlace(version, r, eco)
+	if ok && !in {
+		return false, true
+	}
+	below, bok := beforeLimits(version, r.limits, eco)
+	if bok && !below {
+		return false, true
+	}
+	return in && below, ok && bok
+}
+
+// beforeLimits is OSV's BeforeLimits: a range with no limit is unbounded, otherwise the version
+// must be below one of its limits.
+func beforeLimits(version string, limits []string, eco string) (below, ok bool) {
+	if len(limits) == 0 {
+		return true, true
+	}
+	ok = true
+	for _, l := range limits {
+		c, cok := versioncmp.Compare(eco, version, l)
+		if cok && c < 0 {
+			return true, true
+		}
+		ok = ok && cok
+	}
+	return false, ok
+}
+
+// eventsPlace is versionInRange on the introduced/fixed/last_affected events alone, eco already chosen.
+func eventsPlace(version string, r affectedRange, eco string) (in, ok bool) {
+	if r.typ == rangeGit || r.typ == rangeBroken {
+		return false, false
 	}
 	if lo := strings.TrimSpace(r.introduced); lo != "" && lo != "0" {
 		if f := strings.TrimSpace(r.fixed); f != "" {
