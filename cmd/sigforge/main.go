@@ -418,9 +418,9 @@ func runFetches(fetches fetchFlag, manifestPath string) ([]merge.Source, *source
 // sources + fetch path as `merge`) in memory, validate it, diff it against the live DB
 // at --out, and publish ONLY when no regression is found. A candidate that is schema-
 // invalid, or that would drop fingerprints past --allow-removed, or that would strip a
-// kept tech's CPE or version signal, is refused: the live DB is left untouched and the
-// command exits non-zero, printing exactly what regressed. Nothing is written until the
-// gate passes, so a bad re-sync can never overwrite good data.
+// kept tech's CPE, version signal or every detection channel, is refused: the live DB is
+// left untouched and the command exits non-zero, printing exactly what regressed. Nothing
+// is written until the gate passes, so a bad re-sync can never overwrite good data.
 func cmdRefresh(args []string) error {
 	fs := flag.NewFlagSet("refresh", flag.ContinueOnError)
 	out := fs.String("out", "", "the live DB to refresh in place (required)")

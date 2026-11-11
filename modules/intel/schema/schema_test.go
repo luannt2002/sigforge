@@ -113,3 +113,31 @@ func TestCapturesVersion(t *testing.T) {
 		}
 	}
 }
+
+// TestHasDetection locks the one definition of "can detect its tech on its own" that
+// the refresh gate uses: each channel the matcher evaluates counts by itself, while
+// implies, version_regex and metadata never detect (an implied-only tech such as the
+// baseline's Node.js is found only through another tech).
+func TestHasDetection(t *testing.T) {
+	cases := []struct {
+		name string
+		fp   Fingerprint
+		want bool
+	}{
+		{"header", Fingerprint{Headers: map[string]StringList{"Server": {"demo"}}}, true},
+		{"cookie presence", Fingerprint{Cookies: map[string]StringList{"demo_sid": {""}}}, true},
+		{"meta", Fingerprint{Meta: map[string]StringList{"generator": {"Demo"}}}, true},
+		{"html", Fingerprint{HTML: StringList{"demo-marker"}}, true},
+		{"scriptSrc", Fingerprint{ScriptSrc: StringList{`demo\.js`}}, true},
+		{"dom", Fingerprint{Dom: json.RawMessage(`{"#demo-app":{"exists":""}}`)}, true},
+		{"implies only", Fingerprint{Implies: StringList{"PHP"}}, false},
+		{"version_regex only", Fingerprint{VersionRegex: []string{`demo/([\d.]+)\;version:\1`}}, false},
+		{"metadata only", Fingerprint{Cats: []int{27}, CPE: []string{"cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*"}, Confidence: 50, Provenance: "baseline", License: "Apache-2.0"}, false},
+		{"empty", Fingerprint{}, false},
+	}
+	for _, c := range cases {
+		if got := c.fp.HasDetection(); got != c.want {
+			t.Errorf("%s: HasDetection = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
