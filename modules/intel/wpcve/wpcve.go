@@ -165,7 +165,7 @@ const (
 type PluginResult struct {
 	Slug            string
 	Version         string
-	Kind            string // "plugin" | "theme" — the directory queried (for scope)
+	Kind            string // "plugin" | "theme" | "core" — the directory queried (for scope)
 	InDirectory     Tri    // tier-4 provenance, tri-state
 	Provenance      string // ProvFree | ProvNotInDir | ProvUnknown
 	LatestVersion   string // newest version per the .org directory (when known)
@@ -308,6 +308,8 @@ type CoreResult struct {
 	Resolved        bool   // false ⇒ UNKNOWN ⇒ not-measured, never clean
 	UnparsedVersion bool   // version present but not semver-comparable ⇒ distinct UNKNOWN
 	Unpositioned    bool   // Vulns are advisories whose bounds could not be compared with Version
+
+	reason unresolvedReason // why Resolved=false (off vs unavailable vs core not listed); zero when Resolved
 }
 
 // LookupCore resolves known vulnerabilities for a WordPress CORE version from the
@@ -321,8 +323,9 @@ func (p *Provider) LookupCore(ctx context.Context, version string) CoreResult {
 		ctx = context.Background()
 	}
 
-	entry, _ := p.fetchVulns(ctx, coreSlug, "core")
+	entry, reason := p.fetchVulns(ctx, coreSlug, "core")
 	if entry == nil {
+		res.reason = reason
 		return res // Resolved stays false ⇒ UNKNOWN
 	}
 	res.Resolved = true

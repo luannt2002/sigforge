@@ -71,7 +71,7 @@ type IdentityResolver func(ctx context.Context, name, vendor, product string) (c
 type OSVLookup func(ctx context.Context, ecosystem, name, version string) unified.Result
 
 // WPLookup bridges a WordPress plugin/theme slug to its unified result (operator wraps
-// the wpcve provider + wpcve.ToUnified). kind is "plugin" (default) or "theme". nil = off.
+// the wpcve provider + wpcve.ToUnified). kind is "plugin" (default), "theme" or "core". nil = off.
 type WPLookup func(ctx context.Context, slug, version, kind string) unified.Result
 
 // JSLookup bridges a JS library to its unified result (operator wraps the jslib adapter
@@ -107,7 +107,7 @@ type PkgRef struct {
 type WPRef struct {
 	Slug    string
 	Version string
-	Kind    string // "plugin" (default) or "theme"
+	Kind    string // "plugin" (default), "theme" or "core"
 }
 
 type LibRef struct {

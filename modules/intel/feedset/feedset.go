@@ -80,10 +80,18 @@ func New(client *fetch.Client) *Set {
 		EOL: NewEOL(client),
 		KEV: kevUse{s.kev, &s.kevUsed},
 		WP: func(ctx context.Context, slug, version, kind string) unified.Result {
-			if kind == "theme" {
+			switch kind {
+			case "", "plugin": // enrich.WPLookup documents plugin as the default kind
+				return wpcve.ToUnified(wp.LookupPlugin(ctx, slug, version))
+			case "theme":
 				return wpcve.ToUnified(wp.LookupTheme(ctx, slug, version))
+			case "core":
+				return wpcve.CoreToUnified(wp.LookupCore(ctx, version))
 			}
-			return wpcve.ToUnified(wp.LookupPlugin(ctx, slug, version))
+			// a plugin answer for any other kind would be about a different product
+			r := unified.Unknown("wordpress:"+kind, slug, unified.StateNotChecked, fmt.Sprintf("WordPress kind %q is not plugin, theme or core: not looked up", kind))
+			r.Source, r.Version = "wpcve", version
+			return r
 		},
 		JS: func(ctx context.Context, name, version string) unified.Result {
 			return jslib.ToUnified(js.LookupOne(ctx, name, version))

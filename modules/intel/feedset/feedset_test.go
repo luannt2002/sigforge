@@ -2,9 +2,12 @@ package feedset
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -12,6 +15,8 @@ import (
 	"github.com/luannt2002/sigforge/modules/intel/identity"
 	"github.com/luannt2002/sigforge/modules/intel/kev"
 	"github.com/luannt2002/sigforge/modules/intel/osv"
+	"github.com/luannt2002/sigforge/modules/intel/unified"
+	"github.com/luannt2002/sigforge/modules/intel/wpcve"
 )
 
 // Notes asks only the sources this run used: a configured KEV catalog the run never consulted is
@@ -105,5 +110,94 @@ func TestOSVWiredOnlyWhenConfigured(t *testing.T) {
 	t.Setenv(osv.EnvOSVURL, "http://127.0.0.1:1")
 	if o := New(fetch.New()).Options; o.OSV == nil || o.OSVRelease == nil {
 		t.Fatal("both OSV lookups must be wired when its source is set")
+	}
+}
+
+// wpFeed serves body with status as the WordPress vulnerability feed, behind the {kind}/{slug}
+// template an operator would set, and returns the paths it was asked.
+func wpFeed(t *testing.T, status int, body string) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(wpcve.EnvWPVulnURL, srv.URL+"/{kind}/{slug}")
+	t.Setenv(wpcve.EnvWPOrgURL, "")
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(paths)
+	}
+}
+
+// WordPress core is looked up as core — one request for the core product, scope wordpress:core —
+// never as a plugin named "wordpress".
+func TestWPCoreGoesToCoreLookup(t *testing.T) {
+	asked := wpFeed(t, http.StatusOK, `{"wordpress":{"vulnerabilities":[{"id":"C1","min_version":"5.0","max_version":"6.1"}]}}`)
+	r := New(fetch.New()).Options.WP(context.Background(), "wordpress", "6.0", "core")
+	if got := asked(); len(got) != 1 || got[0] != "/core/wordpress" {
+		t.Fatalf("core must ask the feed once, for the core product; asked %v", got)
+	}
+	if r.Scope != "wordpress:core" || r.Identity != "wordpress" || r.State != unified.StateAffectedByAdvisory || len(r.Leads) != 1 {
+		t.Fatalf("core 6.0 inside 5.0–6.1 ⇒ one wordpress:core lead, got scope=%q id=%q state=%s leads=%d", r.Scope, r.Identity, r.State, len(r.Leads))
+	}
+}
+
+// Plugins and themes keep their route; an unset kind stays a plugin, the default enrich.WPLookup documents.
+func TestWPPluginAndThemeKeepTheirRoute(t *testing.T) {
+	for _, c := range []struct{ kind, slug, path, scope string }{
+		{"plugin", "akismet", "/plugin/akismet", "wordpress:plugin"},
+		{"", "akismet", "/plugin/akismet", "wordpress:plugin"},
+		{"theme", "astra", "/theme/astra", "wordpress:theme"},
+	} {
+		asked := wpFeed(t, http.StatusOK, `{}`)
+		r := New(fetch.New()).Options.WP(context.Background(), c.slug, "1.0", c.kind)
+		if got := asked(); len(got) != 1 || got[0] != c.path || r.Scope != c.scope || r.Identity != c.slug {
+			t.Errorf("kind %q: asked %v, scope %q, id %q; want %s on %s", c.kind, got, r.Scope, r.Identity, c.path, c.scope)
+		}
+	}
+}
+
+// A kind that is not plugin, theme or core is not guessed as a plugin: nothing is asked, and the
+// result is not_checked with a reason naming the kind.
+func TestWPUnknownKindIsNotAPlugin(t *testing.T) {
+	asked := wpFeed(t, http.StatusOK, `{"akismet":{"vulnerabilities":[{"id":"V1"}]}}`)
+	r := New(fetch.New()).Options.WP(context.Background(), "akismet", "1.0", "widget")
+	if got := asked(); len(got) != 0 {
+		t.Fatalf("an unknown kind must ask nothing, asked %v", got)
+	}
+	if r.State != unified.StateNotChecked || !strings.Contains(r.Err, `"widget"`) || r.Scope == "wordpress:plugin" || r.Freshness != unified.FreshnessUnknown {
+		t.Fatalf("an unknown kind ⇒ not_checked naming it, never a plugin answer; got state=%s scope=%q fresh=%s err=%q", r.State, r.Scope, r.Freshness, r.Err)
+	}
+}
+
+// Core with no data stays a gap and says which one: feed off, feed down and a feed that does not
+// list core are three different answers, none of them clean.
+func TestWPCoreGapsStayApart(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(wpcve.EnvWPVulnURL, "")
+	off := New(fetch.New()).Options.WP(ctx, "wordpress", "6.0", "core")
+	wpFeed(t, http.StatusInternalServerError, "down")
+	down := New(fetch.New()).Options.WP(ctx, "wordpress", "6.0", "core")
+	wpFeed(t, http.StatusOK, `{"error":0,"data":null}`)
+	unlisted := New(fetch.New()).Options.WP(ctx, "wordpress", "6.0", "core")
+	for _, c := range []struct {
+		name string
+		r    unified.Result
+		want unified.State
+	}{
+		{"feed off", off, unified.StateNotChecked},
+		{"feed down", down, unified.StateSourceUnavailable},
+		{"core not listed", unlisted, unified.StateUnknownProduct},
+	} {
+		if c.r.State != c.want || c.r.Scope != "wordpress:core" {
+			t.Errorf("%s: state=%s scope=%q, want %s on wordpress:core", c.name, c.r.State, c.r.Scope, c.want)
+		}
 	}
 }
