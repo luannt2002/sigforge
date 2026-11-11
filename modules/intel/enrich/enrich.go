@@ -222,6 +222,7 @@ func enrichDetections(ctx context.Context, dets []matcher.Detection, db *schema.
 		out = append(out, platformResults(ctx, d, opt)...)
 		for i := from; i < len(out); i++ {
 			out[i].Tech = d.Tech
+			out[i] = applyExcludedBy(out[i], d)
 		}
 		out = out[:from+len(dropRepeated(out[from:]))]
 	}
@@ -462,6 +463,17 @@ func applyVersionConflict(u unified.Result, d matcher.Detection) unified.Result 
 		u.State = unified.StateUnknownVersion // only one claimed version was asked; the others never were
 	}
 	u.Err = joinNote(u.Err, "version conflict: "+versionClaims(d))
+	return u
+}
+
+// applyExcludedBy carries Detection.ExcludedBy onto every result of that detection as a note:
+// the matcher keeps an excluded lead rather than dropping it, so the consumer must see the
+// contradiction. The state is left as-is — a contradiction is not a version or advisory answer.
+func applyExcludedBy(u unified.Result, d matcher.Detection) unified.Result {
+	if len(d.ExcludedBy) == 0 {
+		return u
+	}
+	u.Err = joinNote(u.Err, "excluded by: "+strings.Join(d.ExcludedBy, ", "))
 	return u
 }
 

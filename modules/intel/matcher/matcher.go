@@ -16,7 +16,9 @@
 package matcher
 
 import (
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +53,11 @@ type Detection struct {
 	// distinct claims behind a conflict so the operator can judge them.
 	VersionConflict bool           `json:"versionConflict,omitempty"`
 	VersionClaims   []VersionClaim `json:"versionClaims,omitempty"`
+	// ExcludedBy names the resolved techs that exclude this one; a tech present only through
+	// labeled techs — implied by them, or admitted by a requires/requiresCategory gate they
+	// meet — carries their labels too. The lead is kept and labeled, not dropped, so the
+	// consumer weighs the contradiction instead of never seeing it.
+	ExcludedBy []string `json:"excludedBy,omitempty"`
 }
 
 // VersionClaim is one version string a pattern captured, kept with its field and
@@ -120,7 +127,8 @@ func Match(db *schema.DB, page Page) []Detection {
 		}
 	}
 
-	expandImplies(db, hits)
+	hits = resolveConditions(db, hits)
+	labels := excludedBy(hits)
 
 	out := make([]Detection, 0, len(hits))
 	for name, h := range hits {
@@ -136,6 +144,7 @@ func Match(db *schema.DB, page Page) []Detection {
 			Provenance: h.fp.Provenance,
 			License:    h.fp.License,
 			Evidence:   h.evidence,
+			ExcludedBy: labels[name],
 		}
 		if h.conflict {
 			d.VersionConflict = true
@@ -391,6 +400,156 @@ func redact(s string) string {
 		return s
 	}
 	return string(r[:max]) + "…"
+}
+
+// resolveConditions admits a gated tech's own match once a tech it requires, or a tech in a
+// category it requires, is resolved (detected or implied), re-resolving after each admission so
+// chains settle. Excludes never remove a tech here; excludedBy labels instead.
+func resolveConditions(db *schema.DB, hits map[string]*hit) map[string]*hit {
+	direct := make(map[string]*hit, len(hits))
+	gated := make(map[string]*hit)
+	for name, h := range hits {
+		if len(h.fp.Requires) > 0 || len(h.fp.RequiresCategory) > 0 {
+			gated[name] = h
+		} else {
+			direct[name] = h
+		}
+	}
+	for {
+		resolved := maps.Clone(direct)
+		expandImplies(db, resolved)
+		admitted := false
+		for name, h := range gated {
+			if requirementMet(h.fp, resolved) {
+				direct[name] = h
+				delete(gated, name)
+				admitted = true
+			}
+		}
+		if !admitted {
+			return resolved
+		}
+	}
+}
+
+// excludedBy labels, never drops, each resolved tech that a resolved tech (direct or implied)
+// excludes — house rule: a lead is labeled, not hidden. A tech present only through other techs —
+// implied by them, or admitted by a requires/requiresCategory gate they meet — with no such chain
+// free of labels inherits their labels. A tech never labels itself, so an edition that requires
+// and excludes its base stays unlabeled.
+func excludedBy(resolved map[string]*hit) map[string][]string {
+	by := make(map[string]map[string]bool)
+	add := func(tech, excluder string) bool {
+		if tech == excluder || by[tech][excluder] {
+			return false
+		}
+		if by[tech] == nil {
+			by[tech] = make(map[string]bool)
+		}
+		by[tech][excluder] = true
+		return true
+	}
+	for name, h := range resolved {
+		for _, raw := range h.fp.Excludes {
+			if e := refName(raw); resolved[e] != nil {
+				add(e, name)
+			}
+		}
+	}
+	if len(by) == 0 {
+		return nil
+	}
+	// carried: present only through other techs — implied, or admitted by its gate.
+	carried := func(h *hit) bool {
+		return h.implied || len(h.fp.Requires) > 0 || len(h.fp.RequiresCategory) > 0
+	}
+	// carriers, built once (a page controls how many techs resolve, so no pass may scan all
+	// pairs): the techs implying a carried tech and, for one admitted by its gate, those meeting it.
+	carriers := make(map[string][]string)
+	byCat := make(map[int][]string)
+	for s, sh := range resolved {
+		for _, raw := range sh.fp.Implies {
+			if t := refName(raw); resolved[t] != nil && carried(resolved[t]) {
+				carriers[t] = append(carriers[t], s)
+			}
+		}
+		for _, c := range sh.fp.Cats {
+			byCat[c] = append(byCat[c], s)
+		}
+	}
+	for name, h := range resolved {
+		if h.implied {
+			continue // an implied tech is present through its impliers alone
+		}
+		for _, raw := range h.fp.Requires {
+			if s := refName(raw); resolved[s] != nil {
+				carriers[name] = append(carriers[name], s)
+			}
+		}
+		for _, c := range h.fp.RequiresCategory {
+			carriers[name] = append(carriers[name], byCat[c]...)
+		}
+	}
+	// supported: carried by an unlabeled tech that is itself not carried, or supported.
+	supported := make(map[string]bool)
+	for changed := true; changed; {
+		changed = false
+		for name, cs := range carriers {
+			if supported[name] {
+				continue
+			}
+			for _, s := range cs {
+				if by[s] == nil && (!carried(resolved[s]) || supported[s]) {
+					supported[name], changed = true, true
+					break
+				}
+			}
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for name, cs := range carriers {
+			if supported[name] {
+				continue
+			}
+			for _, s := range cs {
+				for e := range by[s] {
+					changed = add(name, e) || changed
+				}
+			}
+		}
+	}
+	out := make(map[string][]string, len(by))
+	for tech, set := range by {
+		for e := range set {
+			out[tech] = append(out[tech], e)
+		}
+		sort.Strings(out[tech])
+	}
+	return out
+}
+
+// requirementMet: any one required tech or category being resolved suffices, as in Wappalyzer.
+func requirementMet(fp schema.Fingerprint, resolved map[string]*hit) bool {
+	for _, raw := range fp.Requires {
+		if _, ok := resolved[refName(raw)]; ok {
+			return true
+		}
+	}
+	for _, h := range resolved {
+		for _, c := range h.fp.Cats {
+			if slices.Contains(fp.RequiresCategory, c) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// refName is the tech a requires/excludes/implies entry names, without any `\;` suffix.
+func refName(raw string) string {
+	name, _, _ := splitPattern(raw)
+	return strings.TrimSpace(name)
 }
 
 // expandImplies propagates the "implies" relation (WordPress ⇒ PHP). An implied
