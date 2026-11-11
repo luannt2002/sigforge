@@ -1,0 +1,3 @@
+wip/g01: go test ./... — 743 pass, 0 fail, 25 packages ok
+wip/g10b: go test ./... — 819 pass, 0 fail, 25 packages ok
+wip/g05b: go test ./... — 766 pass, 0 fail, 25 packages ok
