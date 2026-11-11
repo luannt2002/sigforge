@@ -225,6 +225,11 @@ func reduceRecord(raw *rawRecord, eco string) []record {
 
 // lower is the lower of two versions under eco's order; "" is no version, an uncomparable one is ignored.
 func lower(eco, a, b string) string {
+	if a == "" {
+		if _, ok := versioncmp.Compare(eco, b, b); !ok {
+			return a // met first, an unreadable value would skip the comparison below and become the floor
+		}
+	}
 	if c, ok := versioncmp.Compare(eco, b, a); a == "" || (ok && c < 0) {
 		return b
 	}
