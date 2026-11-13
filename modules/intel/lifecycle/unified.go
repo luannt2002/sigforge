@@ -34,6 +34,9 @@ func ToUnified(st Status, err error) unified.Result {
 	case st.Stale:
 		fresh = unified.FreshnessStale
 		u.Err = "endoflife source failed: verdict from the last synced bundle (stale)"
+		if st.Err != "" {
+			u.Err += ": " + st.Err
+		}
 	case st.Cached:
 		fresh = unified.FreshnessSnapshot // the locally synced bundle, as of its sync
 	}

@@ -32,6 +32,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -220,18 +221,15 @@ func (a *Adapter) fetchKEV(ctx context.Context) (map[string]KEVEntry, unified.Fr
 	if a.kevURL == "" {
 		return snap, unified.FreshnessSnapshot, time.Time{}
 	}
-	raw, meta, err := a.client.GetMeta(ctx, a.kevURL)
+	// a new catalog enters the store only once it is usable; a stored copy served without asking is checked below
+	raw, meta, err := a.client.GetMetaChecked(ctx, a.kevURL, func(b []byte) error { return usableCatalog(ParseKEV(b)) })
 	if err != nil {
 		a.status.Err = err.Error()
 		return snap, unified.FreshnessSnapshot, time.Time{}
 	}
 	m, complete, skipped, released, err := parseKEVCatalog(raw)
-	if err != nil {
-		a.status.Err = "live KEV catalog unparseable: " + err.Error()
-		return snap, unified.FreshnessSnapshot, time.Time{}
-	}
-	if len(m) == 0 {
-		a.status.Err = "live KEV catalog had no entries"
+	if err := usableCatalog(m, err); err != nil {
+		a.status.Err = err.Error()
 		return snap, unified.FreshnessSnapshot, time.Time{}
 	}
 	a.status = CatalogStatus{Source: "live", Entries: len(m), Cached: meta.Cached, Err: meta.Err, Skipped: skipped, Warn: catalogWarn(released, skipped, time.Now())}
@@ -243,6 +241,18 @@ func (a *Adapter) fetchKEV(ctx context.Context) (map[string]KEVEntry, unified.Fr
 		return m, unified.FreshnessSnapshot, meta.FetchedAt // the locally synced copy, as of its sync
 	}
 	return m, unified.FreshnessLive, meta.FetchedAt
+}
+
+// usableCatalog says why a decoded live catalog cannot be used — the parser refused it, or it lists no
+// entry (the rule sync applies too) — or nil.
+func usableCatalog(m map[string]KEVEntry, err error) error {
+	if err != nil {
+		return fmt.Errorf("live KEV catalog unparseable: %w", err)
+	}
+	if len(m) == 0 {
+		return errors.New("live KEV catalog had no entries")
+	}
+	return nil
 }
 
 // queryEPSS asks the operator's EPSS URL for scores, coalescing the CVEs into the

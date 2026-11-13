@@ -176,7 +176,8 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 }
 
 // GetChecked is Get that stores a new body only when check accepts it: a body check refuses is
-// an error, and the store keeps the copy it held.
+// an error, and the store keeps the copy it held. On a 304 check reads the stored copy again: one
+// it refuses is an error, and loses its validators so the next fetch downloads a whole copy.
 func (c *Client) GetChecked(ctx context.Context, url string, check func([]byte) error) ([]byte, error) {
 	b, _, err := c.get(ctx, url, false, check)
 	return b, err
@@ -187,6 +188,15 @@ func (c *Client) GetChecked(ctx context.Context, url string, check func([]byte) 
 // costs a scan nothing — and the caller must report it as a snapshot of Meta.FetchedAt.
 func (c *Client) GetMeta(ctx context.Context, url string) ([]byte, Meta, error) {
 	return c.get(ctx, url, true, nil)
+}
+
+// GetMetaChecked is GetMeta that stores a new body only when check accepts it, as GetChecked does: a
+// body check refuses counts as the source failing, so the stored copy comes back flagged Stale. On a
+// 304 check reads the stored copy again: one it refuses is an error, never a stale copy, and loses its
+// validators. A stored copy served within MaxAge, or flagged Stale, comes back unchecked: the caller
+// checks what it reads.
+func (c *Client) GetMetaChecked(ctx context.Context, url string, check func([]byte) error) ([]byte, Meta, error) {
+	return c.get(ctx, url, true, check)
 }
 
 // catalog marks a GetMeta call: MaxAge applies, and a failing source falls back to the
@@ -219,6 +229,11 @@ func (c *Client) get(ctx context.Context, url string, catalog bool, check func([
 	defer resp.Body.Close()
 	at := now().UTC()
 	if resp.StatusCode == http.StatusNotModified && cached != nil {
+		if check != nil {
+			if err := check(cached.body); err != nil {
+				return nil, Meta{}, c.unusable(url, cached.fetchedAt, err)
+			}
+		}
 		c.storeMeta(url, cached.cacheMeta, at) // the source just confirmed it is current
 		return cached.body, Meta{FetchedAt: at}, nil
 	}
@@ -254,7 +269,7 @@ func (c *Client) Download(ctx context.Context, url string, max int64) (path stri
 
 // DownloadChecked is Download that moves a new body into the store only when check accepts the
 // file holding it: a body check refuses is removed and counts as the source failing, so the
-// stored copy stays as it was.
+// stored copy stays as it was. On a 304 check reads the stored copy again, as GetChecked does.
 func (c *Client) DownloadChecked(ctx context.Context, url string, max int64, check func(path string) error) (path string, m Meta, release func(), err error) {
 	release = func() {}
 	if strings.TrimSpace(url) == "" {
@@ -288,6 +303,11 @@ func (c *Client) DownloadChecked(ctx context.Context, url string, max int64, che
 	defer resp.Body.Close()
 	fetched := now().UTC()
 	if resp.StatusCode == http.StatusNotModified && stored != "" {
+		if check != nil {
+			if err := check(stored); err != nil {
+				return "", Meta{}, release, c.unusable(url, at, err)
+			}
+		}
 		c.storeMeta(url, meta, fetched)
 		return stored, Meta{FetchedAt: fetched}, release, nil
 	}
@@ -335,6 +355,13 @@ func (c *Client) DownloadChecked(ctx context.Context, url string, max int64, che
 	}
 	c.storeMeta(url, cacheMeta{URL: url, ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified")}, fetched)
 	return bodyPath, Meta{FetchedAt: fetched}, release, nil
+}
+
+// unusable drops the validators of url's stored copy, which check refused on a 304, so the next fetch
+// downloads a whole copy instead of being told again that this one is current.
+func (c *Client) unusable(url string, at time.Time, err error) error {
+	c.storeMeta(url, cacheMeta{URL: url}, at)
+	return fmt.Errorf("fetch: %q: stored copy unusable: %w", url, err)
 }
 
 func revalidate(req *http.Request, m cacheMeta) {

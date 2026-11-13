@@ -54,6 +54,13 @@ func ToUnified(res Result) unified.Result {
 	default: // !KnownLib (feed off/dead collapses here via the snapshot fallback)
 		u.State = unified.StateUnknownProduct
 	}
+	if res.Err != "" {
+		why := "Retire.js source failed: " + res.Err
+		if u.Err != "" {
+			why += "; " + u.Err // keep why the verdict is what it is
+		}
+		u.Err = why
+	}
 	return u
 }
 

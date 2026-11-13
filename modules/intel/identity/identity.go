@@ -37,6 +37,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -187,29 +188,48 @@ func (r *Resolver) load(ctx context.Context) {
 	}
 	dctx, cancel := context.WithTimeout(ctx, dictDownloadLimit)
 	defer cancel()
-	path, meta, release, err := r.client.Download(dctx, r.dictURL, maxDictBytes)
+	var read *dictFile // what the store's check read, so a file it accepted is not decoded twice
+	path, meta, release, err := r.client.DownloadChecked(dctx, r.dictURL, maxDictBytes, func(p string) error {
+		d, err := readDictFile(p)
+		read = &d
+		return err
+	})
 	defer release()
+	if err == nil && (read == nil || meta.Stale) { // a stored copy served without the check, or kept over a refused one
+		d, derr := readDictFile(path)
+		read, err = &d, derr
+	}
 	if err != nil {
 		r.status.Err = err.Error()
 		return
 	}
+	r.entries = read.entries
+	r.status = DictStatus{Source: "live", Entries: len(read.entries), Products: read.products, Total: read.total, Cached: meta.Cached, Err: meta.Err}
+}
+
+// dictFile is a dictionary as the resolver reads it.
+type dictFile struct {
+	entries         []Entry
+	products, total int
+}
+
+// readDictFile decodes the dictionary at path as it reads it; one the parser refuses, or that lists no usable
+// CPE entry (the rule sync applies too), is an error.
+func readDictFile(path string) (dictFile, error) {
+	var d dictFile
 	f, err := os.Open(path)
 	if err != nil {
-		r.status.Err = err.Error()
-		return
+		return d, err
 	}
 	defer f.Close()
-	live, products, total, err := parseDict(f)
+	d.entries, d.products, d.total, err = parseDict(f)
 	if err != nil {
-		r.status.Err = "live dictionary unparseable: " + err.Error()
-		return
+		return d, fmt.Errorf("live dictionary unparseable: %w", err)
 	}
-	if len(live) == 0 {
-		r.status.Err = "live dictionary had no usable CPE entries"
-		return
+	if len(d.entries) == 0 {
+		return d, errors.New("live dictionary had no usable CPE entries")
 	}
-	r.entries = live
-	r.status = DictStatus{Source: "live", Entries: len(live), Products: products, Total: total, Cached: meta.Cached, Err: meta.Err}
+	return d, nil
 }
 
 // ParseDict is the PURE decode of an NVD CPE dictionary feed into version-agnostic

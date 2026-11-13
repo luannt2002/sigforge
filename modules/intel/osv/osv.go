@@ -544,13 +544,11 @@ func (a *Adapter) LoadIndex(ctx context.Context, ecosystem string) (*Index, erro
 // dump fetches eco's dump; with a store the stored copy is remembered, so loading several
 // releases of one distro in a run asks the source once.
 func (a *Adapter) dump(ctx context.Context, client *fetch.Client, eco string) (string, fetch.Meta, func(), error) {
-	get := func() (string, fetch.Meta, func(), error) {
+	dumpURL := a.baseURL + "/" + url.PathEscape(eco) + "/all.zip"
+	if client.CacheDir == "" {
 		dctx, cancel := context.WithTimeout(ctx, downloadLimit)
 		defer cancel()
-		return client.Download(dctx, a.baseURL+"/"+url.PathEscape(eco)+"/all.zip", maxZipBytes)
-	}
-	if client.CacheDir == "" {
-		return get()
+		return client.Download(dctx, dumpURL, maxZipBytes)
 	}
 	a.mu.Lock() // guards only the map, so two ecosystems download side by side
 	d := a.dumps[eco]
@@ -562,8 +560,36 @@ func (a *Adapter) dump(ctx context.Context, client *fetch.Client, eco string) (s
 		a.dumps[eco] = d
 	}
 	a.mu.Unlock()
-	d.once.Do(func() { d.path, d.meta, _, d.err = get() }) // a stored copy needs no release
+	d.once.Do(func() { d.path, d.meta, d.err = storeDump(ctx, client, eco, dumpURL) })
 	return d.path, d.meta, func() {}, d.err
+}
+
+// storeDump fetches eco's dump into the store as Sync does: a new dump enters it only once its index is cut from the
+// downloaded file and holds an advisory, and that index moves beside it. A refused new dump leaves the stored dump and
+// its index as they were, served flagged Stale, or, with nothing stored, is an error that leaves no file behind. On a
+// 304 the stored dump is checked again the same way: one refused is an error, never served, and loses its index. A
+// stored copy needs no release.
+func storeDump(ctx context.Context, client *fetch.Client, eco, dumpURL string) (string, fetch.Meta, error) {
+	dctx, cancel := context.WithTimeout(ctx, downloadLimit)
+	defer cancel()
+	var cut string // rename keeps the dump's mtime, so moved beside it, the index stays stamped for it
+	path, meta, _, err := client.DownloadChecked(dctx, dumpURL, maxZipBytes, func(tmp string) error {
+		st, err := os.Stat(tmp)
+		if err != nil {
+			return err
+		}
+		cut = tmp + ".idx.gz"
+		rows := 0
+		_, err = dumpIndex(ctx, eco, tmp, st, func(*record) bool { rows++; return false }, true)
+		if err == nil && rows == 0 {
+			err = errBuiltNothing // what LoadIndex refuses for a whole dump
+		}
+		return err
+	})
+	if cut != "" && (err != nil || meta.Stale || os.Rename(cut, path+".idx.gz") != nil) {
+		os.Remove(cut)
+	}
+	return path, meta, err
 }
 
 // indexOf reads the dump's index file when it was cut from this very dump, and otherwise

@@ -46,6 +46,8 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/url"
 	"path"
 	"regexp"
@@ -120,6 +122,7 @@ type Result struct {
 	Live            bool   // the repo behind this result came from the operator's live URL, not the embedded snapshot
 	Stale           bool   // the source failed, so the repo is the last synced copy from the local store
 	Sample          bool   // the repo is the embedded sample, not the repository: a miss in it is not an answer
+	Err             string // why the configured repository could not be fetched now (Stale: the last synced copy is in use); "" otherwise
 }
 
 // Adapter resolves library vulnerabilities from the operator-supplied Retire.js URL,
@@ -136,6 +139,7 @@ type Adapter struct {
 	live   bool
 	stale  bool
 	sample bool // the repo is the embedded sample
+	err    string
 }
 
 // New builds an adapter bound to the operator-supplied Retire.js URL and client. An
@@ -149,7 +153,7 @@ func New(retireURL string, client *fetch.Client) *Adapter {
 func (a *Adapter) LookupOne(ctx context.Context, library, version string) Result {
 	repo, live, stale := a.loadRepo(ctx)
 	res := resolve(repo, library, version)
-	res.Live, res.Stale, res.Sample = live, stale, a.sample
+	res.Live, res.Stale, res.Sample, res.Err = live, stale, a.sample, a.err
 	return res
 }
 
@@ -165,7 +169,7 @@ func (a *Adapter) Lookup(ctx context.Context, libs map[string]string) map[string
 	repo, live, stale := a.loadRepo(ctx)
 	for name, ver := range libs {
 		res := resolve(repo, name, ver)
-		res.Live, res.Stale, res.Sample = live, stale, a.sample
+		res.Live, res.Stale, res.Sample, res.Err = live, stale, a.sample, a.err
 		out[name] = res
 	}
 	return out
@@ -178,24 +182,37 @@ func (a *Adapter) Lookup(ctx context.Context, libs map[string]string) map[string
 // hardcoding snapshot. It is fetched once per Adapter: enrich's JS hook resolves one
 // library per call, and re-downloading the repository per library would be waste.
 func (a *Adapter) loadRepo(ctx context.Context) (map[string]libEntry, bool, bool) {
-	a.once.Do(func() { a.repo, a.live, a.stale, a.sample = a.fetchRepo(ctx) })
+	a.once.Do(func() { a.repo, a.live, a.stale, a.sample, a.err = a.fetchRepo(ctx) })
 	return a.repo, a.live, a.stale
 }
 
-func (a *Adapter) fetchRepo(ctx context.Context) (repo map[string]libEntry, live, stale, sample bool) {
+func (a *Adapter) fetchRepo(ctx context.Context) (repo map[string]libEntry, live, stale, sample bool, why string) {
 	snap, _ := ParseRepo(repoSnapshot)
 	if a.url == "" || a.client == nil {
-		return snap, false, false, true
+		return snap, false, false, true, ""
 	}
-	raw, meta, err := a.client.GetMeta(ctx, a.url)
+	// a new repository enters the store only once it is usable; a stored copy served without asking is checked below
+	raw, meta, err := a.client.GetMetaChecked(ctx, a.url, func(b []byte) error { return usableRepo(ParseRepo(b)) })
 	if err != nil {
-		return snap, false, false, true
+		return snap, false, false, true, err.Error()
 	}
 	m, err := ParseRepo(raw)
-	if err != nil || len(m) == 0 {
-		return snap, false, false, true
+	if err := usableRepo(m, err); err != nil {
+		return snap, false, false, true, err.Error()
 	}
-	return m, !meta.Cached, meta.Stale, false // a locally synced copy is a snapshot, never live
+	return m, !meta.Cached, meta.Stale, false, meta.Err // a locally synced copy is a snapshot, never live
+}
+
+// usableRepo says why a decoded repository cannot be used — the parser refused it, or it lists no
+// library (the rule sync applies too) — or nil.
+func usableRepo(m map[string]libEntry, err error) error {
+	if err != nil {
+		return fmt.Errorf("Retire.js repository unparseable: %w", err)
+	}
+	if len(m) == 0 {
+		return errors.New("Retire.js repository lists no libraries")
+	}
+	return nil
 }
 
 // repoRange is the wire shape of a nested `ranges[]` entry (newer Retire.js master).

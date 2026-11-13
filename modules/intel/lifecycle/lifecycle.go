@@ -78,6 +78,7 @@ type Status struct {
 	FetchedAt time.Time // when the feed answered (UTC); zero when no fetch happened (unmapped / feed off)
 	Cached    bool      // the answer came from the locally synced bundle (a snapshot as of FetchedAt), not a fetch now
 	Stale     bool      // ...because the source failed: the last synced bundle, kept past its freshness
+	Err       string    // why the source failed, when Stale
 }
 
 // Cycle is one release line from an endoflife.date product feed. EOL is a raw
@@ -106,6 +107,7 @@ type Adapter struct {
 	bundleAt  time.Time
 	bundleHit bool // the bundle came from the local store (a synced snapshot)
 	bundleOld bool // ...because the source failed: a stale copy
+	bundleWhy string
 	bundleErr error
 }
 
@@ -201,12 +203,13 @@ func (a *Adapter) fromBundle(ctx context.Context, st Status, product, version st
 	}
 	st.Product = product
 	st.Cycle, st.EOLDate, st.IsEOL = Classify(cycles, version, time.Now())
-	st.FetchedAt, st.Cached, st.Stale = a.bundleAt, a.bundleHit, a.bundleOld
+	st.FetchedAt, st.Cached, st.Stale, st.Err = a.bundleAt, a.bundleHit, a.bundleOld, a.bundleWhy
 	return st, nil
 }
 
 func (a *Adapter) loadBundle(ctx context.Context) {
-	raw, meta, err := a.client.GetMeta(ctx, a.bundleURL)
+	// a new bundle enters the store only once usable; a stored copy served without asking is parsed below
+	raw, meta, err := a.client.GetMetaChecked(ctx, a.bundleURL, func(b []byte) error { _, err := ParseBundle(b); return err })
 	if err != nil {
 		a.bundleErr = fmt.Errorf("lifecycle: fetch bundle: %w", err)
 		return
@@ -216,7 +219,7 @@ func (a *Adapter) loadBundle(ctx context.Context) {
 		a.bundleErr = fmt.Errorf("lifecycle: bundle: %w", err)
 		return
 	}
-	a.bundleAt, a.bundleHit, a.bundleOld = meta.FetchedAt, meta.Cached, meta.Stale
+	a.bundleAt, a.bundleHit, a.bundleOld, a.bundleWhy = meta.FetchedAt, meta.Cached, meta.Stale, meta.Err
 }
 
 // cpeVendorProduct is the "vendor:product" of a CPE 2.3 string, "" if it is not one.

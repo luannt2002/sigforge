@@ -243,6 +243,7 @@ func TestStoreReleasesShareOneDump(t *testing.T) {
 // Two ecosystems load side by side — a scanner looks packages up from many flows at once, and one
 // ecosystem's long download must not hold up another's — while each still loads once.
 func TestLookuperLoadsEcosystemsInParallel(t *testing.T) {
+	t.Chdir(t.TempDir()) // PyPI gets the npm dump, which the store refuses: a mutant there must not write into the tree
 	npm, _ := makeZip(t, map[string]string{"npm/GHSA-35jh-r3h4-6jhm.json": advLodash})
 	npmBody := mustBytes(npm)
 	arrived := make(chan string, 4)
