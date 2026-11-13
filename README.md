@@ -10,6 +10,85 @@ own clean baseline. The scanner stays permissively licensed; the license-laden
 third-party sources are fetched by the operator at runtime and tagged, never
 vendored into this repo.
 
+## What sigforge does
+
+Run the blocks in order from the repository root, after `go install ./cmd/sigforge`, in a shell
+with no `SIGFORGE_*` variable set. Nothing leaves the machine. The output is real, cut where it
+shows `…`.
+
+**Recognise the technology on a page.** `match` reads a page (headers, cookies, HTML, script
+URLs) as JSON on stdin and applies the fingerprint baseline embedded in the binary:
+
+```
+$ PAGE='{"headers":{"Server":["nginx/1.18.0"],"X-Powered-By":["PHP/7.2.34"]},"scriptSrcs":["/js/jquery-3.4.0.min.js"]}'
+$ echo "$PAGE" | sigforge match
+Nginx 1.18.0  (confidence 100, baseline/Apache-2.0)
+PHP 7.2.34  (confidence 100, baseline/Apache-2.0)
+jQuery 3.4.0  (confidence 100, baseline/Apache-2.0)
+```
+
+**Attach CVE / end-of-life / KEV intel, and say what was not checked.** `enrich` looks up every
+detection. A feed whose URL is not set is off and answers `not_checked`, never "clean" (the CVE
+and end-of-life lines below). Retire.js, CISA KEV and the CPE dictionary fall back instead to a
+small sample embedded in the binary: the one lead here comes from the Retire.js sample, and `kev=`
+from the KEV sample:
+
+```
+$ echo "$PAGE" | sigforge enrich
+[cpe] cpe:2.3:a:f5:nginx:1.18.0:*:*:*:*:*:*:* 1.18.0 → not_checked  source=cve
+[eol] nginx 1.18.0 → not_checked  source=lifecycle
+…
+[jslib] jQuery 3.4.0 → affected_by_advisory  source=jslib freshness=snapshot
+    lead CVE-2020-11022   medium   cvss=- epss=- kev=false
+looked up 1/7 · concluded 1/7 · not concluded 6 (not_checked 6, …) — not concluded is not clean
+```
+
+**Report advisories that are new since the last run.** `sync` keeps a local copy of each
+configured catalog (end-of-life bundle, KEV, Retire.js, CPE dictionary) and of each OSV dump named
+with `--osv`; `watch` re-checks an inventory against the sources, using what `sync` stored. Here a
+stand-in Retire.js feed is served on localhost (any static file server will do):
+
+```
+$ D=$(mktemp -d) && mkdir "$D/feed"
+$ echo '{"jquery":{"vulnerabilities":[{"below":"3.4.0","identifiers":{"CVE":["CVE-2019-11358"]}}]}}' > "$D/feed/jsrepository.json"
+$ python3 -m http.server -b localhost -d "$D/feed" 8765 >/dev/null 2>&1 & sleep 1
+$ export SIGFORGE_CACHE_DIR="$D/store" SIGFORGE_SOURCE_RETIREJS_URL=http://localhost:8765/jsrepository.json
+$ sigforge sync
+…
+  Retire.js repository   ok — 92 bytes in the store
+…
+$ sigforge watch --state "$D/watch.json" --jslib jquery@3.3.1
+first run: 1 lead(s) on 1 identit(ies) recorded; later runs name what changes
+$ cp modules/intel/jslib/data/retirejs-snapshot.json "$D/feed/jsrepository.json"   # the feed adds CVE-2020-11022
+$ sigforge sync
+…
+  Retire.js repository   ok — 1655 bytes in the store
+…
+$ sigforge watch --state "$D/watch.json" --jslib jquery@3.3.1 --fail-on-new   # exits 1 on a NEW lead
+NEW   jslib jquery@3.3.1  CVE-2020-11022
+sigforge: watch: 1 new lead(s)
+```
+
+**Keep a local store.** `sources` reports what the last `sync` left per source. With
+`SIGFORGE_CACHE_MAX_AGE`, a catalog or OSV dump synced less than that long ago is read from the
+store with no request, so the lookup below works with the feed gone; an older copy is asked for
+again and, if the feed fails, used and labelled `stale`. Per-query feeds (CVE, EPSS, per-product
+end-of-life, WordPress) are asked on every lookup:
+
+```
+$ sigforge sources
+…
+  Retire.js repository   ok — synced 2026-11-12T12:09:34Z
+…
+$ kill $!   # stop the feed
+$ SIGFORGE_CACHE_MAX_AGE=1h sigforge enrich --jslib jquery@3.3.1 < /dev/null
+requests: localhost:8765=0 sent (1 served from the local store)
+[jslib] jquery 3.3.1 → affected_by_advisory  source=jslib freshness=snapshot
+    lead CVE-2019-11358   medium   cvss=- epss=- kev=false
+    lead CVE-2020-11022   medium   cvss=- epss=- kev=false
+…
+```
+
 ## File-based, no database server
 
 sigforge is **not** a service. There is no Postgres, SQLite or daemon. It is:
@@ -129,10 +208,10 @@ against. Fetched third-party data is never vendored into this repo; the merged D
 and the manifest are operator-generated and gitignored. See `docs/source.md` for the
 per-format mapping limits (`nuclei`/`whatweb` are best-effort).
 
-## Unified intelligence (v0.4)
+## Unified intelligence
 
-The depth layers used to each speak their own result type. v0.4 adds **one result
-shape** every intelligence source emits — `modules/intel/unified.Result` — so a
+Every lookup source (CVE, end-of-life, OSV, WordPress, JS library) emits **one result
+shape** — `modules/intel/unified.Result` — so a
 consumer (ASIE, a report, the `enrich` CLI) handles ONE contract instead of six
 per-provider types. It is fully **additive**: each provider keeps its own typed API;
 a thin `ToUnified` adapter maps that output into a `unified.Result`.
@@ -148,7 +227,7 @@ must never collapse:
 | `unknown_version` | the version could not be determined or compared |
 | `potentially_affected` | an advisory exists but the version can't be pinned (a LEAD) |
 | `affected_by_advisory` | the version falls in an advisory range (a LEAD, never proof) |
-| `not_affected_by_advisory` | the version resolved, no advisory matched — clean **for this source only**. **v0.4 issues none**: a real source's data can read as whole and still be wrong (cut RPM epochs, a release no longer tracked), so "nothing matched" is `not_checked` with the reason |
+| `not_affected_by_advisory` | the version resolved, no advisory matched — clean **for this source only**. **sigforge issues none**: a real source's data can read as whole and still be wrong (cut RPM epochs, a release no longer tracked), so "nothing matched" is `not_checked` with the reason |
 
 `unknown*` / `source_unavailable` / `not_checked` are **never** "safe". An
 `affected_by_advisory` result is an advisory-range match on a (spoofable) version — a
