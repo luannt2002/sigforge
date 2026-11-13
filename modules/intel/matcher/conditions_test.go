@@ -82,6 +82,7 @@ var conditionRows = []struct{ name, db, html, want string }{
 	{"X4 gated tech implied only by a labeled tech", `{"A":{"html":"m-a-k","excludes":"X"},"X":{"html":"m-x-k","implies":"G"},"G":{"html":"m-g-k","requires":"R"},"R":{"html":"m-r-k"}}`, `m-a-k m-x-k m-g-k`, "A G*<A X<A"},
 	{"X5 requires met by an unlabeled tech", `{"A":{"html":"m-a-k","excludes":"T"},"R":{"html":"m-r-k"},"T":{"html":"m-t-k","requires":"R"}}`, `m-a-k m-r-k m-t-k`, "A R T<A"},
 	{"X6 requires met only by a labeled implied tech", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k","implies":"R"},"R":{},"T":{"html":"m-t-k","requires":"R"}}`, `m-a-k m-b-k m-t-k`, "A B<A R*<A T<A"},
+	{"X6c requiresCategory met only by a labeled implied tech", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k","implies":"S"},"S":{"cats":[6]},"T":{"html":"m-t-k","requiresCategory":[6]}}`, `m-a-k m-b-k m-t-k`, "A B<A S*<A T<A"},
 	{"X7 requires met also by an unlabeled tech", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k"},"R":{"html":"m-r-k"},"T":{"html":"m-t-k","requires":["B","R"]}}`, `m-a-k m-b-k m-r-k m-t-k`, "A B<A R T"},
 	{"X7c requiresCategory met also by an unlabeled tech", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k","cats":[6]},"C":{"html":"m-c-k","cats":[6]},"T":{"html":"m-t-k","requiresCategory":[6]}}`, `m-a-k m-b-k m-c-k m-t-k`, "A B<A C T"},
 	{"X7m requires met by a labeled tech, requiresCategory by an unlabeled one", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k"},"C":{"html":"m-c-k","cats":[6]},"T":{"html":"m-t-k","requires":"B","requiresCategory":[6]}}`, `m-a-k m-b-k m-c-k m-t-k`, "A B<A C T"},
@@ -100,6 +101,7 @@ var conditionRows = []struct{ name, db, html, want string }{
 	{"S2 excludes with a suffix", `{"A":{"html":"m-a-k","excludes":"T\\;version:2"},"T":{"html":"m-t-k"}}`, `m-a-k m-t-k`, "A T<A"},
 	{"S3 implies with a suffix passes the label on", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k","implies":"T\\;confidence:50"},"T":{}}`, `m-a-k m-b-k`, "A B<A T*<A%50"},
 	{"S4 implies with a suffix supports", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k","implies":"T"},"D":{"html":"m-d-k","implies":"T\\;confidence:50"},"T":{}}`, `m-a-k m-b-k m-d-k`, "A B<A D T*"},
+	{"S5 requires with a suffix met only by a labeled tech", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k"},"T":{"html":"m-t-k","requires":"B\\;confidence:50"}}`, `m-a-k m-b-k m-t-k`, "A B<A T<A"},
 	{"P2 implies with confidence:0 supports", `{"A":{"html":"m-a-k","excludes":"B"},"B":{"html":"m-b-k","implies":"T"},"D":{"html":"m-d-k","implies":"T\\;confidence:0"},"T":{}}`, `m-a-k m-b-k m-d-k`, "A B<A D T*"},
 }
 
