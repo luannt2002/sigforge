@@ -108,8 +108,9 @@ func platformResults(ctx context.Context, d matcher.Detection, opt Options) []un
 }
 
 // keepDoubtsApart moves the leads the source doubts (a note on the lead: the release may not be the
-// package's) into a potentially-affected result of their own, with that reason: still reported, never
-// dropped, but not sizing the finding the other leads make.
+// package's, or the version could not be placed against the advisory) into a potentially-affected result of
+// their own, with each distinct reason once: still reported, never dropped, but not sizing the finding the
+// other leads make.
 func keepDoubtsApart(r unified.Result) []unified.Result {
 	var sure, doubt []unified.Lead
 	for _, l := range r.Leads {
@@ -123,7 +124,15 @@ func keepDoubtsApart(r unified.Result) []unified.Result {
 		return []unified.Result{r}
 	}
 	d := r
-	d.State, d.Leads, d.Err = unified.StatePotentiallyAffected, doubt, strings.TrimSuffix(doubt[0].Note+"; "+r.Err, "; ")
+	var why []string
+	listed := map[string]bool{}
+	for _, l := range doubt {
+		if !listed[l.Note] {
+			listed[l.Note] = true
+			why = append(why, l.Note)
+		}
+	}
+	d.State, d.Leads, d.Err = unified.StatePotentiallyAffected, doubt, strings.TrimSuffix(strings.Join(why, "; ")+"; "+r.Err, "; ")
 	if len(sure) == 0 {
 		return []unified.Result{d}
 	}
@@ -149,15 +158,22 @@ func releaseDots(tech, version string) int {
 // dropRepeated keeps, across one detection's results in order, only the OSV leads no earlier result
 // named (by id or CVE) at least as firmly; an OSV result left with none is dropped: its advisories are
 // already reported, and one CVE must not become two findings. A firmer OSV lead (version-pinned where the
-// earlier mention was not) is kept. rs is filtered in place.
+// earlier mention was not) is kept. A lead the source doubts (a note) is no firmer than potentially, whatever
+// its result's state. rs is filtered in place.
 func dropRepeated(rs []unified.Result) []unified.Result {
 	named := map[string]unified.State{} // the firmest state each advisory was reported in (affected > potentially)
+	firm := func(l unified.Lead, s unified.State) unified.State {
+		if l.Note != "" {
+			return min(s, unified.StatePotentiallyAffected)
+		}
+		return s
+	}
 	out := rs[:0]
 	for _, r := range rs {
 		if r.Source == "osv" && len(r.Leads) > 0 {
 			var kept []unified.Lead
 			for _, l := range r.Leads {
-				if !namedAsFirmly(l, r.State, named) {
+				if !namedAsFirmly(l, firm(l, r.State), named) {
 					kept = append(kept, l)
 				}
 			}
@@ -168,7 +184,7 @@ func dropRepeated(rs []unified.Result) []unified.Result {
 		}
 		for _, l := range r.Leads {
 			for _, k := range leadKeys(l) {
-				named[k] = max(named[k], r.State)
+				named[k] = max(named[k], firm(l, r.State))
 			}
 		}
 		out = append(out, r)

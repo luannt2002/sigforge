@@ -176,6 +176,9 @@ type PluginResult struct {
 	Resolved        bool   // false ⇒ UNKNOWN (feed gave no answer or version unparseable) ⇒ not-measured
 	UnparsedVersion bool   // true ⇒ a version WAS detected but is not semver-comparable ⇒ distinct UNKNOWN, never clean
 	Unpositioned    bool   // Vulns are advisories whose bounds could not be compared with Version: they may not apply
+	// Unplaced is every advisory whose bounds could not place Version, whether or not another matched: Vulns
+	// never holds one beside a match (with none matched it holds the same ones, Unpositioned, as it always has).
+	Unplaced []Lead
 
 	reason unresolvedReason // why Resolved=false (off vs unavailable vs unknown slug); zero when Resolved
 }
@@ -288,6 +291,7 @@ func (p *Provider) lookup(ctx context.Context, slug, version, kind string) Plugi
 	if len(res.Vulns) == 0 && len(unpositioned) > 0 {
 		res.Vulns, res.Unpositioned = unpositioned, true
 	}
+	res.Unplaced = unpositioned
 	return res
 }
 
@@ -308,6 +312,9 @@ type CoreResult struct {
 	Resolved        bool   // false ⇒ UNKNOWN ⇒ not-measured, never clean
 	UnparsedVersion bool   // version present but not semver-comparable ⇒ distinct UNKNOWN
 	Unpositioned    bool   // Vulns are advisories whose bounds could not be compared with Version
+	// Unplaced is every advisory whose bounds could not place Version, whether or not another matched: Vulns
+	// never holds one beside a match (with none matched it holds the same ones, Unpositioned, as it always has).
+	Unplaced []Lead
 
 	reason unresolvedReason // why Resolved=false (off vs unavailable vs core not listed); zero when Resolved
 }
@@ -351,6 +358,7 @@ func (p *Provider) LookupCore(ctx context.Context, version string) CoreResult {
 	if len(res.Vulns) == 0 && len(unpositioned) > 0 {
 		res.Vulns, res.Unpositioned = unpositioned, true
 	}
+	res.Unplaced = unpositioned
 	return res
 }
 

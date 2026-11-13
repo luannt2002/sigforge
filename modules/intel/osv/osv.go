@@ -182,6 +182,9 @@ type Result struct {
 	// BelowListed (a platform's release only): the version is older than every version the package's
 	// advisories name; the advisories it reaches only "from the start" are marked OutsideListed.
 	BelowListed bool
+	// Unplaced is every advisory the version could not be placed against, whether or not another matched: Vulns
+	// never holds one beside a match (with none matched it holds the same ones, StatusUnknown, as it always has).
+	Unplaced []Vuln
 }
 
 // Index is a reduced OSV index for ONE ecosystem, looked up by package name. It is read-only after
@@ -276,7 +279,7 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 	ver := CleanVersion(version)
 	pinned := ver != ""
 	below := release && pinned && belowNamedVersions(recs, ver)
-	seen, seenUnplaced := make(map[string]bool, len(recs)*2), map[string]bool{}
+	seen := make(map[string]bool, len(recs)*2)
 	out := make([]Vuln, 0, 4)
 	var unplaced []Vuln // advisories the version could not be placed against
 	add := func(dst *[]Vuln, r *record, seen map[string]bool) {
@@ -302,6 +305,7 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 	}
 	indeterminate := false
 	var outside []*record // reached only "from the start" below the named versions: reported, marked, after the rest
+	var unplacedRecs []*record
 	for i := range recs {
 		r := &recs[i]
 		if ver != "" {
@@ -316,7 +320,7 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 			if !matched {
 				if !determinate {
 					indeterminate = true
-					add(&unplaced, r, seenUnplaced)
+					unplacedRecs = append(unplacedRecs, r)
 				}
 				continue
 			}
@@ -330,20 +334,23 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 			out[n].OutsideListed = true
 		}
 	}
+	for _, r := range unplacedRecs {
+		add(&unplaced, r, seen) // after every match: an advisory one record places and another cannot is reported once, placed
+	}
 	if len(out) == 0 {
 		if indeterminate {
 			// The version could not be positioned under this ecosystem's rules (versioncmp ok=false):
 			// an honest unknown, NOT a resolved "no known vuln for this version". The package IS known,
 			// so an adapter reads this as potentially-affected, not unknown-product; the advisories it
 			// could not be placed against are returned as the ones to look at.
-			return Result{Status: StatusUnknown, Vulns: unplaced, PackageKnown: true, VersionPinned: pinned, BelowListed: below}
+			return Result{Status: StatusUnknown, Vulns: unplaced, PackageKnown: true, VersionPinned: pinned, BelowListed: below, Unplaced: unplaced}
 		}
 		// The package IS known to the index but no advisory touches this version: a real resolved
 		// "no known vulnerability for this version", distinct from the unknown cases above.
 		return Result{Status: StatusNoKnownVuln, PackageKnown: true, VersionPinned: pinned, BelowListed: below}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return severityRank(out[i].Severity) > severityRank(out[j].Severity) })
-	return Result{Status: StatusVulnerable, Vulns: out, PackageKnown: true, VersionPinned: pinned, BelowListed: below}
+	return Result{Status: StatusVulnerable, Vulns: out, PackageKnown: true, VersionPinned: pinned, BelowListed: below, Unplaced: unplaced}
 }
 
 // listsRegistryReleases are the ecosystems whose advisories list the registry's releases in a range.

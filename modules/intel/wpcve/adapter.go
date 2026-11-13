@@ -13,8 +13,10 @@ const sourceID = "wpcve"
 // UNKNOWN is never promoted to "clean". Additive — the typed PluginResult API is
 // unchanged.
 //
-//	Resolved + Vulns>0          → affected_by_advisory   (+ Leads; a range match, not proof)
+//	Resolved + Vulns>0          → affected_by_advisory   (+ Leads; a range match, not proof; an advisory whose
+//	                                                       bounds cannot place the version follows, its lead noted)
 //	  …and no version           → potentially_affected   (every advisory for the slug)
+//	  …or none placed           → potentially_affected   (each lead noted)
 //	Resolved + Vulns empty      → not_checked (the feed carries no count: a miss is never a clearance)
 //	UnparsedVersion             → unknown_version
 //	feed not configured         → not_checked
@@ -51,7 +53,11 @@ func ToUnified(pr PluginResult) unified.Result {
 		case pr.Unpositioned:
 			r.Err = "an advisory bound is not a version PHP's version_compare can read: whether these advisories apply is unknown"
 		}
-		r.Leads = leadsFor(pr.Vulns)
+		if pr.Unpositioned {
+			r.Leads = leadsFor(pr.Vulns, noteUnplaced)
+		} else {
+			r.Leads = append(leadsFor(pr.Vulns, ""), leadsFor(pr.Unplaced, noteUnplaced)...)
+		}
 	default:
 		// The feed carries no count to prove its list whole: "nothing matched" is never a clearance.
 		r.Freshness = unified.FreshnessLive
@@ -65,7 +71,7 @@ func ToUnified(pr PluginResult) unified.Result {
 // (off / unavailable / not listed / a miss is never a clearance) under scope wordpress:core.
 func CoreToUnified(cr CoreResult) unified.Result {
 	return ToUnified(PluginResult{Slug: coreSlug, Version: cr.Version, Kind: "core", Vulns: cr.Vulns, Resolved: cr.Resolved,
-		UnparsedVersion: cr.UnparsedVersion, Unpositioned: cr.Unpositioned, reason: cr.reason})
+		UnparsedVersion: cr.UnparsedVersion, Unpositioned: cr.Unpositioned, Unplaced: cr.Unplaced, reason: cr.reason})
 }
 
 // ScopeFor is the scope a WordPress result of this kind carries: theme and core their own, any other kind a plugin's.
@@ -79,11 +85,11 @@ func ScopeFor(kind string) string {
 	return "wordpress:plugin"
 }
 
-// leadsFor maps the version-range LEADs across. Severity/CVSS are passed through
+// leadsFor maps the version-range LEADs across, each with note. Severity/CVSS are passed through
 // as the feed gave them; Score is a pointer that stays nil unless the feed carried
 // a numeric CVSS (Severity != "" ⇔ a real score) — a missing score is never
 // fabricated as 0.0 (§2).
-func leadsFor(vs []Lead) []unified.Lead {
+func leadsFor(vs []Lead, note string) []unified.Lead {
 	out := make([]unified.Lead, 0, len(vs))
 	for i := range vs {
 		v := &vs[i]
@@ -92,6 +98,7 @@ func leadsFor(vs []Lead) []unified.Lead {
 			Title:    v.Title,
 			Severity: v.Severity,
 			CVSS:     v.CVSS,
+			Note:     note,
 		}
 		if v.CVE != "" {
 			u.CVE = []string{v.CVE}
@@ -104,3 +111,6 @@ func leadsFor(vs []Lead) []unified.Lead {
 	}
 	return out
 }
+
+// noteUnplaced is why a lead may not apply: the version could not be placed against its bounds.
+const noteUnplaced = "the version could not be placed against this advisory's bounds under PHP's version_compare: whether it applies is unknown"

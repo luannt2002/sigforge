@@ -7,8 +7,9 @@ const unifiedSource = "jslib"
 
 // ToUnified maps a Result into a unified.Result, keeping the honest tri-state distinct:
 //
-//	Resolved + leads   → affected_by_advisory     (installed version inside a published range)
-//	                     potentially_affected     (no version: every advisory for the library)
+//	Resolved + leads   → affected_by_advisory     (installed version inside a published range; an advisory whose
+//	                                               bounds cannot place it follows, its lead noted)
+//	                     potentially_affected     (no version: every advisory for the library; or none placed: each noted)
 //	Resolved + none    → not_checked              (the repository carries no count: a miss is never a clearance)
 //	UnparsedVersion    → unknown_version          (a version was detected but is not comparable)
 //	!KnownLib          → unknown_product          (the feed does not list this library — never "clean")
@@ -41,7 +42,11 @@ func ToUnified(res Result) unified.Result {
 		case res.Unpositioned:
 			u.Err = "a version or advisory bound is not one the npm order can compare: whether these advisories apply is unknown"
 		}
-		u.Leads = unifiedLeads(res.Vulns)
+		if res.Unpositioned {
+			u.Leads = unifiedLeads(res.Vulns, noteUnplaced)
+		} else {
+			u.Leads = append(unifiedLeads(res.Vulns, ""), unifiedLeads(res.Unplaced, noteUnplaced)...)
+		}
 	case res.Resolved:
 		// The repository carries no count to prove itself whole: "nothing matched" is never a clearance.
 		u.State, _ = unified.Clean(unified.Evidence{FullData: false, Positioned: true})
@@ -64,9 +69,9 @@ func ToUnified(res Result) unified.Result {
 	return u
 }
 
-// unifiedLeads maps jslib leads to unified leads; Retire.js carries a qualitative severity only (no
+// unifiedLeads maps jslib leads to unified leads, each with note; Retire.js carries a qualitative severity only (no
 // numeric score), so Lead.Score stays nil to keep "unscored" distinct from a real 0.0.
-func unifiedLeads(leads []Lead) []unified.Lead {
+func unifiedLeads(leads []Lead, note string) []unified.Lead {
 	if len(leads) == 0 {
 		return nil
 	}
@@ -78,7 +83,11 @@ func unifiedLeads(leads []Lead) []unified.Lead {
 			Title:      l.Summary,
 			Severity:   l.Severity,
 			References: l.Info,
+			Note:       note,
 		})
 	}
 	return out
 }
+
+// noteUnplaced is why a lead may not apply: the version could not be placed against its bounds.
+const noteUnplaced = "the version could not be placed against this advisory's bounds under the npm order: whether it applies is unknown"

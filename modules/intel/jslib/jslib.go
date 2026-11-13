@@ -123,6 +123,9 @@ type Result struct {
 	Stale           bool   // the source failed, so the repo is the last synced copy from the local store
 	Sample          bool   // the repo is the embedded sample, not the repository: a miss in it is not an answer
 	Err             string // why the configured repository could not be fetched now (Stale: the last synced copy is in use); "" otherwise
+	// Unplaced is every advisory whose bounds could not place Version, whether or not another matched: Vulns
+	// never holds one beside a match (with none matched it holds the same ones, Unpositioned, as it always has).
+	Unplaced []Lead
 }
 
 // Adapter resolves library vulnerabilities from the operator-supplied Retire.js URL,
@@ -392,6 +395,7 @@ func resolve(repo map[string]libEntry, library, version string) Result {
 	if len(res.Vulns) == 0 && len(unpositioned) > 0 {
 		res.Vulns, res.Unpositioned = unpositioned, true
 	}
+	res.Unplaced = unpositioned
 	return res
 }
 

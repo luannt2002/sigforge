@@ -16,9 +16,10 @@ const unifiedSource = "osv"
 // ToUnified maps a Lookup result for name@version (looked up in ecosystem eco) into a unified.Result,
 // keeping the honest sub-cases a bare Status folds distinct via res.PackageKnown / res.VersionPinned:
 //
-//	Vulnerable + version pinned   → affected_by_advisory     (concrete version inside an advisory range)
+//	Vulnerable + version pinned   → affected_by_advisory     (concrete version inside an advisory range; an advisory
+//	                                                         it cannot be placed against follows, its lead noted)
 //	Vulnerable + not pinned       → potentially_affected     (advisories exist, version not pinnable)
-//	Unknown    + package known    → potentially_affected     (advisories exist, version could not be positioned)
+//	Unknown    + package known    → potentially_affected     (advisories exist, version could not be positioned: each lead noted)
 //	Unknown    + package unknown  → unknown_product          (package absent from the index — never "clean")
 //	NoKnownVuln                   → not_checked + unified.NoteNoClearance (a whole dump, nothing matched: no clearance)
 //
@@ -39,7 +40,7 @@ func ToUnified(res Result, eco, name, version string, fetchedAt time.Time) unifi
 	switch res.Status {
 	case StatusVulnerable:
 		u.State = unified.AdvisoryState(res.VersionPinned)
-		u.Leads = unifiedLeads(res.Vulns)
+		u.Leads = append(unifiedLeads(res.Vulns, ""), unifiedLeads(res.Unplaced, noteUnplaced)...)
 		if !res.VersionPinned {
 			u.Err = unified.NoteNoVersion
 		}
@@ -49,13 +50,16 @@ func ToUnified(res Result, eco, name, version string, fetchedAt time.Time) unifi
 		if res.PackageKnown {
 			u.State = unified.StatePotentiallyAffected
 			u.Err = "the version could not be placed against the package's advisories: whether they apply is unknown"
-			u.Leads = unifiedLeads(res.Vulns)
+			u.Leads = unifiedLeads(res.Vulns, noteUnplaced)
 		} else {
 			u.State = unified.StateUnknownProduct
 		}
 	}
 	return u
 }
+
+// noteUnplaced is why a lead may not apply: the version could not be placed against the advisory.
+const noteUnplaced = "the version could not be placed against this advisory's affected ranges or versions: whether it applies is unknown"
 
 // noteOutsideListed is why a platform release's lead may not apply: the advisory reaches it only "from the
 // start", yet lists the package's releases and none so old — the version may belong to another release line
@@ -91,16 +95,16 @@ func Scope(eco string) string {
 	return "ecosystem:" + eco
 }
 
-// unifiedLeads maps OSV vulns to unified leads; Lead.Score is the base score of the record's CVSS v3
-// vector, nil when it has none
+// unifiedLeads maps OSV vulns to unified leads, each with note (one outside the listed releases with its own);
+// Lead.Score is the base score of the record's CVSS v3 vector, nil when it has none
 // (an absent score is never fabricated as 0.0).
-func unifiedLeads(vulns []Vuln) []unified.Lead {
+func unifiedLeads(vulns []Vuln, note string) []unified.Lead {
 	if len(vulns) == 0 {
 		return nil
 	}
 	out := make([]unified.Lead, 0, len(vulns))
 	for _, v := range vulns {
-		l := unified.Lead{ID: v.ID, Title: v.Summary, Severity: v.Severity, CVSS: v.Vector, CWE: unified.CWEIDs(strings.Split(v.CWE, ",")), Published: v.Published}
+		l := unified.Lead{ID: v.ID, Title: v.Summary, Severity: v.Severity, CVSS: v.Vector, CWE: unified.CWEIDs(strings.Split(v.CWE, ",")), Published: v.Published, Note: note}
 		if v.OutsideListed {
 			l.Note = noteOutsideListed
 		}

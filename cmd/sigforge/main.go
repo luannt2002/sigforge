@@ -1078,6 +1078,9 @@ func printEnrich(results []unified.Result) {
 		for _, l := range r.Leads {
 			fmt.Printf("    lead %-16s %-8s cvss=%s epss=%s kev=%t\n",
 				l.ID, orDash(l.Severity), orDash(l.CVSS), scoreStr(l.EPSS), l.KnownExpl)
+			if l.Note != "" {
+				fmt.Printf("      note: %s\n", l.Note)
+			}
 		}
 	}
 	c := coverage.Results(results)
