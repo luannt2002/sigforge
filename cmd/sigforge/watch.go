@@ -70,7 +70,8 @@ func cmdWatch(args []string) error {
 		client.MaxAge = watchMaxAge
 	}
 	set := feedset.New(client)
-	now, answered, unchecked, notWhole := leadsByIdentity(enrich.EnrichUnifiedExt(ctx, nil, nil, inp, set.Options))
+	rs := enrich.EnrichUnifiedExt(ctx, nil, nil, inp, set.Options)
+	now, answered, unchecked, notWhole := leadsByIdentity(rs)
 	for _, note := range set.Notes(ctx) {
 		fmt.Fprintln(os.Stderr, note)
 	}
@@ -94,6 +95,7 @@ func cmdWatch(args []string) error {
 	for _, key := range prev.Seen {
 		seen[key] = true
 	}
+	carryReleaseLessKeys(prev.Leads, seen, rs)
 	for key := range unchecked {
 		if ids := minus(prev.Leads[key], now[key]); len(ids) > 0 {
 			now[key] = append(now[key], ids...) // unknown this run, not gone
@@ -192,6 +194,36 @@ func leadsByIdentity(rs []unified.Result) (leads map[string][]string, answered, 
 		out[k] = ids
 	}
 	return out, answered, unchecked, notWhole
+}
+
+// carryReleaseLessKeys reads a state written while a distro key held no release — one "ecosystem:Debian n@v" for
+// every release. In any run, the first after the upgrade or a later one, each release key the state does not hold
+// yet whose release-less key (the distro is the scope up to its first ":", as Ubuntu's release "22.04:LTS" holds
+// one) is still in the state takes that key's leads and Seen, and the key leaves the state: its leads are neither
+// dropped nor named NEW.
+func carryReleaseLessKeys(leads map[string][]string, seen map[string]bool, rs []unified.Result) {
+	from := map[string]string{} // a release key → the release-less key it takes over
+	for _, r := range rs {
+		eco, ok := strings.CutPrefix(r.Scope, "ecosystem:")
+		distro, _, released := strings.Cut(eco, ":")
+		id := " " + r.Identity + "@" + r.Version
+		key, old := r.Scope+id, "ecosystem:"+distro+id
+		if ok && released && len(leads[key]) == 0 && !seen[key] {
+			from[key] = old
+		}
+	}
+	for key, old := range from {
+		if len(leads[old]) > 0 {
+			leads[key] = leads[old]
+		}
+		if seen[old] {
+			seen[key] = true
+		}
+	}
+	for _, old := range from {
+		delete(leads, old)
+		delete(seen, old)
+	}
 }
 
 func minus(a, b []string) []string {

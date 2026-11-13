@@ -37,6 +37,9 @@ type modelIdentity struct {
 }
 
 func (m modelIdentity) key() string {
+	if m.debian && m.answered {
+		return "ecosystem:Debian:12 " + m.name + "@1.0-1" // looked up with its release
+	}
 	if m.debian {
 		return "ecosystem:Debian " + m.name + "@1.0-1"
 	}

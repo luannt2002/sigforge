@@ -26,7 +26,7 @@ const unifiedSource = "osv"
 // operator-fetch-only, so a served lookup is always live.
 func ToUnified(res Result, eco, name, version string, fetchedAt time.Time) unified.Result {
 	u := unified.Result{
-		Scope:     "ecosystem:" + trimEcosystem(eco),
+		Scope:     Scope(eco),
 		Identity:  name,
 		Version:   version,
 		Source:    unifiedSource,
@@ -73,10 +73,22 @@ func Unavailable(eco, name, version string, err error) unified.Result {
 	if err != nil {
 		msg = err.Error()
 	}
-	u := unified.Unknown("ecosystem:"+trimEcosystem(eco), name, state, msg)
+	u := unified.Unknown(Scope(eco), name, state, msg)
 	u.Version = version
 	u.Source = unifiedSource
 	return u
+}
+
+// Scope is the scope of a package looked up in eco, the same whether the source answers, fails or is off — it is
+// the package's key in watch: an OSV ecosystem under its own name, a distro release kept ("ecosystem:Debian:12",
+// each release its own advisories); any other ecosystem as given. Either way the space around eco is dropped (a purl
+// written "pkg: pypi/x@1.0").
+func Scope(eco string) string {
+	eco = strings.TrimSpace(eco)
+	if e, ok := Ecosystem(eco); ok {
+		eco = e + strings.TrimPrefix(eco, trimEcosystem(eco))
+	}
+	return "ecosystem:" + eco
 }
 
 // unifiedLeads maps OSV vulns to unified leads; Lead.Score is the base score of the record's CVSS v3
@@ -131,8 +143,9 @@ func (a *Adapter) Lookupers() (pkg, release func(ctx context.Context, eco, name,
 	byEco := map[string]*loaded{}
 	lookup := func(rel bool) func(ctx context.Context, eco, name, version string) unified.Result {
 		return func(ctx context.Context, eco, name, version string) unified.Result {
+			scope := Scope(eco)
 			unanswered := func(state unified.State, why string) unified.Result {
-				u := unified.Unknown("ecosystem:"+trimEcosystem(eco), name, state, why)
+				u := unified.Unknown(scope, name, state, why)
 				u.Version, u.Source = version, unifiedSource
 				return u
 			}
@@ -140,7 +153,7 @@ func (a *Adapter) Lookupers() (pkg, release func(ctx context.Context, eco, name,
 			if !ok {
 				return unanswered(unified.StateNotChecked, "OSV ecosystem "+eco+" is not supported")
 			}
-			eco = e + strings.TrimPrefix(eco, trimEcosystem(eco)) // the canonical name, release kept
+			eco = strings.TrimPrefix(scope, "ecosystem:") // the canonical name, release kept
 			if releaseScoped[e] && !strings.Contains(eco, ":") {
 				return unanswered(unified.StateNotChecked, e+" advisories differ per release: give the package as a purl with its distro qualifier (…?distro=<release>)")
 			}
@@ -162,7 +175,7 @@ func (a *Adapter) Lookupers() (pkg, release func(ctx context.Context, eco, name,
 			case l.err != nil:
 				return unanswered(unified.StateSourceUnavailable, l.err.Error())
 			}
-			u := ToUnified(l.idx.lookup(eco, name, version, rel), e, name, version, l.idx.BuiltAt)
+			u := ToUnified(l.idx.lookup(eco, name, version, rel), eco, name, version, l.idx.BuiltAt)
 			switch {
 			case l.idx.fetched.Stale:
 				u.Freshness = unified.FreshnessStale

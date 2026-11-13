@@ -620,33 +620,36 @@ func TestLeadsByIdentitySplitsWhatAnAnswerCanRuleOut(t *testing.T) {
 	}
 }
 
-// Two lookups can land on one key — a distro package given with its release and without it are both
-// "ecosystem:Debian openssl@…" — and the one without a release is not answered: the answered one still
-// names a new advisory NEW and records it, while the leads recorded before stay.
+// One package at one version looked up in two releases and once with no release is three keys, and only part of
+// them is answered: the lookup with no release never is, and a dump with an entry it cannot read cannot rule out
+// what it leaves out. Release 12's new advisory is still NEW though release 11 listed it before and is UNCHECKED
+// beside it, and release 11's lead is kept, not GONE: one key for both releases hid that NEW (F7).
 func TestWatchNamesNewWhenOnlyPartOfAKeyIsAnswered(t *testing.T) {
 	offline(t)
-	adv := func(id string) string {
-		return `{"id":"` + id + `","affected":[{"package":{"name":"openssl","ecosystem":"Debian:12"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"3.0.13-1~deb12u1"}]}]}]}`
-	}
 	var dump atomic.Value
-	dump.Store(osvDump(map[string]string{"Debian/DSA-0.json": adv("DSA-0"), "Debian/DSA-1.json": adv("DSA-1"), "Debian/DSA-9.json": adv("DSA-9")}))
+	dump.Store(osvDump(map[string]string{"Debian/DSA-1.json": opensslAdvisory("DSA-1", "11")}))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump.Load().([]byte)) }))
 	defer srv.Close()
 	t.Setenv(osv.EnvOSVURL, srv.URL)
 	state := filepath.Join(t.TempDir(), "watch.json")
 	run := func() (string, error) {
-		return watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-12", "--package", "pkg:deb/debian/openssl@3.0.11-1")
+		return watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-11",
+			"--package", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-12", "--package", "pkg:deb/debian/openssl@3.0.11-1")
 	}
-	if out, err := run(); err != nil || !strings.Contains(readState(t, state), "DSA-1") {
-		t.Fatalf("the first run must record the answered lookup's lead: err=%v\n%s", err, out)
+	const k, k11, k12 = "ecosystem:Debian openssl@3.0.11-1", "ecosystem:Debian:11 openssl@3.0.11-1", "ecosystem:Debian:12 openssl@3.0.11-1"
+	if out, err := run(); err != nil {
+		t.Fatalf("the first run records where things stand: err=%v\n%s", err, out)
 	}
-	dump.Store(osvDump(map[string]string{"Debian/DSA-1.json": adv("DSA-1"), "Debian/DSA-2.json": adv("DSA-2")}))
+	dump.Store(osvDump(map[string]string{"Debian/DSA-1.json": opensslAdvisory("DSA-1", "12"), "Debian/X.json": `{"id":"X",`}))
 	out, err := run()
-	if err == nil || !strings.Contains(out, "NEW   ecosystem:Debian openssl@3.0.11-1  DSA-2") || strings.Contains(out, "GONE") {
-		t.Fatalf("a new advisory for the answered lookup must be NEW though the key's other lookup was not answered: err=%v\n%s", err, out)
+	want := "NEW   " + k12 + "  DSA-1\n" +
+		"UNCHECKED  " + k + "  (the source did not answer: its leads are kept as they were)\n" +
+		"UNCHECKED  " + k11 + "  (the source cannot prove its data whole: 1 lead(s) absent from its answer are kept)\n"
+	if err == nil || !strings.Contains(err.Error(), "1 new lead(s)") || out != want {
+		t.Fatalf("release 12's new advisory must be NEW beside release 11 UNCHECKED: err=%v\n%s\nwant\n%s", err, out, want)
 	}
-	if got, want := stateLeads(t, state), map[string][]string{"ecosystem:Debian openssl@3.0.11-1": {"DSA-0", "DSA-1", "DSA-2", "DSA-9"}}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the new lead must be recorded beside the kept ones, each once and in order, DSA-0 and DSA-9 among them though the answered lookup no longer lists them: got %v, want %v", got, want)
+	if got, want := stateLeads(t, state), map[string][]string{k11: {"DSA-1"}, k12: {"DSA-1"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("each release keeps its own leads: got %v, want %v", got, want)
 	}
 	if out, err := run(); err != nil || strings.Contains(out, "NEW") {
 		t.Fatalf("a recorded lead is not NEW again: err=%v\n%s", err, out)
@@ -778,7 +781,9 @@ func TestWatchNamesEachIdentityOfARunOnItsOwn(t *testing.T) {
 						return out
 					}
 					key := "wordpress:plugin " + name + "@4.0"
-					if scopes[i] == "D" {
+					if scopes[i] == "D" && k.answered {
+						key = "ecosystem:Debian:12 " + name + "@1.0-1" // looked up with its release
+					} else if scopes[i] == "D" {
 						key = "ecosystem:Debian " + name + "@1.0-1"
 					}
 					switch {
@@ -854,6 +859,7 @@ func TestWatchNamesEachIdentityOfARunOnItsOwn(t *testing.T) {
 				got := strings.FieldsFunc(out, func(r rune) bool { return r == '\n' })
 				slices.Sort(got)
 				slices.Sort(lines)
+				slices.Sort(seen) // the state lists Seen sorted: "ecosystem:Debian bbb" sorts before "ecosystem:Debian:12 aaa"
 				if !slices.Equal(got, lines) {
 					t.Errorf("the run must print the lines of both identities, each whole:\n got %q\nwant %q", got, lines)
 				}
@@ -889,11 +895,12 @@ func TestWatchLeftAndUnansweredBesideAnAnsweredOne(t *testing.T) {
 	t.Setenv(osv.EnvOSVURL, srv.URL)
 	state := filepath.Join(t.TempDir(), "watch.json")
 	k := func(n string) string { return "ecosystem:Debian " + n + "@1.0-1" }
-	writeFile(t, state, `{"updated":"2026-11-01T00:00:00Z","leads":{"`+k("aaa")+`":["A-1","A-2"],"`+k("bbb")+`":["B-1","B-2"],"`+k("ccc")+`":["C-1"],"`+k("ddd")+`":["D-1"],"`+k("eee")+`":["E-1"]},"seen":["`+k("aaa")+`","`+k("bbb")+`","`+k("ccc")+`","`+k("ddd")+`","`+k("eee")+`"]}`)
+	const e12 = "ecosystem:Debian:12 eee@1.0-1" // looked up with its release
+	writeFile(t, state, `{"updated":"2026-11-01T00:00:00Z","leads":{"`+k("aaa")+`":["A-1","A-2"],"`+k("bbb")+`":["B-1","B-2"],"`+k("ccc")+`":["C-1"],"`+k("ddd")+`":["D-1"],"`+e12+`":["E-1"]},"seen":["`+k("aaa")+`","`+k("bbb")+`","`+k("ccc")+`","`+k("ddd")+`","`+e12+`"]}`)
 	out, err := watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:deb/debian/ccc@1.0-1", "--package", "pkg:deb/debian/ddd@1.0-1", "--package", "pkg:deb/debian/eee@1.0-1?distro=debian-12")
 	const left, down = "  2 lead(s) dropped: it is no longer in the inventory\n", "  (the source did not answer: its leads are kept as they were)\n"
 	want := "REMOVED  " + k("aaa") + left + "REMOVED  " + k("bbb") + left + "UNCHECKED  " + k("ccc") + down + "UNCHECKED  " + k("ddd") + down
-	if err != nil || out != want || !reflect.DeepEqual(stateLeads(t, state), map[string][]string{k("ccc"): {"C-1"}, k("ddd"): {"D-1"}, k("eee"): {"E-1"}}) {
+	if err != nil || out != want || !reflect.DeepEqual(stateLeads(t, state), map[string][]string{k("ccc"): {"C-1"}, k("ddd"): {"D-1"}, e12: {"E-1"}}) {
 		t.Fatalf("each identity beside an answered one is named and kept on its own: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
 	}
 }
@@ -914,7 +921,7 @@ func TestWatchSharedAdvisoryIsNamedPerIdentity(t *testing.T) {
 	defer srv.Close()
 	t.Setenv(osv.EnvOSVURL, srv.URL)
 	state := filepath.Join(t.TempDir(), "watch.json")
-	const a, b = "ecosystem:Debian aaa@1.0-1", "ecosystem:Debian bbb@1.0-1"
+	const a, b = "ecosystem:Debian:12 aaa@1.0-1", "ecosystem:Debian:12 bbb@1.0-1"
 	writeFile(t, state, `{"updated":"2026-11-01T00:00:00Z","leads":{"`+a+`":["S-1"],"`+b+`":["S-1","S-2"]},"seen":["`+a+`","`+b+`"]}`)
 	out, err := watchOut(t, "--state", state, "--fail-on-new", "--package", "pkg:deb/debian/aaa@1.0-1?distro=debian-12", "--package", "pkg:deb/debian/bbb@1.0-1?distro=debian-12")
 	if err == nil || out != "NEW   "+a+"  S-2\nGONE  "+b+"  S-2\n" {
@@ -974,7 +981,7 @@ func TestWatchKeepsOSVLeadsThroughARunWithOSVOff(t *testing.T) {
 	}
 	want := map[string][]string{
 		"ecosystem:PyPI requests@2.0.0":          {"PyPI-1"},
-		"ecosystem:Debian openssl@3.0.11-1":      {"Debian:12-1"},
+		"ecosystem:Debian:12 openssl@3.0.11-1":   {"Debian:12-1"},
 		"ecosystem:Maven org.apache:commons@1.0": {"Maven-1"},
 		"wordpress:plugin akismet@4.0":           {"WPV-1"},
 	}
@@ -986,12 +993,197 @@ func TestWatchKeepsOSVLeadsThroughARunWithOSVOff(t *testing.T) {
 		strings.Count(out, "UNCHECKED  ecosystem:") != 3 || !reflect.DeepEqual(stateLeads(t, state), want) {
 		t.Fatalf("a run with OSV off keeps the OSV leads under their keys as UNCHECKED, never REMOVED: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
 	}
-	for _, key := range []string{"ecosystem:PyPI requests@2.0.0", "ecosystem:Debian openssl@3.0.11-1", "ecosystem:Maven org.apache:commons@1.0"} {
+	for _, key := range []string{"ecosystem:PyPI requests@2.0.0", "ecosystem:Debian:12 openssl@3.0.11-1", "ecosystem:Maven org.apache:commons@1.0"} {
 		if !strings.Contains(out, "UNCHECKED  "+key+"  ") {
 			t.Errorf("the OSV-off run must name %s UNCHECKED:\n%s", key, out)
 		}
 	}
 	if out, err := run(srv.URL); err != nil || strings.Contains(out, "NEW") || !reflect.DeepEqual(stateLeads(t, state), want) {
 		t.Fatalf("with OSV back no kept lead is NEW and --fail-on-new passes: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
+	}
+}
+
+// opensslAdvisory is a Debian advisory for openssl in the given releases, fixed after the 3.0.11-1 the tests look up.
+func opensslAdvisory(id string, releases ...string) string {
+	var aff []string
+	for _, rel := range releases {
+		aff = append(aff, `{"package":{"name":"openssl","ecosystem":"Debian:`+rel+`"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"9.0-1"}]}]}`)
+	}
+	return `{"id":"` + id + `","affected":[` + strings.Join(aff, ",") + `]}`
+}
+
+// One package at one version in two releases of a distro is two keys, each holding its own release's leads (F7).
+func TestWatchKeysEachReleaseOnItsOwn(t *testing.T) {
+	offline(t)
+	dump := osvDump(map[string]string{"Debian/DSA-11.json": opensslAdvisory("DSA-11", "11"), "Debian/DSA-12.json": opensslAdvisory("DSA-12", "12")})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(dump) }))
+	defer srv.Close()
+	t.Setenv(osv.EnvOSVURL, srv.URL)
+	state := filepath.Join(t.TempDir(), "watch.json")
+	out, err := watchOut(t, "--state", state, "--package", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-11", "--package", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-12")
+	want := map[string][]string{"ecosystem:Debian:11 openssl@3.0.11-1": {"DSA-11"}, "ecosystem:Debian:12 openssl@3.0.11-1": {"DSA-12"}}
+	if err != nil || out != "first run: 2 lead(s) on 2 identit(ies) recorded; later runs name what changes\n" || !reflect.DeepEqual(stateLeads(t, state), want) {
+		t.Fatalf("two releases must be two keys, two sets of leads: err=%v\n%s\nstate %v, want %v", err, out, stateLeads(t, state), want)
+	}
+}
+
+// A state written before a distro key kept its release holds one key "ecosystem:Debian n@v" for every release. The
+// first run after the upgrade gives each release key of the run the state does not hold yet all of that key's leads
+// and its Seen, and the old key leaves the state: no lead is lost and none is NEW for nothing — a lead the release
+// does not list is GONE once, from a whole answer only. With no such release key the old key goes on as before:
+// REMOVED when not looked up, UNCHECKED when looked up with no release. A run no source answers writes nothing.
+// A second run of the same inventory names nothing new. Rows: B4 AC2, table approved 12/11.
+func TestWatchCarriesAnOldDistroKeyToItsReleaseKeys(t *testing.T) {
+	offline(t)
+	const (
+		k, k11, k12 = "ecosystem:Debian openssl@3.0.11-1", "ecosystem:Debian:11 openssl@3.0.11-1", "ecosystem:Debian:12 openssl@3.0.11-1"
+		npm         = "ecosystem:npm lodash@4.17.20" // answered, unchanged: the run is not one no source answers
+		lodash      = "pkg:npm/lodash@4.17.20"
+		r11, r12    = "pkg:deb/debian/openssl@3.0.11-1?distro=debian-11", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-12"
+		bare        = "pkg:deb/debian/openssl@3.0.11-1" // no release: OSV does not answer for it
+		down        = "  (the source did not answer: its leads are kept as they were)\n"
+		removed     = "  1 lead(s) dropped: it is no longer in the inventory\n"
+	)
+	whole12 := map[string]string{"Debian/DSA-1.json": opensslAdvisory("DSA-1", "12")}
+	// Ubuntu's release holds a ":" ("22.04:LTS"): the release-less key is cut at the first one
+	const (
+		u, u20, u22 = "ecosystem:Ubuntu curl@7.0-1", "ecosystem:Ubuntu:20.04:LTS curl@7.0-1", "ecosystem:Ubuntu:22.04:LTS curl@7.0-1"
+		ru20, ru22  = "pkg:deb/ubuntu/curl@7.0-1?distro=ubuntu-20.04", "pkg:deb/ubuntu/curl@7.0-1?distro=ubuntu-22.04"
+	)
+	curl := func(id, release string) string {
+		return `{"id":"` + id + `","affected":[{"package":{"name":"curl","ecosystem":"Ubuntu:` + release + `"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"9.0-1"}]}]}]}`
+	}
+	for _, tc := range []struct {
+		row       string
+		leads     map[string][]string // the state before
+		seen      []string
+		refs, wp  []string          // --package, --wp-plugin (the WordPress feed never answers)
+		debian    map[string]string // the Debian dump, served as Ubuntu's too; nil: its source fails
+		out, err  string
+		after     map[string][]string // the state after; nil: left as it was
+		seenAfter []string
+	}{
+		{row: "1 no old key: the release key is FIRST", leads: map[string][]string{npm: {"GHSA-1"}}, seen: []string{npm},
+			refs: []string{lodash, r12}, debian: whole12,
+			out:   "FIRST  " + k12 + "  1 lead(s) recorded (its first answer)\n",
+			after: map[string][]string{npm: {"GHSA-1"}, k12: {"DSA-1"}}, seenAfter: []string{npm, k12}},
+		{row: "1 a WordPress key is no distro key: it takes nothing", leads: map[string][]string{npm: {"GHSA-1"}, "ecosystem:wordpress akismet@4.0": {"X-1"}}, seen: []string{npm, "ecosystem:wordpress akismet@4.0"},
+			refs: []string{lodash}, wp: []string{"akismet@4.0"},
+			out:   "REMOVED  ecosystem:wordpress akismet@4.0" + removed + "UNCHECKED  wordpress:plugin akismet@4.0" + down,
+			after: map[string][]string{npm: {"GHSA-1"}}, seenAfter: []string{npm, "ecosystem:wordpress akismet@4.0"}},
+		{row: "2 old key, no release key, not looked up: REMOVED", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}}, seen: []string{npm, k},
+			refs: []string{lodash}, debian: whole12,
+			out:   "REMOVED  " + k + removed,
+			after: map[string][]string{npm: {"GHSA-1"}}, seenAfter: []string{npm, k}},
+		{row: "3 old key, no release key, looked up with no release: UNCHECKED, its leads kept", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}}, seen: []string{npm, k},
+			refs: []string{lodash, bare}, debian: whole12,
+			out:   "UNCHECKED  " + k + down,
+			after: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}}, seenAfter: []string{npm, k}},
+		{row: "4 one release key, a whole answer: what it no longer lists is GONE", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1", "DSA-2"}}, seen: []string{npm, k},
+			refs: []string{lodash, r12}, debian: whole12,
+			out:   "GONE  " + k12 + "  DSA-2\n",
+			after: map[string][]string{npm: {"GHSA-1"}, k12: {"DSA-1"}}, seenAfter: []string{npm, k12}},
+		{row: "4 one release key, an answer not whole: its leads kept", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1", "DSA-2"}}, seen: []string{npm, k},
+			refs: []string{lodash, r12}, debian: map[string]string{"Debian/DSA-1.json": opensslAdvisory("DSA-1", "12"), "Debian/X.json": `{"id":"X",`},
+			out:   "UNCHECKED  " + k12 + "  (the source cannot prove its data whole: 1 lead(s) absent from its answer are kept)\n",
+			after: map[string][]string{npm: {"GHSA-1"}, k12: {"DSA-1", "DSA-2"}}, seenAfter: []string{npm, k12}},
+		{row: "4 one release key its source did not answer: its lead kept", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}}, seen: []string{npm, k},
+			refs:  []string{lodash, r12},
+			out:   "UNCHECKED  " + k12 + down,
+			after: map[string][]string{npm: {"GHSA-1"}, k12: {"DSA-1"}}, seenAfter: []string{npm, k12}},
+		{row: "4 an old key seen with no lead, in a state with no leads: the release key is seen, a lead it has is NEW", seen: []string{npm, k},
+			refs: []string{r12}, debian: whole12,
+			out: "NEW   " + k12 + "  DSA-1\n", err: "1 new lead(s)",
+			after: map[string][]string{k12: {"DSA-1"}}, seenAfter: []string{npm, k12}},
+		{row: "4 no source answers: the state is left as it was", leads: map[string][]string{k: {"DSA-1"}}, seen: []string{k},
+			refs: []string{r12},
+			out:  "UNCHECKED  " + k12 + down, err: "no source answered"},
+		{row: "4 Ubuntu, one release key holding a colon: it takes the leads and Seen; a lead it no longer lists is GONE, a new one NEW", leads: map[string][]string{npm: {"GHSA-1"}, u: {"USN-1", "USN-2"}}, seen: []string{npm, u},
+			refs: []string{lodash, ru22}, debian: map[string]string{"Ubuntu/USN-1.json": curl("USN-1", "22.04:LTS"), "Ubuntu/USN-3.json": curl("USN-3", "22.04:LTS")},
+			out: "NEW   " + u22 + "  USN-3\nGONE  " + u22 + "  USN-2\n", err: "1 new lead(s)",
+			after: map[string][]string{npm: {"GHSA-1"}, u22: {"USN-1", "USN-3"}}, seenAfter: []string{npm, u22}},
+		{row: "5 one release key, the old key looked up with no release: its own key, no lead", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1", "DSA-2"}}, seen: []string{npm, k},
+			refs: []string{lodash, r12, bare}, debian: whole12,
+			out:   "GONE  " + k12 + "  DSA-2\nUNCHECKED  " + k + down,
+			after: map[string][]string{npm: {"GHSA-1"}, k12: {"DSA-1"}}, seenAfter: []string{npm, k12}},
+		{row: "6 two release keys: each takes every lead, GONE once what its release does not list", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1", "DSA-2"}}, seen: []string{npm, k},
+			refs: []string{lodash, r11, r12}, debian: map[string]string{"Debian/DSA-1.json": opensslAdvisory("DSA-1", "11"), "Debian/DSA-2.json": opensslAdvisory("DSA-2", "12")},
+			out:   "GONE  " + k11 + "  DSA-2\nGONE  " + k12 + "  DSA-1\n",
+			after: map[string][]string{npm: {"GHSA-1"}, k11: {"DSA-1"}, k12: {"DSA-2"}}, seenAfter: []string{npm, k11, k12}},
+		{row: "6 Ubuntu, two release keys holding a colon: each takes every lead, GONE once what its release does not list", leads: map[string][]string{npm: {"GHSA-1"}, u: {"USN-1", "USN-2"}}, seen: []string{npm, u},
+			refs: []string{lodash, ru20, ru22}, debian: map[string]string{"Ubuntu/USN-1.json": curl("USN-1", "22.04:LTS"), "Ubuntu/USN-2.json": curl("USN-2", "20.04:LTS"), "Ubuntu/USN-3.json": curl("USN-3", "20.04:LTS")},
+			out: "NEW   " + u20 + "  USN-3\nGONE  " + u20 + "  USN-1\nGONE  " + u22 + "  USN-2\n", err: "1 new lead(s)",
+			after: map[string][]string{npm: {"GHSA-1"}, u20: {"USN-2", "USN-3"}, u22: {"USN-1"}}, seenAfter: []string{npm, u20, u22}},
+		{row: "6/7 one release key in the state, one not: only the new one takes the old key's leads", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1", "DSA-2"}, k11: {"DSA-1"}}, seen: []string{npm, k, k11},
+			refs: []string{lodash, r11, r12}, debian: map[string]string{"Debian/DSA-1.json": opensslAdvisory("DSA-1", "11"), "Debian/DSA-2.json": opensslAdvisory("DSA-2", "12")},
+			out:   "GONE  " + k12 + "  DSA-1\n",
+			after: map[string][]string{npm: {"GHSA-1"}, k11: {"DSA-1"}, k12: {"DSA-2"}}, seenAfter: []string{npm, k11, k12}},
+		{row: "7 the release key in the state: it takes nothing, the old key not looked up is REMOVED", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}, k12: {"DSA-2"}}, seen: []string{npm, k, k12},
+			refs: []string{lodash, r12}, debian: map[string]string{"Debian/DSA-2.json": opensslAdvisory("DSA-2", "12")},
+			out:   "REMOVED  " + k + removed,
+			after: map[string][]string{npm: {"GHSA-1"}, k12: {"DSA-2"}}, seenAfter: []string{npm, k, k12}},
+		{row: "7 the release key in the state: the old key looked up with no release is UNCHECKED", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}, k12: {"DSA-2"}}, seen: []string{npm, k, k12},
+			refs: []string{lodash, r12, bare}, debian: map[string]string{"Debian/DSA-2.json": opensslAdvisory("DSA-2", "12")},
+			out:   "UNCHECKED  " + k + down,
+			after: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}, k12: {"DSA-2"}}, seenAfter: []string{npm, k, k12}},
+		{row: "7 the release key in the state with leads, not seen: it takes nothing", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}, k12: {"DSA-2"}}, seen: []string{npm, k},
+			refs: []string{lodash, r12}, debian: map[string]string{"Debian/DSA-2.json": opensslAdvisory("DSA-2", "12")},
+			out:   "REMOVED  " + k + removed + "FIRST  " + k12 + "  1 lead(s) recorded (its first answer)\n",
+			after: map[string][]string{npm: {"GHSA-1"}, k12: {"DSA-2"}}, seenAfter: []string{npm, k, k12}},
+		{row: "7 the release key in the state only as seen: it takes nothing", leads: map[string][]string{npm: {"GHSA-1"}, k: {"DSA-1"}}, seen: []string{npm, k, k12},
+			refs: []string{lodash, r12}, debian: map[string]string{"Debian/DSA-1.json": opensslAdvisory("DSA-1", "11")},
+			out:   "REMOVED  " + k + removed,
+			after: map[string][]string{npm: {"GHSA-1"}}, seenAfter: []string{npm, k, k12}},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			offline(t)
+			npmDump, debDump := osvDump(map[string]string{"npm/GHSA-1.json": npmAdvisory("GHSA-1", "lodash", "4.17.21")}), osvDump(tc.debian)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/npm/all.zip":
+					_, _ = w.Write(npmDump)
+				case (r.URL.Path == "/Debian/all.zip" || r.URL.Path == "/Ubuntu/all.zip") && tc.debian != nil:
+					_, _ = w.Write(debDump)
+				default:
+					w.WriteHeader(http.StatusBadGateway)
+				}
+			}))
+			defer srv.Close()
+			t.Setenv(osv.EnvOSVURL, srv.URL)
+			t.Setenv(wpcve.EnvWPVulnURL, srv.URL+"/{kind}/{slug}")
+			state := filepath.Join(t.TempDir(), "watch.json")
+			before, err := json.Marshal(watchState{Updated: "2026-11-01T00:00:00Z", Leads: tc.leads, Seen: tc.seen})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, state, string(before))
+			args := []string{"--state", state, "--fail-on-new"}
+			for _, ref := range tc.refs {
+				args = append(args, "--package", ref)
+			}
+			for _, ref := range tc.wp {
+				args = append(args, "--wp-plugin", ref)
+			}
+			out, err := watchOut(t, args...)
+			if out != tc.out || (err == nil) != (tc.err == "") || err != nil && !strings.Contains(err.Error(), tc.err) {
+				t.Fatalf("err = %v, want one naming %q (none if empty)\n got:\n%s\nwant:\n%s", err, tc.err, out, tc.out)
+			}
+			raw := readState(t, state)
+			if tc.after == nil {
+				if raw != string(before) {
+					t.Fatalf("the state must be left as it was, byte for byte:\n%s", raw)
+				}
+			} else {
+				var got watchState
+				slices.Sort(tc.seenAfter)
+				if err := json.Unmarshal([]byte(raw), &got); err != nil || !reflect.DeepEqual(got.Leads, tc.after) || !slices.Equal(got.Seen, tc.seenAfter) {
+					t.Fatalf("state (err=%v):\n%s\nwant leads %v, seen %v", err, raw, tc.after, tc.seenAfter)
+				}
+			}
+			out, err = watchOut(t, args...)
+			if strings.Contains(out, "NEW") || strings.Contains(out, "GONE") || strings.Contains(out, "FIRST") || strings.Contains(out, "REMOVED") || (err == nil) != (tc.after != nil) {
+				t.Fatalf("a second run names nothing new: err=%v\n%s", err, out)
+			}
+		})
 	}
 }

@@ -121,8 +121,8 @@ func TestPotentialAnswersSayWhyAndScopeIsStable(t *testing.T) {
 		}
 	}
 	down := New("http://127.0.0.1:1", fetch.New()).Lookuper()(context.Background(), "debian:12", "openssl", "3.0.11-1")
-	if down.Scope != "ecosystem:Debian" {
-		t.Errorf("an unanswered Debian:12 lookup scope = %q, want ecosystem:Debian like an answered one", down.Scope)
+	if down.Scope != "ecosystem:Debian:12" {
+		t.Errorf("an unanswered Debian:12 lookup scope = %q, want ecosystem:Debian:12 like an answered one", down.Scope)
 	}
 }
 

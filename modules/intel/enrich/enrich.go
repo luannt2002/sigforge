@@ -281,11 +281,7 @@ func EnrichUnifiedExt(ctx context.Context, dets []matcher.Detection, db *schema.
 
 func dispatchOSV(ctx context.Context, p PkgRef, opt Options) unified.Result {
 	if opt.OSV == nil {
-		eco := p.Ecosystem
-		if e, ok := osv.Ecosystem(eco); ok {
-			eco = e // the name OSV answers under when on, so a run with it off keeps the package's key
-		}
-		return offResult("ecosystem:"+eco, p.Name, p.Version, "osv", "osv feed off")
+		return offResult(osv.Scope(p.Ecosystem), p.Name, p.Version, "osv", "osv feed off") // the scope OSV answers under when on: the package keeps its key
 	}
 	return opt.OSV(ctx, p.Ecosystem, p.Name, p.Version)
 }

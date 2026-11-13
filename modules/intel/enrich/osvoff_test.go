@@ -12,7 +12,7 @@ import (
 )
 
 // A package's scope is its key in watch: a run with OSV off names it the way a run with OSV on does — every
-// alias and release of an ecosystem OSV supports under the ecosystem's own name — so one run without the OSV
+// alias of an ecosystem OSV supports under the ecosystem's own name, a distro release kept — so one run without the OSV
 // URL neither drops the package's recorded leads nor makes them NEW the run after; an ecosystem OSV does not
 // support keeps the name it was given.
 func TestOSVOffScopesAPackageAsOSVOnDoes(t *testing.T) {
@@ -21,7 +21,7 @@ func TestOSVOffScopesAPackageAsOSVOnDoes(t *testing.T) {
 	on := osv.New(srv.URL, fetch.New()).Lookuper()
 	want := map[string][]string{ // scope → package refs
 		"ecosystem:npm":         {"npm:p@1.0", "yarn:p@1.0", "pnpm:p@1.0", "node:p@1.0", "javascript:p@1.0", "js:p@1.0", "pkg:npm/lodash@4.17.20"},
-		"ecosystem:PyPI":        {"pypi:p@1.0", "pip:p@1.0", "python:p@1.0", "poetry:p@1.0", "PyPI:p@1.0", "pkg:pypi/requests@2.0"},
+		"ecosystem:PyPI":        {"pypi:p@1.0", "pip:p@1.0", "python:p@1.0", "poetry:p@1.0", "PyPI:p@1.0", "pkg:pypi/requests@2.0", "pkg: pypi/requests@2.0"},
 		"ecosystem:Go":          {"go:p@1.0", "gomod:p@1.0", "golang:p@1.0", "pkg:golang/github.com/gin-gonic/gin@v1.6.0"},
 		"ecosystem:Packagist":   {"packagist:p@1.0", "composer:p@1.0", "php:p@1.0"},
 		"ecosystem:Maven":       {"maven:p@1.0", "gradle:p@1.0", "java:p@1.0", "pkg:maven/org.apache/commons@1.0"},
@@ -33,13 +33,19 @@ func TestOSVOffScopesAPackageAsOSVOnDoes(t *testing.T) {
 		"ecosystem:SwiftURL":    {"swift:p@1.0", "swifturl:p@1.0"},
 		"ecosystem:CRAN":        {"cran:p@1.0"},
 		"ecosystem:Hackage":     {"hackage:p@1.0"},
-		"ecosystem:Debian":      {"debian:p@1.0", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-12", "pkg:deb/debian/zlib@1.0-1"},
-		"ecosystem:Ubuntu":      {"ubuntu:p@1.0", "pkg:deb/ubuntu/curl@7.0-1?distro=ubuntu-22.04"},
-		"ecosystem:Alpine":      {"alpine:p@1.0", "pkg:apk/alpine/musl@1.2.4-r0?distro=3.18.4"},
+		"ecosystem:Debian":      {"debian:p@1.0", "pkg:deb/debian/zlib@1.0-1"},
+		"ecosystem:Ubuntu":      {"ubuntu:p@1.0"},
+		"ecosystem:Alpine":      {"alpine:p@1.0"},
 		"ecosystem:Wolfi":       {"wolfi:p@1.0", "pkg:apk/wolfi/busybox@1.36-r0"},
 		"ecosystem:Chainguard":  {"chainguard:p@1.0", "pkg:apk/chainguard/git@2.4-r0"},
-		"ecosystem:Rocky Linux": {"rocky linux:p@1.0", "rocky:p@1.0", "pkg:rpm/rocky/bash@5.1-1?distro=rocky-9.2"},
-		"ecosystem:AlmaLinux":   {"almalinux:p@1.0", "pkg:rpm/almalinux/glibc@2.34-1?distro=almalinux-9"},
+		"ecosystem:Rocky Linux": {"rocky linux:p@1.0", "rocky:p@1.0"},
+		"ecosystem:AlmaLinux":   {"almalinux:p@1.0"},
+		// a distro package with its release: the release kept, as each release is its own key
+		"ecosystem:Debian:12":        {"pkg:deb/debian/openssl@3.0.11-1?distro=debian-12"},
+		"ecosystem:Ubuntu:22.04:LTS": {"pkg:deb/ubuntu/curl@7.0-1?distro=ubuntu-22.04"},
+		"ecosystem:Alpine:v3.18":     {"pkg:apk/alpine/musl@1.2.4-r0?distro=3.18.4"},
+		"ecosystem:Rocky Linux:9":    {"pkg:rpm/rocky/bash@5.1-1?distro=rocky-9.2"},
+		"ecosystem:AlmaLinux:9":      {"pkg:rpm/almalinux/glibc@2.34-1?distro=almalinux-9"},
 		// outside OSV's ecosystems: the name as given
 		"ecosystem:foo":     {"foo:p@1.0"},
 		"ecosystem:deb":     {"pkg:deb/foo/x@1.0"},
