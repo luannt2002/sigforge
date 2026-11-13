@@ -483,7 +483,8 @@ func TestWatchNamesGoneWhenAWholeDumpNoLongerListsThePackage(t *testing.T) {
 }
 
 // The JavaScript source falls back to its embedded sample when the repository fails: a library the sample
-// does not list is unknown to it, not rid of its advisories — the leads are kept, never GONE.
+// does not list is unknown to it, not rid of its advisories — the leads are kept, never GONE. The sample is not a
+// source, so a run only it answered for fails naming it.
 func TestWatchKeepsLeadsTheEmbeddedSampleCannotRuleOut(t *testing.T) {
 	offline(t)
 	var down atomic.Bool
@@ -502,7 +503,7 @@ func TestWatchKeepsLeadsTheEmbeddedSampleCannotRuleOut(t *testing.T) {
 	}
 	down.Store(true)
 	out, err := watchOut(t, "--state", state, "--fail-on-new", "--jslib", "fakelib@1.0.0")
-	if err != nil || strings.Contains(out, "GONE") || !strings.Contains(out, "UNCHECKED  jslib fakelib@1.0.0") || !strings.Contains(readState(t, state), "CVE-2099-0001") {
+	if err == nil || !strings.Contains(err.Error(), "only the embedded Retire.js sample answered") || strings.Contains(out, "GONE") || !strings.Contains(out, "UNCHECKED  jslib fakelib@1.0.0") || !strings.Contains(readState(t, state), "CVE-2099-0001") {
 		t.Fatalf("the embedded sample must keep the lead as UNCHECKED, never GONE: err=%v\n%s\n%s", err, out, readState(t, state))
 	}
 }

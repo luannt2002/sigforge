@@ -13,6 +13,7 @@ import (
 	"github.com/luannt2002/sigforge/framework/fsio"
 	"github.com/luannt2002/sigforge/modules/intel/enrich"
 	"github.com/luannt2002/sigforge/modules/intel/feedset"
+	"github.com/luannt2002/sigforge/modules/intel/jslib"
 	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
 
@@ -38,7 +39,9 @@ type watchState struct {
 // nothing answered, or for a package added later — is recorded (FIRST), not NEW. With --fail-on-new a
 // NEW lead fails the command, so a timer or monitor can alarm on it; a run no source answered for
 // anything fails too, leaving an existing state as it was, and a run with nothing to look up fails
-// without touching the state.
+// without touching the state. The embedded Retire.js sample is not a source: a run only it answered
+// for is one no source answered for, records nothing it said and fails naming it; beside a source's
+// answer, the sample's answer counts as any other.
 func cmdWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	statePath := fs.String("state", "", "file keeping what the last run saw (required)")
@@ -70,8 +73,30 @@ func cmdWatch(args []string) error {
 		client.MaxAge = watchMaxAge
 	}
 	set := feedset.New(client)
+	// shortcut: unified.Result does not carry jslib.Result.Sample, so watch wires the JS source itself; move the flag into feedset when another caller needs it
+	js, sampled := jslib.New(os.Getenv(jslib.EnvRetireJSURL), client), map[string]bool{}
+	set.Options.JS = func(ctx context.Context, name, version string) unified.Result {
+		res := js.LookupOne(ctx, name, version)
+		u := jslib.ToUnified(res)
+		if res.Sample {
+			sampled[u.Scope+" "+u.Identity+"@"+u.Version] = true
+		}
+		return u
+	}
 	rs := enrich.EnrichUnifiedExt(ctx, nil, nil, inp, set.Options)
 	now, answered, unchecked, notWhole := leadsByIdentity(rs)
+	onlySample, why := len(answered) > 0, ""
+	for key := range answered {
+		onlySample = onlySample && sampled[key]
+	}
+	if onlySample { // the sample ships in the binary: a run only it answered for is a run no source answered for
+		for key := range answered {
+			unchecked[key] = true
+			delete(now, key)
+		}
+		answered, notWhole = map[string]bool{}, map[string]string{}
+		why = " (only the embedded Retire.js sample answered: it ships in the binary and is not a source)"
+	}
 	for _, note := range set.Notes(ctx) {
 		fmt.Fprintln(os.Stderr, note)
 	}
@@ -143,7 +168,7 @@ func cmdWatch(args []string) error {
 		fmt.Printf("UNCHECKED  %s  (%s)\n", key, kept[key])
 	}
 	if len(answered) == 0 && !first { // the state it would write could only lose what the last answers recorded
-		return fmt.Errorf("watch: no source answered for any of the %d identit(ies) looked up; the state is left as it was", len(unchecked))
+		return fmt.Errorf("watch: no source answered for any of the %d identit(ies) looked up%s; the state is left as it was", len(unchecked), why)
 	}
 	for key := range answered {
 		seen[key] = true
@@ -156,7 +181,7 @@ func cmdWatch(args []string) error {
 		return fmt.Errorf("watch: %w", err)
 	}
 	if len(answered) == 0 && len(unchecked) > 0 {
-		return fmt.Errorf("watch: no source answered for any of the %d identit(ies) looked up", len(unchecked))
+		return fmt.Errorf("watch: no source answered for any of the %d identit(ies) looked up%s", len(unchecked), why)
 	}
 	if *failOnNew && news > 0 {
 		return fmt.Errorf("watch: %d new lead(s)", news)
