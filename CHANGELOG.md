@@ -4,8 +4,8 @@
 
 v0.5.0 adds monitoring of an inventory between syncs (`watch`, `sources`), new lookups (WordPress core, CVE by ID,
 detected platforms in OSV, JavaScript libraries from a script) and keeps a good stored copy when a source answers
-with junk. No exported declaration of v0.4.0 was removed or changed; what changed in meaning is listed under
-"Consumer API".
+with junk. No exported declaration of v0.4.0 was removed or given another type (`merge.EngineVersion` holds "0.5.0");
+the changes in meaning we know of are listed under "Consumer API".
 
 ### New
 - `sigforge watch --state FILE` re-checks an inventory (`--package`, `--sbom`, `--wp-plugin`, `--wp-theme`, `--jslib`)
@@ -91,10 +91,23 @@ Changed meaning:
   or is off.
 - `jslib.ToUnified` and `lifecycle.ToUnified` add to `Err` why the source failed when the embedded sample or a stale
   stored copy is in use.
+- `versioncmp.Compare`: PyPI compares local version labels (`1.0+cu118` is above `1.0`, `2.0.0+local.1` below
+  `2.0.0+local.2`; they compared equal) and cannot compare a malformed one (`1.0+`), which it compared before. Maven
+  folds a hyphen group holding only a release qualifier (`ga`, `final`, `release`) into the next one (`1-ga-1`,
+  `1-final-1` and `1-release-1` equal `1-1`; they were lower). Packagist reads `~`, a space and a
+  repeated or trailing dot as a separator (`1.0~1`, `1.0 1` and `1.0..1` equal `1.0.1`, `1.0.` equals `1.0`).
+- `lifecycle`: a product name in the endoflife bundle, and the tech given to `ProductFor`, match without regard to case
+  (`nginx` is Nginx); a bundle's product name, a cycle and a version drop invisible format characters (zero-width
+  space, BOM), and a cycle or version reads a leading `V` and a decimal comma (`V8,2` is `8.2`).
+- `identity`: `Resolver.ResolveCPE` no longer verifies a CPE from a dictionary read only in part (one page of a paged
+  feed); it answers unknown, as with the embedded sample.
+- `kev`: the live catalog is read row by row. A row's field of the wrong type costs that field; it made the whole
+  catalog unusable before. A row without a well-formed CVE id is skipped and counted (`CatalogStatus.Skipped`, `Warn`).
 
 ### Upgrading
-`watch` and `sources` are new in this release. A `watch` state file written by a build of `main` before v0.5.0 is read
-as it is, with two one-time effects:
+The engine version is 0.5.0: a DB built with this release names it in its manifest, and `verify` still accepts a DB
+built with 0.4.0. `watch` and `sources` are new in this release. A `watch` state file written by a build of `main`
+before v0.5.0 is read as it is, with two one-time effects:
 - An advisory the old rule hid beside a matched one (JavaScript libraries, WordPress, OSV) is printed `NEW` once (with
   `--fail-on-new` that run fails) and recorded; later runs print nothing for it.
 - A distro package's key now holds its release (`ecosystem:Debian:12 openssl@3.0.11-1`). An old key without the
@@ -116,3 +129,16 @@ as it is, with two one-time effects:
   reads the real repository can print `NEW` for advisories the sample does not carry.
 - `watch` prints `UNCHECKED … (the source did not answer: its leads are kept as they were)` on a first run too, when
   no lead was recorded yet.
+- A first `watch` run that only the embedded Retire.js sample answered prints that it recorded 0 leads, exits 1 and
+  writes a state file holding none.
+- The store replaces a file and its metadata one after the other, not together; a `sync` stopped while it moves a
+  new OSV dump's index into place can leave an unused `*.idx.gz` file in the store.
+- A passive `dom` rule's `text` pattern is not evaluated, so a tech whose only `dom` rule needs one is not detected
+  through `dom`.
+- In `enrich` results, OSV leads of the same severity follow the order of the dump's entries (`watch` sorts them).
+- A chain of `implies` five or more levels deep can miss its last level on some runs; the bundled data is at most
+  three levels deep.
+- `schema.Validate` and the `refresh` gate accept a pattern that can never match (an empty `html` or `scriptSrc`
+  pattern, a header without a pattern); `refresh` can count more techs changed than `sigforge diff` reports for the
+  same two DBs; and the gate does not notice a tech detected only through `implies` losing the last tech that
+  implies it.

@@ -183,7 +183,7 @@ sigforge watch --state watch.json --sbom inventory.cdx.json --fail-on-new   # af
 
 `diff`, `eol` and `cve` are the depth layer: `diff` is pure; `eol` and `cve` query
 an operator-supplied feed (`SIGFORGE_SOURCE_ENDOFLIFE_URL` / `SIGFORGE_SOURCE_CVE_URL`)
-and are **off by default** — unset, they report `unknown`, never "safe".
+and are **off by default** — unset, a lookup that needs the feed exits 1 naming the variable, never "safe".
 
 In `merge`, the baseline always wins a tech-id conflict; among `--source`/`--fetch`
 inputs an earlier flag outranks a later one. A losing entry's version-capturing

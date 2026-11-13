@@ -55,7 +55,8 @@ importing sigforge does.
 | `coverage [--db FILE] [--json]` | how much of a DB can reach a CVE lookup or extract a version |
 
 Every intel source is off until its `SIGFORGE_SOURCE_*_URL` is set (see
-`.env.example`); an off source answers `not_checked`, never "clean".
+`.env.example`); an off source answers `not_checked`, never "clean". Retire.js, KEV and the
+CPE dictionary fall back instead to a small sample embedded in the binary.
 A repeatable flag given a value that names nothing — empty, blank, or a version with no name
 (`--jslib @3.1.0`), as an unset variable leaves it — is refused with the flag's name before
 anything is looked up or written.
