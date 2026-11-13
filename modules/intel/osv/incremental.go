@@ -115,9 +115,13 @@ func (a *Adapter) changedSince(ctx context.Context, eco string, since time.Time)
 	seen := map[string]bool{}
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
-		at, id, ok := strings.Cut(strings.TrimSpace(sc.Text()), ",")
-		if !ok {
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
 			continue
+		}
+		at, id, ok := strings.Cut(text, ",")
+		if !ok { // an HTML page or an error body in place of the list: not "no change"
+			return nil, time.Time{}, fmt.Errorf("osv %s: changed-records list: a line is not \"time,id\"", eco)
 		}
 		t, err := time.Parse(time.RFC3339Nano, at)
 		if err != nil {
@@ -137,7 +141,13 @@ func (a *Adapter) changedSince(ctx context.Context, eco string, since time.Time)
 			break
 		}
 	}
-	return ids, newest, sc.Err()
+	if err := sc.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	if newest.IsZero() { // the list holds every record of the ecosystem: an empty one was not read
+		return nil, time.Time{}, fmt.Errorf("osv %s: changed-records list lists no record", eco)
+	}
+	return ids, newest, nil
 }
 
 // fetchRecord puts one changed record's JSON in the overlay.

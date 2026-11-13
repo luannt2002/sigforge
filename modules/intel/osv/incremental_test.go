@@ -128,6 +128,7 @@ type osvMirror struct {
 	csv          string
 	records      map[string]string
 	recordStatus int // non-zero: every record request answers this status
+	csvClaim     int // non-zero: the list claims this Content-Length, more than it sends (cut off)
 	zips, recs   atomic.Int32
 }
 
@@ -140,6 +141,9 @@ func (m *osvMirror) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Last-Modified", "Mon, 09 Nov 2026 02:00:00 GMT")
 		_, _ = w.Write(m.dump)
 	case p == "/npm/modified_id.csv":
+		if m.csvClaim != 0 {
+			w.Header().Set("Content-Length", fmt.Sprint(m.csvClaim))
+		}
 		_, _ = w.Write([]byte(m.csv))
 	case strings.HasSuffix(p, ".json"):
 		m.recs.Add(1)
@@ -231,6 +235,13 @@ func TestSyncFailsOnABrokenChangeAnswer(t *testing.T) {
 	}{
 		{"record answers 500", "2026-11-09T04:00:00Z,GHSA-new\n", http.StatusInternalServerError, true},
 		{"list opens with a header", "modified,id\n2026-11-09T04:00:00Z,GHSA-new\n", 0, true},
+		// an answer that is not the list fails as one that cannot be read: it never passes for "no change"
+		{"empty body", "", 0, true},
+		{"blank lines only", "\n \n", 0, true},
+		{"an HTML page without a comma", "<html><body>proxy login required</body></html>\n", 0, true},
+		{"a JSON error without a comma", `{"error":"not found"}`, 0, true},
+		{"a line without a comma above the mark", "2026-11-09T04:00:00Z,GHSA-new\nGHSA-x\n2026-11-08T20:00:00Z,GHSA-old\n", 0, true},
+		{"blank lines around the list are skipped", "\n2026-11-09T04:00:00Z,GHSA-new\n \t\n2026-11-08T20:00:00Z,GHSA-old\n", 0, false},
 		{"garbage below the mark is never read", "2026-11-09T04:00:00Z,GHSA-new\n2026-11-08T20:00:00Z,GHSA-old\nnot-a-time,GHSA-x\n", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -246,6 +257,32 @@ func TestSyncFailsOnABrokenChangeAnswer(t *testing.T) {
 			}
 			if m.zips.Load() != 1 {
 				t.Fatalf("%d dump downloads, want only the first", m.zips.Load())
+			}
+		})
+	}
+}
+
+// A list that cannot be read to its end fails with the read error itself: a list cut off is never taken
+// as whole (the mark would pass records not fetched), and a line too long to read is not "lists no record".
+func TestSyncFailsOnAListItCannotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name, csv string
+		claim     int
+		want      string
+	}{
+		{"cut off after a record", "2026-11-09T04:00:00Z,GHSA-new\n", 1 << 10, "unexpected EOF"},
+		{"a line too long to read", strings.Repeat("x", 70000) + ",GHSA-new\n", 0, "token too long"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := makeZip(t, map[string]string{"npm/GHSA-old.json": lodashAdv("GHSA-old", "4.17.21", "")})
+			m := &osvMirror{dump: mustBytes(r)}
+			syncNow, _, _ := mirrorRun(t, m)
+			m.set(func() {
+				m.csv, m.csvClaim = tc.csv, tc.claim
+				m.records = map[string]string{"GHSA-new": lodashAdv("GHSA-new", "4.17.22", "")}
+			})
+			if err := syncNow(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("sync err = %v, want one naming %q", err, tc.want)
 			}
 		})
 	}
