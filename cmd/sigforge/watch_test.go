@@ -943,3 +943,55 @@ func TestWatchFirstRunCountsWhatItRecords(t *testing.T) {
 		t.Fatalf("the first run records what it counts: got %v, want %v", got, want)
 	}
 }
+
+// A run without the OSV URL (its variable not loaded) keeps each package under the key OSV gives it: the
+// PyPI, Debian and Maven leads recorded with OSV on are kept and named UNCHECKED, never REMOVED, and the
+// run with OSV back names no NEW lead, so --fail-on-new passes.
+func TestWatchKeepsOSVLeadsThroughARunWithOSVOff(t *testing.T) {
+	offline(t)
+	adv := func(eco, pkg, fixed string) string {
+		return `{"id":"` + eco + `-1","affected":[{"package":{"name":"` + pkg + `","ecosystem":"` + eco + `"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"` + fixed + `"}]}]}]}`
+	}
+	dumps := map[string][]byte{
+		"/PyPI/all.zip":   osvDump(map[string]string{"PyPI/a.json": adv("PyPI", "requests", "2.31.0")}),
+		"/Debian/all.zip": osvDump(map[string]string{"Debian/a.json": adv("Debian:12", "openssl", "3.0.13-1~deb12u1")}),
+		"/Maven/all.zip":  osvDump(map[string]string{"Maven/a.json": adv("Maven", "org.apache:commons", "2.0")}),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b, ok := dumps[r.URL.Path]; ok {
+			_, _ = w.Write(b)
+			return
+		}
+		_, _ = w.Write([]byte(`{"akismet":{"vulnerabilities":[{"id":"WPV-1","title":"XSS","min_version":"1.0","max_version":"5.0"}]}}`))
+	}))
+	defer srv.Close()
+	t.Setenv(wpcve.EnvWPVulnURL, srv.URL+"/{kind}/{slug}") // answers in every run, so the OSV-off run is not one nothing answered
+	state := filepath.Join(t.TempDir(), "watch.json")
+	run := func(osvURL string) (string, error) {
+		t.Setenv(osv.EnvOSVURL, osvURL)
+		return watchOut(t, "--state", state, "--fail-on-new", "--wp-plugin", "akismet@4.0", "--package", "pkg:pypi/requests@2.0.0",
+			"--package", "pkg:deb/debian/openssl@3.0.11-1?distro=debian-12", "--package", "pkg:maven/org.apache/commons@1.0")
+	}
+	want := map[string][]string{
+		"ecosystem:PyPI requests@2.0.0":          {"PyPI-1"},
+		"ecosystem:Debian openssl@3.0.11-1":      {"Debian:12-1"},
+		"ecosystem:Maven org.apache:commons@1.0": {"Maven-1"},
+		"wordpress:plugin akismet@4.0":           {"WPV-1"},
+	}
+	if out, err := run(srv.URL); err != nil || !reflect.DeepEqual(stateLeads(t, state), want) {
+		t.Fatalf("the first run records every lead: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
+	}
+	out, err := run("")
+	if err != nil || strings.Contains(out, "REMOVED") || strings.Contains(out, "GONE") || strings.Contains(out, "NEW") ||
+		strings.Count(out, "UNCHECKED  ecosystem:") != 3 || !reflect.DeepEqual(stateLeads(t, state), want) {
+		t.Fatalf("a run with OSV off keeps the OSV leads under their keys as UNCHECKED, never REMOVED: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
+	}
+	for _, key := range []string{"ecosystem:PyPI requests@2.0.0", "ecosystem:Debian openssl@3.0.11-1", "ecosystem:Maven org.apache:commons@1.0"} {
+		if !strings.Contains(out, "UNCHECKED  "+key+"  ") {
+			t.Errorf("the OSV-off run must name %s UNCHECKED:\n%s", key, out)
+		}
+	}
+	if out, err := run(srv.URL); err != nil || strings.Contains(out, "NEW") || !reflect.DeepEqual(stateLeads(t, state), want) {
+		t.Fatalf("with OSV back no kept lead is NEW and --fail-on-new passes: err=%v\n%s\nstate %v", err, out, stateLeads(t, state))
+	}
+}

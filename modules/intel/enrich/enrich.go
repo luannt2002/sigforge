@@ -20,6 +20,7 @@ import (
 	"github.com/luannt2002/sigforge/modules/intel/identity"
 	"github.com/luannt2002/sigforge/modules/intel/lifecycle"
 	"github.com/luannt2002/sigforge/modules/intel/matcher"
+	"github.com/luannt2002/sigforge/modules/intel/osv"
 	"github.com/luannt2002/sigforge/modules/intel/schema"
 	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
@@ -278,7 +279,11 @@ func EnrichUnifiedExt(ctx context.Context, dets []matcher.Detection, db *schema.
 
 func dispatchOSV(ctx context.Context, p PkgRef, opt Options) unified.Result {
 	if opt.OSV == nil {
-		return offResult("ecosystem:"+p.Ecosystem, p.Name, p.Version, "osv", "osv feed off")
+		eco := p.Ecosystem
+		if e, ok := osv.Ecosystem(eco); ok {
+			eco = e // the name OSV answers under when on, so a run with it off keeps the package's key
+		}
+		return offResult("ecosystem:"+eco, p.Name, p.Version, "osv", "osv feed off")
 	}
 	return opt.OSV(ctx, p.Ecosystem, p.Name, p.Version)
 }
