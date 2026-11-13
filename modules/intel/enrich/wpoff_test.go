@@ -9,7 +9,7 @@ import (
 )
 
 // With the WordPress feed off a slug keeps its kind's scope — core is never reported as a plugin — and a kind
-// wpcve has no lookup for gets the result the wired feed gives it (G06): its own scope, never a plugin's.
+// wpcve has no lookup for gets the result the wired feed (feedset) gives it: its own scope, never a plugin's.
 // With the feed on, every kind still goes to the lookup untouched.
 func TestWPOffScopesByKind(t *testing.T) {
 	for _, c := range []struct{ kind, scope, err string }{

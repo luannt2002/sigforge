@@ -216,7 +216,7 @@ func TestProviderNamesWithoutBody(t *testing.T) {
 
 // ---- NXDomain (DNS-layer signal is KEPT + flagged, not dropped) ----
 
-// AC1 + AC4: a provider whose takeover is NXDOMAIN is KEPT in the parsed table and is
+// A provider whose takeover is NXDOMAIN is KEPT in the parsed table and is
 // DISTINGUISHABLE via the NXDomain flag — using only the data's own `nxdomain` field.
 func TestParseKeepsNXDomainFlag(t *testing.T) {
 	fps, err := ParseFingerprints([]byte(testJSON))
@@ -238,13 +238,13 @@ func TestParseKeepsNXDomainFlag(t *testing.T) {
 	if !eb.NXDomain {
 		t.Fatal("an NXDOMAIN provider must be flagged NXDomain=true")
 	}
-	// AC2 parity: a CNAME-string provider must NOT be flagged NXDomain.
+	// Parity: a CNAME-string provider must NOT be flagged NXDomain.
 	if s3 == nil || s3.NXDomain {
 		t.Fatalf("a body-fingerprint provider must have NXDomain=false, got %+v", s3)
 	}
 }
 
-// AC1: a consumer that observed NXDOMAIN for the CNAME gets the vulnerable provider back.
+// A consumer that observed NXDOMAIN for the CNAME gets the vulnerable provider back.
 func TestMatchNXDomainHitsVulnerableProvider(t *testing.T) {
 	fps := fixture(t)
 	fp, ok := MatchNXDomain(fps, "app.elasticbeanstalk.com.")
@@ -256,7 +256,7 @@ func TestMatchNXDomainHitsVulnerableProvider(t *testing.T) {
 	}
 }
 
-// AC1 negative: an NXDOMAIN provider upstream marks NOT vulnerable must NOT hit (ELB),
+// Negatives: an NXDOMAIN provider upstream marks NOT vulnerable must NOT hit (ELB),
 // and a body-fingerprint provider must NOT hit via the DNS-layer path (S3), and a CNAME
 // outside the table is no hit.
 func TestMatchNXDomainNegatives(t *testing.T) {

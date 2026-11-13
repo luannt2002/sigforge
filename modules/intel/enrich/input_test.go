@@ -1,6 +1,7 @@
 package enrich
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -81,6 +82,7 @@ func TestParsePackageRefRefusesABlankName(t *testing.T) {
 func TestParsePackageRefKeepsValidForms(t *testing.T) {
 	for in, want := range map[string]PkgRef{
 		"pkg:generic/my%20tool@1.0":                     {"generic", "my tool", "1.0"},
+		"generic:my tool@1.0":                           {"generic", "my tool", "1.0"},
 		"pkg:npm/%40angular/core@12.0.0":                {"npm", "@angular/core", "12.0.0"},
 		"pkg:nuget/Newtonsoft.Json@12.0.1":              {"nuget", "Newtonsoft.Json", "12.0.1"},
 		"pkg:apk/alpine/libssl3@3.0.8-r0?distro=3.17.2": {"Alpine:v3.17", "libssl3", "3.0.8-r0"},
@@ -117,6 +119,26 @@ func TestParseCycloneDX(t *testing.T) {
 	}
 	if _, _, err := ParseCycloneDX([]byte(`{"spdxVersion":"SPDX-2.3"}`)); err == nil {
 		t.Fatal("a document that is not a CycloneDX SBOM must be refused")
+	}
+}
+
+// A component whose purl names only blanks is counted in skipped, as one without a purl is: never looked up as " ".
+func TestParseCycloneDXSkipsABlankName(t *testing.T) {
+	bom := `{"bomFormat":"CycloneDX","components":[{"purl":"pkg:npm/%20@1.0"},{"purl":"pkg:npm/ @1.0"},{"purl":"pkg:npm/%09"},
+	  {"purl":"pkg:npm/lodash@4.17.20"}]}`
+	refs, skipped, err := ParseCycloneDX([]byte(bom))
+	if want := []PkgRef{{"npm", "lodash", "4.17.20"}}; err != nil || !reflect.DeepEqual(refs, want) || skipped != 3 {
+		t.Fatalf("got %+v (skipped %d, err %v), want %+v (skipped 3)", refs, skipped, err, want)
+	}
+}
+
+// A purl that names no package, or does not decode, is refused naming the value as a package, as the short form is.
+func TestParsePackageRefNamesThePackageInAPurlError(t *testing.T) {
+	for _, in := range []string{"pkg:npm/@1.0", "pkg:npm/%20@1.0", "pkg:/lodash@1.0.0", "pkg:npm/%zz@1.0", "pkg:npm/lodash@%zz",
+		"pkg:npm/lodash@1.0?a=%zz"} {
+		if _, err := ParsePackageRef(in); err == nil || !strings.HasPrefix(err.Error(), fmt.Sprintf("package %q: ", in)) {
+			t.Errorf("%q: err = %v, want one naming the package", in, err)
+		}
 	}
 }
 

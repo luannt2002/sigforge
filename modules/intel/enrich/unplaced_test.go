@@ -26,7 +26,7 @@ const (
 // only from the start: keepDoubtsApart moves it, with its note, into the potentially-affected result beside the
 // matches, and that result names each distinct reason once. Shopware 5.7.17 looked up in shopware/core through a
 // real OSV dump (floor 6.0.0): m a match by OSV's rule, o reached only from the start, u a fixed bound OSV cannot
-// read. Rows K1–K4 of the B1 table.
+// read. Cases K1–K4 below.
 func TestReleaseUnplacedAdvisoryIsKeptApartWithItsReason(t *testing.T) {
 	adv := func(id, events, versions string) string {
 		return `{"id":"` + id + `","affected":[{"package":{"name":"shopware/core","ecosystem":"Packagist"},` +

@@ -103,10 +103,10 @@ func TestSourcePrecedenceByTrust(t *testing.T) {
 	}
 }
 
-// TestAlternateKeepsSourceLicenseNotWinnerLicense guards finding #3: when a GPL
+// TestAlternateKeepsSourceLicenseNotWinnerLicense guards the license tag of an alternate: when a GPL
 // source's version pattern is pooled as an alternate under an Apache baseline
 // winner, that alternate must carry its own GPL provenance — never be served under
-// the winner's Apache license (the §4 mislabel).
+// the winner's Apache license (a mislabel the license policy in README.md rules out).
 func TestAlternateKeepsSourceLicenseNotWinnerLicense(t *testing.T) {
 	base := map[string]schema.Fingerprint{
 		"Nginx": {

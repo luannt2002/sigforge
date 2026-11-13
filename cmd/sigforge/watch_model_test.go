@@ -152,12 +152,12 @@ func modelDraw(r *rand.Rand) (ids []modelIdentity, first, failOnNew bool) {
 func (m modelIdentity) alone() (lines, recorded []string, seen bool, news int) {
 	key := m.key()
 	switch {
-	case !m.listed: // Q2: it left the inventory — REMOVED when it had leads; they leave the state, it stays seen
+	case !m.listed: // it left the inventory — REMOVED when it had leads; they leave the state, it stays seen
 		if len(m.before) > 0 {
 			lines = []string{fmt.Sprintf("REMOVED  %s  %d lead(s) dropped: it is no longer in the inventory", key, len(m.before))}
 		}
 		return lines, nil, m.seenBefore, 0
-	case !m.answered: // G05a rows 1 and 3: not looked up — UNCHECKED, its leads kept as they were
+	case !m.answered: // not looked up (its source off or down) — UNCHECKED, its leads kept as they were
 		return []string{"UNCHECKED  " + key + "  (the source did not answer: its leads are kept as they were)"}, m.before, m.seenBefore, 0
 	case !m.seenBefore: // its first answer is where it stands: recorded, never NEW
 		if len(m.feed) > 0 {
@@ -170,13 +170,13 @@ func (m modelIdentity) alone() (lines, recorded []string, seen bool, news int) {
 	}
 	news = len(lines)
 	absent := setMinus(m.before, m.feed)
-	if m.debian { // Q3 (a), rows 2, 4 and 7 with whole data: what the whole dump leaves out is GONE
+	if m.debian { // an answer from a whole OSV dump: what it leaves out is GONE
 		for _, id := range absent {
 			lines = append(lines, "GONE  "+key+"  "+id)
 		}
 		return lines, m.feed, true, news
 	}
-	// Q3 (a), rows 4 and 7 without whole data: a WordPress answer never makes a lead GONE; what it leaves out is kept
+	// an answer without whole data (WordPress here) never makes a lead GONE: what it leaves out is kept
 	if len(absent) > 0 {
 		lines = append(lines, fmt.Sprintf("UNCHECKED  %s  (the source cannot prove its data whole: %d lead(s) absent from its answer are kept)", key, len(absent)))
 	}
@@ -241,10 +241,10 @@ func modelDescribe(ids []modelIdentity, first, failOnNew bool) string {
 	return s
 }
 
-// Generated runs of 3–5 identities — each of a kind drawn on its own from the ten of the pair table, their leads from
+// Generated runs of 3–5 identities — each of a kind drawn on its own from the ten in modelKinds, their leads from
 // one pool of four ids so identities share advisories, first runs and both whole-run rules among them — print, fail
-// on and record what a model written from the contract says: each identity reckoned alone (the G05a table, Q2 and
-// Q3 as approved), then the rules for the whole run. Lines are compared sorted: their order is not in the contract.
+// on and record what a model written from the contract says: each identity reckoned alone (alone), then the rules
+// for the whole run (modelRun). Lines are compared sorted: their order is not in the contract.
 func TestWatchAgreesWithAPerIdentityModel(t *testing.T) {
 	offline(t)
 	var dump, feed atomic.Value // the run's Debian dump; the WordPress feed's answers by slug, 502 for any other

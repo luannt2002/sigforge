@@ -111,7 +111,7 @@ func TestUnavailableSourceOffVsDead(t *testing.T) {
 }
 
 // Every potentially_affected answer says why it is not pinned, and every result of one lookup
-// names the ecosystem the same way, release or not.
+// names the ecosystem the same way, its release kept, whether the source answers or not.
 func TestPotentialAnswersSayWhyAndScopeIsStable(t *testing.T) {
 	unpinned := ToUnified(Result{Status: StatusVulnerable, Vulns: []Vuln{{ID: "GHSA-1"}}, PackageKnown: true}, "npm", "lodash", "", time.Time{})
 	unplaced := ToUnified(Result{Status: StatusUnknown, PackageKnown: true, VersionPinned: true}, "npm", "lodash", "4.x-weird", time.Time{})

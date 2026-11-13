@@ -624,7 +624,7 @@ func TestLeadsByIdentitySplitsWhatAnAnswerCanRuleOut(t *testing.T) {
 // One package at one version looked up in two releases and once with no release is three keys, and only part of
 // them is answered: the lookup with no release never is, and a dump with an entry it cannot read cannot rule out
 // what it leaves out. Release 12's new advisory is still NEW though release 11 listed it before and is UNCHECKED
-// beside it, and release 11's lead is kept, not GONE: one key for both releases hid that NEW (F7).
+// beside it, and release 11's lead is kept, not GONE: one key for both releases hid that NEW.
 func TestWatchNamesNewWhenOnlyPartOfAKeyIsAnswered(t *testing.T) {
 	offline(t)
 	var dump atomic.Value
@@ -1013,7 +1013,7 @@ func opensslAdvisory(id string, releases ...string) string {
 	return `{"id":"` + id + `","affected":[` + strings.Join(aff, ",") + `]}`
 }
 
-// One package at one version in two releases of a distro is two keys, each holding its own release's leads (F7).
+// One package at one version in two releases of a distro is two keys, each holding its own release's leads.
 func TestWatchKeysEachReleaseOnItsOwn(t *testing.T) {
 	offline(t)
 	dump := osvDump(map[string]string{"Debian/DSA-11.json": opensslAdvisory("DSA-11", "11"), "Debian/DSA-12.json": opensslAdvisory("DSA-12", "12")})
@@ -1028,12 +1028,14 @@ func TestWatchKeysEachReleaseOnItsOwn(t *testing.T) {
 	}
 }
 
-// A state written before a distro key kept its release holds one key "ecosystem:Debian n@v" for every release. The
-// first run after the upgrade gives each release key of the run the state does not hold yet all of that key's leads
-// and its Seen, and the old key leaves the state: no lead is lost and none is NEW for nothing — a lead the release
-// does not list is GONE once, from a whole answer only. With no such release key the old key goes on as before:
-// REMOVED when not looked up, UNCHECKED when looked up with no release. A run no source answers writes nothing.
-// A second run of the same inventory names nothing new. Rows: B4 AC2, table approved 12/11.
+// A state written before a distro key kept its release holds one key "ecosystem:Debian n@v" for every release. Any
+// run while that key is in the state, the first after the upgrade or a later one, gives each release key of the run
+// the state does not hold yet all of that key's leads and its Seen, and the old key leaves the state: no lead is lost
+// and none is NEW for nothing — a lead the release does not list is GONE once, from a whole answer only. With no such
+// release key the old key goes on as before: REMOVED when not looked up, UNCHECKED when looked up with no release.
+// A run no source answers writes nothing. A second run of the same inventory names nothing new. Each case is
+// numbered by its situation: 1 no old key, 2–3 an old key and no release key, 4–5 one release key, 6 two, 7 a release
+// key the state already holds.
 func TestWatchCarriesAnOldDistroKeyToItsReleaseKeys(t *testing.T) {
 	offline(t)
 	const (

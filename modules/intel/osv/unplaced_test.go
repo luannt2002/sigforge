@@ -16,7 +16,7 @@ func demoNpm(id, top, affected string) string {
 // An advisory the version cannot be placed against reaches the unified result as a lead, noted, after every
 // match — a match never hides it; one the version is placed outside never becomes a lead. The typed result
 // keeps its meaning — Status and Vulns as they always were — and names every advisory not placed in Unplaced;
-// one advisory both placed and not (an alias) is reported once, placed. Rows T1–T9, D1 and G1–G2 of the B1 table.
+// one advisory both placed and not (an alias) is reported once, placed.
 func TestUnplacedAdvisoryStaysALeadBesideAMatch(t *testing.T) {
 	var (
 		m   = demoNpm("X-M", `"database_specific":{"severity":"LOW"},`, `"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"9.0.0"}]}]`)
@@ -31,7 +31,7 @@ func TestUnplacedAdvisoryStaysALeadBesideAMatch(t *testing.T) {
 		row, ver string
 		feed     []string // in dump order
 		status   Status
-		vulns    []string // the typed Vulns, as before B1
+		vulns    []string // the typed Vulns, unchanged by Unplaced
 		unplaced []string
 		state    unified.State
 		leads    []string // "*" a lead noted as not placed
@@ -62,7 +62,7 @@ func TestUnplacedAdvisoryStaysALeadBesideAMatch(t *testing.T) {
 
 // The release lookup keeps the same rule beside OutsideListed: below the floor a match, a lead reached only from
 // the start (its own note kept) and an unplaced one are all reported, the unplaced last; above the floor it is the
-// package's rule. Rows R1–R4 of the B1 table.
+// package's rule. Cases R1–R4 below.
 func TestReleaseKeepsAnUnplacedAdvisoryBesideAMatch(t *testing.T) {
 	var (
 		m = acmeAdv("GHSA-m", `{"introduced":"0"},{"fixed":"6.4.0"}`, ``)
@@ -74,7 +74,7 @@ func TestReleaseKeepsAnUnplacedAdvisoryBesideAMatch(t *testing.T) {
 		feed     []string
 		below    bool
 		status   Status
-		vulns    []string // the typed Vulns, as before B1
+		vulns    []string // the typed Vulns, unchanged by Unplaced
 		unplaced []string
 		state    unified.State
 		leads    []string // "*" not placed, "?" outside the listed releases

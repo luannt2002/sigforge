@@ -12,7 +12,7 @@ import (
 // Every advisory a plugin's or core's version may fall under reaches the unified result as a lead: one whose
 // bounds cannot place the version is kept with a note, even beside one that matched (which still decides the
 // state); one the version is surely outside never becomes a lead. The typed results keep their meaning — Vulns
-// and Unpositioned as they always were — and name every advisory not placed in Unplaced. Rows T1–T9 of the B1 table.
+// and Unpositioned as they always were — and name every advisory not placed in Unplaced. Cases T1–T9 below.
 func TestUnplacedAdvisoryStaysALeadBesideAMatch(t *testing.T) {
 	const (
 		m = `{"id":"WPV-M","title":"m","min_version":"1.0","max_version":"2.0"}`
@@ -23,7 +23,7 @@ func TestUnplacedAdvisoryStaysALeadBesideAMatch(t *testing.T) {
 	for _, tc := range []struct {
 		row, ver string
 		feed     []string
-		vulns    []string // the typed Vulns, as before B1
+		vulns    []string // the typed Vulns, unchanged by Unplaced
 		unpos    bool
 		unplaced []string
 		state    unified.State

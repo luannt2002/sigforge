@@ -33,7 +33,7 @@ func indexInOrder(t *testing.T, eco string, order []int, bodies []string) *Index
 	return idx
 }
 
-// A dump's entry order is arbitrary, so the floor — and the marks it decides — must not depend on it (F21).
+// A dump's entry order is arbitrary, so the floor — and the marks it decides — must not depend on it.
 func TestFloorIgnoresEntryOrder(t *testing.T) {
 	for _, eco := range []string{"Packagist", "NuGet"} {
 		bodies := []string{

@@ -48,7 +48,7 @@ func parsePURLSource(s, source string) (PkgRef, error) {
 	rest, rawQ, _ := strings.Cut(rest, "?")
 	q, err := purlQualifiers(rawQ)
 	if err != nil {
-		return PkgRef{}, fmt.Errorf("purl %q: %w", s, err)
+		return PkgRef{}, fmt.Errorf("package %q: %w", s, err)
 	}
 	version := ""
 	if slash := strings.LastIndex(rest, "/"); slash >= 0 {
@@ -60,16 +60,16 @@ func parsePURLSource(s, source string) (PkgRef, error) {
 	for i, seg := range segs {
 		d, err := url.PathUnescape(seg)
 		if err != nil {
-			return PkgRef{}, fmt.Errorf("purl %q: %w", s, err)
+			return PkgRef{}, fmt.Errorf("package %q: %w", s, err)
 		}
 		segs[i] = d
 	}
 	version, err = url.PathUnescape(version)
 	if err != nil {
-		return PkgRef{}, fmt.Errorf("purl %q: %w", s, err)
+		return PkgRef{}, fmt.Errorf("package %q: %w", s, err)
 	}
 	if len(segs) < 2 || segs[0] == "" || strings.TrimSpace(segs[len(segs)-1]) == "" {
-		return PkgRef{}, fmt.Errorf("purl %q: want pkg:type/[namespace/]name[@version]", s)
+		return PkgRef{}, fmt.Errorf("package %q: want a purl pkg:type/[namespace/]name[@version]", s)
 	}
 	typ, ns, name := strings.ToLower(segs[0]), strings.Join(segs[1:len(segs)-1], "/"), segs[len(segs)-1]
 	if eco, ok := distroEcosystems[typ+"/"+strings.ToLower(ns)]; ok {

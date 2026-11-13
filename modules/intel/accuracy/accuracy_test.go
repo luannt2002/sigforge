@@ -255,7 +255,7 @@ func hardNegatives() []negativeCase {
 // JSON file per case, {"name":..,"page":{<matcher.Page>},"truth":[..]}. The harness
 // folds any it finds into the golden corpus, so a real-traffic capture grows coverage
 // with zero code change. Empty by default — committing third-party captures would carry
-// their license (CLAUDE.md §4), so the operator owns whatever lands here. This is the
+// their license (see the license policy in README.md), so the operator owns whatever lands here. This is the
 // seam for loading from a real producer (e.g. replayed scans); it does NOT fabricate.
 const producerFixtureDir = "testdata/golden"
 

@@ -98,7 +98,7 @@ sigforge refresh --out merged.json --fetch webappanalyzer  # re-sync; publish on
 sigforge coverage [--db merged.json] [--json]   # how much of a DB can reach a CVE lookup / extract a version; names detection-only entries
 sigforge sync                                   # refresh every configured catalog into SIGFORGE_CACHE_DIR; with SIGFORGE_CACHE_MAX_AGE later runs use it with no request (labelled snapshot)
 sigforge sync --osv Debian --osv npm            # also keep those OSV dumps in the store, reduced once into an index file each scan reads (Ubuntu: 807MB dump → 19MB index)
-sigforge sources --max-age 26h                  # what the last sync left per source: ok / FAILED (why) / never synced / off — exit 1 when one in use is failing or stale (schedule it: docs/cli.md §3.2)
+sigforge sources --max-age 26h                  # what the last sync left per source: ok / FAILED (why) / never synced / off — exit 1 when one in use is failing, never synced or stale, or when none is in use (schedule it: docs/cli.md §3.2)
 sigforge watch --state watch.json --sbom inventory.cdx.json --fail-on-new   # after each sync: NEW / GONE advisories for the inventory since the last run (GONE only from a source's whole data), UNCHECKED when a source did not answer or cannot rule a lead out, REMOVED when an identity with leads left the inventory (exit 1 on NEW, when no source answered at all, or when there is nothing to look up)
 ```
 
@@ -213,7 +213,7 @@ modules/     the domain
     cve/        CPE+version → known-CVE LEADs via an operator-supplied NVD-shaped feed
     osv/        ecosystem+package → advisory LEADs via an operator-supplied OSV dump
     jslib/      JS library+version → Retire.js LEADs (embedded snapshot or live feed)
-    wpcve/      WordPress plugin/theme slug+version → advisory LEADs
+    wpcve/      WordPress plugin/theme slug+version, or core version → advisory LEADs
     kev/        CVE → exploitation signal (CISA KEV membership + FIRST.org EPSS)
     takeoverfp/ dangling-subdomain fingerprints (operator data upgrading an embedded CC-BY-4.0 snapshot)
     identity/   tech → dictionary-VERIFIED CPE (NVD CPE dictionary); candidate ≠ verified

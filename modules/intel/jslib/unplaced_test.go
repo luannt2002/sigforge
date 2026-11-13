@@ -11,7 +11,7 @@ import (
 // Every advisory a library's version may fall under reaches the unified result as a lead: one whose bounds
 // cannot place the version is kept with a note, even beside one that matched (which still decides the
 // state); one the version is surely outside never becomes a lead. The typed result keeps its meaning — Vulns
-// and Unpositioned as they always were — and names every advisory not placed in Unplaced. Rows T1–T9 of the B1 table.
+// and Unpositioned as they always were — and names every advisory not placed in Unplaced. Cases T1–T9 below.
 func TestUnplacedAdvisoryStaysALeadBesideAMatch(t *testing.T) {
 	const (
 		m = `{"below":"2.0.0","identifiers":{"CVE":["CVE-2099-0001"]}}`
@@ -24,7 +24,7 @@ func TestUnplacedAdvisoryStaysALeadBesideAMatch(t *testing.T) {
 	for _, tc := range []struct {
 		row, ver string
 		feed     []string
-		vulns    []string // the typed Vulns, as before B1
+		vulns    []string // the typed Vulns, unchanged by Unplaced
 		unpos    bool
 		unplaced []string
 		state    unified.State

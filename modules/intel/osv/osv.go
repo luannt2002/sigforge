@@ -304,7 +304,9 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 		})
 	}
 	indeterminate := false
-	var outside []*record // reached only "from the start" below the named versions: reported, marked, after the rest
+	// outside: reached only "from the start" below the named versions — reported and marked, added after the matches so an
+	// advisory a match also reaches stays unmarked; out is then sorted by severity, so a more severe one can come before a match
+	var outside []*record
 	var unplacedRecs []*record
 	for i := range recs {
 		r := &recs[i]

@@ -123,7 +123,7 @@ usage:
   sigforge merge --out DB [--source name=path ...] [--fetch name[=url] ...] [--manifest FILE]
   sigforge refresh --out DB [--source ...] [--fetch ...] [--allow-removed N]   (re-sync only if no regression; else keep current, exit non-zero)
   sigforge sync [--osv ECOSYSTEM ...]   (refresh every configured catalog, and the named OSV dumps, into SIGFORGE_CACHE_DIR; with SIGFORGE_CACHE_MAX_AGE later runs use it with no request)
-  sigforge sources [--max-age D]   (each source the last sync left: ok / FAILED (why) / never synced / off; exit 1 when one in use is failing or older than D)
+  sigforge sources [--max-age D]   (each source the last sync left: ok / FAILED (why) / never synced / off; exit 1 when one in use is failing, never synced or older than D, or when none is in use)
   sigforge watch --state FILE [--fail-on-new] [--package REF ...] [--sbom FILE] [--wp-plugin ...] [--jslib ...]   (re-check an inventory after sync: NEW / GONE leads since the last run)
   sigforge validate FILE
   sigforge verify FILE   (checks the DB against its <FILE>.sha256 sidecar + schema + <FILE>.manifest.json compat)
@@ -205,7 +205,7 @@ func cmdMerge(args []string) error {
 	if *out == "" {
 		return fmt.Errorf("merge: --out is required")
 	}
-	merged, syncMan, err := buildMerged(srcs, fetches, *manifest)
+	merged, syncMan, err := buildMerged("merge", srcs, fetches, *manifest)
 	if err != nil {
 		return err
 	}
@@ -220,7 +220,7 @@ func cmdMerge(args []string) error {
 // nothing — not even the sync manifest, which it returns unsaved (nil when nothing was
 // fetched) — so both `merge` and `refresh` can build the same candidate without
 // touching disk, and record a sync only once its DB is actually published.
-func buildMerged(srcs sourceFlag, fetches fetchFlag, manifestPath string) (*schema.DB, *source.Manifest, error) {
+func buildMerged(cmd string, srcs sourceFlag, fetches fetchFlag, manifestPath string) (*schema.DB, *source.Manifest, error) {
 	base, err := baseline.DB()
 	if err != nil {
 		return nil, nil, err
@@ -235,7 +235,7 @@ func buildMerged(srcs sourceFlag, fetches fetchFlag, manifestPath string) (*sche
 	}
 	var syncMan *source.Manifest
 	if len(fetches) > 0 {
-		fetched, m, err := runFetches(fetches, manifestPath)
+		fetched, m, err := runFetches(cmd, fetches, manifestPath)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -373,7 +373,7 @@ func cmdRollback(args []string) error {
 // synced version onto its entries, and returns the sync manifest updated but UNSAVED —
 // the caller records it only after the DB is published. No URL (flag or env) means the
 // source is off and errors — nothing is fetched silently.
-func runFetches(fetches fetchFlag, manifestPath string) ([]merge.Source, *source.Manifest, error) {
+func runFetches(cmd string, fetches fetchFlag, manifestPath string) ([]merge.Source, *source.Manifest, error) {
 	client := newClient()
 	ctx := context.Background()
 	man, err := source.LoadManifest(manifestPath)
@@ -388,15 +388,15 @@ func runFetches(fetches fetchFlag, manifestPath string) ([]merge.Source, *source
 		}
 		src, ok := source.New(f.name, url, client)
 		if !ok {
-			return nil, nil, fmt.Errorf("merge: unknown --fetch source %q", f.name)
+			return nil, nil, fmt.Errorf("%s: unknown --fetch source %q", cmd, f.name)
 		}
 		raw, err := src.Fetch(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("merge: fetch %q: %w", f.name, err)
+			return nil, nil, fmt.Errorf("%s: fetch %q: %w", cmd, f.name, err)
 		}
 		set, err := src.Normalize(raw)
 		if err != nil {
-			return nil, nil, fmt.Errorf("merge: normalize %q: %w", f.name, err)
+			return nil, nil, fmt.Errorf("%s: normalize %q: %w", cmd, f.name, err)
 		}
 		now := time.Now()
 		version := source.Version(url, now)
@@ -437,7 +437,7 @@ func cmdRefresh(args []string) error {
 		return fmt.Errorf("refresh: --out is required")
 	}
 
-	candidate, syncMan, err := buildMerged(srcs, fetches, *manifest)
+	candidate, syncMan, err := buildMerged("refresh", srcs, fetches, *manifest)
 	if err != nil {
 		return err
 	}

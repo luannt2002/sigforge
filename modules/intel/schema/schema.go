@@ -172,8 +172,9 @@ func Parse(b []byte) (*DB, error) {
 
 // Validate checks the envelope and basic shape: a compatible schema version, a
 // non-empty set with non-empty names, and that every regex pattern compiles — a
-// malformed regex is rejected here, naming the rule, so the matcher never drops it
-// silently at match time.
+// malformed regex is rejected here, naming the rule, so the matcher does not drop it
+// silently at match time. A dom attribute pattern is compiled behind its `attr=` prefix:
+// one that compiles only there (`?abc`) passes, and the matcher, which runs it alone, drops it.
 func Validate(db *DB) error {
 	if db == nil {
 		return errors.New("schema: nil DB")

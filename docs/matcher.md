@@ -63,8 +63,10 @@ headers, cookies, HTML, meta tags and script srcs — and get back the technolog
 
 `Match` lowercases header names, parses cookies into a name→values map, and
 extracts `<meta>` tags from the HTML. For each fingerprint it runs the entry's
-patterns against the matching evidence, accumulating confidence and the longest
-captured version. Patterns are split on the `\;` suffix syntax into
+patterns against the matching evidence, accumulating confidence and every captured
+version; `resolveVersion` keeps the one with the most components (then a fixed field
+order, then the lexically smaller) and sets `VersionConflict` when another is not a
+refinement of it. Patterns are split on the `\;` suffix syntax into
 (regex, version-template, confidence); a regex RE2 rejects is dropped rather than
 failing the set. After per-entry matching it admits the `requires`-gated entries whose
 requirement is resolved (expanding `implies` with a depth bound each round), labels
@@ -82,8 +84,9 @@ comma-separated branches and each branch into compounds
 (`div#id.cls[attr op "value" i]`, op one of `= ~= |= ^= $= *=`). A compound matches
 a start tag when all its tests hold on that one tag: tag and attribute names ignore
 case; ids, classes and values do not, except a value test that carries ` i`. A
-branch with a pseudo-class other than a structural one (`:first-child`, `:nth-*`, …)
-or a pseudo-element — `:not()`, `:has()`, … — never fires.
+structural pseudo-class (`:first-child`, `:nth-*`, …) and a pseudo-element written
+with `::` are ignored; a branch with any other pseudo-class — `:not()`, `:has()`, … —
+or a single-colon pseudo-element (`:before`) never fires.
 
 - An attribute pattern is a regex (unanchored, case-insensitive, as in Wappalyzer)
   over that attribute's value on a tag the branch's last compound matches, and needs
@@ -92,21 +95,21 @@ or a pseudo-element — `:not()`, `:has()`, … — never fires.
   not that attribute.
 - `exists`, a list or string selector (with its `\;confidence:N`), an empty attribute
   pattern and a node with no pattern are presence tests. A branch needs at least
-  one literal: an attribute value of four or more characters (CSS escapes removed),
-  an id/class of six or more characters or with `-`/`_`, or a tag/attribute name
+  one literal: an attribute value of four or more bytes (CSS escapes removed),
+  an id/class of six or more bytes or with `-`/`_`, or a tag/attribute name
   with `-`/`_` — the attribute an empty pattern names counts. All its literals must
   be in the raw HTML, a cheap filter before tags are read, and each compound must
-  match a start tag; an empty pattern's attribute must sit on the last compound's
-  tag (`#vite-legacy-polyfill` → Vite). A plain tag or attribute name (`script`,
+  match a start tag (`#vite-legacy-polyfill` → Vite); an empty pattern's attribute
+  must sit on the last compound's tag. A plain tag or attribute name (`script`,
   `content`) is never a literal, so a branch naming nothing else never fires.
 - JS runtime `properties` are ignored: a node carrying only them is a presence test
   of its selector.
 
 Two limits are deliberate. Relations between compounds are not checked — raw HTML is
-not parsed into a tree, so `h2 + p` only means "an h2 and a p are on the page" and
-can fire where a browser would not. A `text` pattern needs the element's own text, so
-it is not evaluated and a rule built on it is missed. A browser-backed consumer can
-still read `Fingerprint.Dom` itself.
+not parsed into a tree, so `h2.entry-title + p.entry-lead` only means "such an h2 and
+such a p are on the page" and can fire where a browser would not. A `text` pattern
+needs the element's own text, so it is not evaluated and a rule built on it is missed.
+A browser-backed consumer can still read `Fingerprint.Dom` itself.
 
 ### 5.1 Diagram
 
@@ -114,12 +117,12 @@ still read `Fingerprint.Dom` itself.
 page ─┬─ headers ──▶ lower(name)→values ─┐
       ├─ cookies ──▶ name→values ────────┤
       ├─ html ─────▶ meta name→content ──┼─▶ for each fingerprint:
-      └─ scriptSrcs ──────────────────────┘     match patterns → (conf += , version = longest)
-                                                       │
-                                                 resolve requires + expand implies (depth-bounded) · label excludes
+      └─ scriptSrcs ──────────────────────┘     match patterns → (conf += , version = most components)
                                                        │
                                                  refine version from version_regex (if detected, missing)
+                                                       │
+                                                 resolve requires + expand implies (depth-bounded) · label excludes
                                                        ▼
-                                   []Detection{Tech,Version,Confidence,Categories,Provenance,License}
+                                   []Detection{Tech,Version,Confidence,Categories,Provenance,License,ExcludedBy,…}
                                         sorted by confidence desc, then name
 ```

@@ -24,7 +24,7 @@ modules/intel/            │  the domain
   identity  ──────────────┤    tech → dictionary-verified CPE
   cve, lifecycle ─────────┤    CVE leads by CPE · end-of-life by product or CPE
   osv, versioncmp ────────┤    ecosystem and OS-distro advisories from stored dumps · per-ecosystem ordering
-  wpcve, jslib ───────────┤    WordPress plugin/theme · client-side JS library advisories
+  wpcve, jslib ───────────┤    WordPress plugin/theme/core · client-side JS library advisories
   kev, takeoverfp ────────┤    KEV/EPSS on CVE leads · dangling-subdomain fingerprints
   enrich, feedset ────────┘    detections + packages/SBOM/purl → unified results · the env wiring the
                           │    CLI and an importing scanner share

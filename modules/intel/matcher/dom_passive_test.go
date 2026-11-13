@@ -46,7 +46,7 @@ func runDomPassive(t *testing.T, cases []domPassiveCase) {
 	}
 }
 
-// AC1: a text pattern needs the element's text, which raw HTML cannot isolate.
+// A text pattern needs the element's text, which raw HTML cannot isolate.
 func TestDomPassiveTextNotEvaluated(t *testing.T) {
 	const textRule = `{"p.demo-theme-version":{"text":"([\\d]+(?:\\.[\\d]+)*)\\;version:\\1"}}`
 	runDomPassive(t, []domPassiveCase{
@@ -56,7 +56,7 @@ func TestDomPassiveTextNotEvaluated(t *testing.T) {
 	})
 }
 
-// AC2: an empty attribute pattern only says the attribute exists, so the selector decides.
+// An empty attribute pattern only says the attribute exists, so the selector decides.
 func TestDomPassiveEmptyAttributeIsPresence(t *testing.T) {
 	const app = `{"div#demo-app":{"attributes":{"id":"\\;confidence:50"}}}`
 	const ads = `{"link[href*='.demo-ads.example.test']":{"attributes":{"href":""}}}`
@@ -72,7 +72,7 @@ func TestDomPassiveEmptyAttributeIsPresence(t *testing.T) {
 	})
 }
 
-// AC3: a presence test needs what its selector names, branch by branch.
+// A presence test needs what its selector names, branch by branch.
 func TestDomPassivePresenceNeedsSelectorEvidence(t *testing.T) {
 	const plugin = `["link[href*='/wp-content/plugins/demoplug/']"]`
 	const author = `["meta[name='author'][content*='Demo Corp']"]`
@@ -102,7 +102,7 @@ func TestDomPassivePresenceNeedsSelectorEvidence(t *testing.T) {
 	})
 }
 
-// AC4: an attribute pattern reads the named attribute of a tag the selector names.
+// An attribute pattern reads the named attribute of a tag the selector names.
 func TestDomPassiveAttributeNameBoundary(t *testing.T) {
 	const feed = `{"demo-feed":{"attributes":{"version":"([\\d.]+)\\;version:\\1"}}}`
 	const cdn = `{"a":{"attributes":{"href":"demo-cdn\\.example\\.test|alt-cdn\\.example\\.test"}}}`
@@ -114,7 +114,7 @@ func TestDomPassiveAttributeNameBoundary(t *testing.T) {
 	})
 }
 
-// AC8: a literal in prose, in another tag, or in a prolog is not the element the
+// A literal in prose, in another tag, or in a prolog is not the element the
 // selector names; each shape has a positive control on the real element.
 func TestDomPassiveProseAndOtherTagsDoNotFire(t *testing.T) {
 	const sheet = `["html[xmlns\\:demo='urn:demo:sheet'], div[x\\:demosource='Spark']"]`
@@ -144,7 +144,7 @@ func TestDomPassiveProseAndOtherTagsDoNotFire(t *testing.T) {
 	})
 }
 
-// AC9: a selector compound matches one open tag of the page; tree relations are not
+// A selector compound matches one open tag of the page; tree relations are not
 // checked, since raw HTML is not parsed into a tree.
 func TestDomPassiveOpenTagMatching(t *testing.T) {
 	const gen = `["meta[name='demo-gen'][content*='DemoCMS']"]`
@@ -217,7 +217,7 @@ func TestDomPassiveOpenTagMatching(t *testing.T) {
 	})
 }
 
-// AC9, start tags: what ends a comment or a script/style text, and how values are quoted.
+// Start tags: what ends a comment or a script/style text, and how values are quoted.
 func TestDomPassiveStartTagEdges(t *testing.T) {
 	const widget = `[".demo-widget-x"]`
 	runDomPassive(t, []domPassiveCase{
@@ -242,7 +242,7 @@ func TestDomPassiveStartTagEdges(t *testing.T) {
 	})
 }
 
-// AC9, selectors: combinators, names, escapes, quoting, flags and pseudo-classes.
+// Selectors: combinators, names, escapes, quoting, flags and pseudo-classes.
 func TestDomPassiveSelectorEdges(t *testing.T) {
 	const item = `<li class="demo-item">x</li>`
 	const badge = `<span class="demo-badge"></span>`
@@ -285,7 +285,7 @@ func TestDomPassiveSelectorEdges(t *testing.T) {
 	})
 }
 
-// AC9, rule shapes: list entries, attribute keys and compounds of presence rules.
+// Rule shapes: list entries, attribute keys and compounds of presence rules.
 func TestDomPassiveRuleEdges(t *testing.T) {
 	const notShell = `{"div.demo-shell:not(.demo-off), span.demo-shell":{"attributes":{"data-demo-v":"(\\d+)\\;version:\\1"}}}`
 	runDomPassive(t, []domPassiveCase{

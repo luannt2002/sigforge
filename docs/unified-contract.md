@@ -52,13 +52,19 @@ Every adapter documents its own mapping; the pattern across all of them:
 - **version present but not comparable** → `unknown_version` (e.g. jslib detected a
   version that is not a version at all, lifecycle mapped the product but matched no
   cycle, a detection's patterns disagree on the version). An advisory whose bound cannot
-  be compared with a readable version (jslib, osv) is `potentially_affected` with a note.
+  be compared with a readable version (jslib, osv, wpcve) is a lead with a `Note` saying
+  so: with no advisory matched the result is `potentially_affected`; beside one that
+  matched, it follows the matched leads inside `affected_by_advisory`. The typed results
+  list such advisories in `Unplaced` whether or not another matched; `Vulns` keeps its meaning.
 - **advisory matched, version pinned** → `affected_by_advisory` + one `Lead` per advisory.
 - **advisory exists, version not pinnable** → `potentially_affected`.
 
 Every product-version source (`cve`, `lifecycle`, `osv`, `jslib`, `wpcve`) picks between
 those two through ONE function, `unified.AdvisoryState(versionPinned)`, and explains a
-missing version with the shared `unified.NoteNoVersion` — no adapter decides it alone.
+missing version with the shared `unified.NoteNoVersion`. One case sets `potentially_affected`
+without it: a version OSV could not place against any advisory (jslib and wpcve route that
+case through the function); `enrich` also downgrades a version conflict and a doubted
+release lead after the source answered (`docs/enrich-pipeline.md`).
 (`kev` is CVE-centric: its identity is the CVE, there is no product version to pin.) Two
 cross-source contract tests in `modules/intel/accuracy/contract_test.go` hold the rules
 for all sources at once: no version is never `affected_by_advisory`, and an empty result
@@ -156,11 +162,13 @@ catalog, with the partial-data reason when only the small embedded KEV sample is
 
 `TestLookedUpAndConcluded` holds the first two columns and that the first names keep their
 meaning; `TestLeadsByIdentitySplitsWhatAnAnswerCanRuleOut` (`cmd/sigforge`) holds the last one.
-`coverage.Results` counts looked up (`looked_up`) apart from concluded (`answered`), and `enrich`
-ends with `looked up X/N · concluded Y/N` (`TestEnrichTallyCountsLookedUpApartFromConcluded`). In
-`watch`, a lead recorded before that an answer without whole data, or for a version not compared,
-leaves out is kept and named `UNCHECKED` with why, never `GONE`, while a new lead in that answer is
-still `NEW`. No WordPress or JavaScript answer sets `FullData`, so their leads are never `GONE`.
+`coverage.Results` counts looked up (`looked_up`) apart from concluded (`answered`), and `enrich`'s
+table output (not `--json`) ends with `looked up X/N · concluded Y/N` when it has a result — with none
+it prints `no detections` only (`TestEnrichTallyCountsLookedUpApartFromConcluded`,
+`TestEnrichFailsWithNothingToLookUp`). In `watch`, a lead recorded before that an
+answer without whole data, or for a version not compared, leaves out is kept and named
+`UNCHECKED` with why, never `GONE`, while a new lead in that answer is still `NEW`. No WordPress or
+JavaScript answer sets `FullData`, so their leads are never `GONE`.
 
 ## 3. Freshness — a snapshot is never live truth
 

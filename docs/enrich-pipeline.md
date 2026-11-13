@@ -40,17 +40,19 @@ stdin JSON Page ─▶ matcher.Match(db, page) ─▶ []Detection
                                        version older than all the package names (Packagist, Maven, NuGet),
                                        the release lookup still reports, marked OutsideListed, what an
                                        advisory listing the package's releases reaches only from the
-                                       start (enrich reports such a lead as potentially affected); an
-                                       advisory listing no versions keeps OSV's rule; one it cannot
-                                       place is handled as in a package lookup)
+                                       start; an advisory listing no versions keeps OSV's rule; one it
+                                       cannot place is handled as in a package lookup. keepDoubtsApart
+                                       reports both kinds of noted lead as potentially affected, apart
+                                       from an affected result's other leads, each reason named once)
                         each result of the detection ─▶ applyExcludedBy (note only)
-                                    ─▶ dropRepeated (a lead an earlier result named is not reported twice)
+                                    ─▶ dropRepeated (an OSV lead an earlier result named at least as firmly is
+                                                   not reported twice; a noted lead counts as potentially affected)
                                                  ▼
                                         []unified.Result
 
 EnrichUnifiedExt also, from EnrichInput (NOT page-derived):
    Packages ─▶ dispatchOSV ─▶ opt.OSV(eco, name, ver)  ─▶ osv.ToUnified
-   WPSlugs  ─▶ dispatchWP  ─▶ opt.WP(slug, ver, kind)   ─▶ wpcve.ToUnified
+   WPSlugs  ─▶ dispatchWP  ─▶ opt.WP(slug, ver, kind)   ─▶ wpcve.ToUnified (core: wpcve.CoreToUnified)
    JSLibs   ─▶ dispatchJS  ─▶ opt.JS(name, ver)         ─▶ jslib.ToUnified
 ```
 
@@ -122,7 +124,8 @@ request is made to any target — safe to run against nothing.
 sigforge enrich [--db FILE] [--json] < page.json
 ```
 
-Reads a JSON `matcher.Page` from stdin, matches it, runs `EnrichUnified` with the
-env-gated feeds, and prints the `[]unified.Result` as a table (state, source,
-freshness, per-lead KEV/EPSS signal, and any note — CPE provenance, version conflict,
-excluded by, why a source was not checked) or as JSON with `--json`.
+Reads a JSON `matcher.Page` from stdin, matches it, runs `EnrichUnifiedExt` with the
+identities the inventory flags give and the env-gated feeds, and prints the `[]unified.Result` as a table (state, source,
+freshness, per-lead KEV/EPSS signal and why the source doubts a lead, and any
+note — CPE provenance, version conflict, excluded by, why a source was not
+checked) or as JSON with `--json`.

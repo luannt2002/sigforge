@@ -36,12 +36,12 @@ type watchState struct {
 // leaves out (data the source cannot prove whole, a version it could not compare): the lead is kept,
 // not GONE. An identity with leads that is no longer in the inventory is REMOVED: its leads leave the
 // state, and listed again they are NEW. An identity's first answer — on the first run, after a run
-// nothing answered, or for a package added later — is recorded (FIRST), not NEW. With --fail-on-new a
-// NEW lead fails the command, so a timer or monitor can alarm on it; a run no source answered for
-// anything fails too, leaving an existing state as it was, and a run with nothing to look up fails
-// without touching the state. The embedded Retire.js sample is not a source: a run only it answered
-// for is one no source answered for, records nothing it said and fails naming it; beside a source's
-// answer, the sample's answer counts as any other.
+// nothing answered, or for a package added later — is recorded, not NEW: a run after the first names one
+// with leads FIRST. With --fail-on-new a NEW lead fails the command, so a timer or monitor can alarm on
+// it; a run no source answered for anything fails too, leaving an existing state as it was, and a run
+// with nothing to look up fails without touching the state. The embedded Retire.js sample is not a
+// source: a run only it answered for is one no source answered for, records nothing it said and fails
+// naming it; beside a source's answer, the sample's answer counts as any other.
 func cmdWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	statePath := fs.String("state", "", "file keeping what the last run saw (required)")
@@ -223,7 +223,7 @@ func leadsByIdentity(rs []unified.Result) (leads map[string][]string, answered, 
 
 // carryReleaseLessKeys reads a state written while a distro key held no release — one "ecosystem:Debian n@v" for
 // every release. In any run, the first after the upgrade or a later one, each release key the state does not hold
-// yet whose release-less key (the distro is the scope up to its first ":", as Ubuntu's release "22.04:LTS" holds
+// yet whose release-less key (the distro is the ecosystem name up to its first ":", as Ubuntu's release "22.04:LTS" holds
 // one) is still in the state takes that key's leads and Seen, and the key leaves the state: its leads are neither
 // dropped nor named NEW.
 func carryReleaseLessKeys(leads map[string][]string, seen map[string]bool, rs []unified.Result) {

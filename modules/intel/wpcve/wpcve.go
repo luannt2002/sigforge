@@ -1,5 +1,6 @@
 // Package wpcve resolves a WordPress plugin/theme (slug + installed version) to
-// its PROVENANCE and its known vulnerabilities, keeping the component-audit
+// its PROVENANCE and its known vulnerabilities, and WordPress core (its version, LookupCore)
+// to its known vulnerabilities, keeping the component-audit
 // distinctions a bare "has CVE?" lookup throws away. It is a NEW intel domain
 // alongside cve/kev/lifecycle: cve says "CVE-X applies", wpcve says "slug `acme`
 // 1.2.0 sits inside a published vulnerable range (a LEAD), it IS in the free .org

@@ -3,13 +3,13 @@ package versioncmp
 import "testing"
 
 // TestPEP440 pins the PyPI ordering that the shared "semver-ish" comparator got wrong — the
-// pre-release / post / dev / epoch rules of PEP 440. The 1.0a1 < 1.0 row is the audit case.
+// pre-release / post / dev / epoch rules of PEP 440. The 1.0a1 < 1.0 row is the one it got wrong.
 func TestPEP440(t *testing.T) {
 	cases := []struct {
 		a, b string
 		want int
 	}{
-		{"1.0a1", "1.0", -1},      // a pre-release is BELOW the final release (the audit bug)
+		{"1.0a1", "1.0", -1},      // a pre-release is BELOW the final release (the case it got wrong)
 		{"1.0a1", "1.0b1", -1},    // a < b
 		{"1.0b1", "1.0rc1", -1},   // b < rc
 		{"1.0rc1", "1.0", -1},     // rc < final

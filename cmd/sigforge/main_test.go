@@ -75,7 +75,7 @@ func TestMergeChecksumVerifyRoundTrip(t *testing.T) {
 // whose checksum is honest but whose content is not: an unbalanced-paren regex passes
 // the SHA-256 gate (the sidecar is recomputed to match) yet must still fail verify,
 // because schema.Parse re-runs schema.Validate and refuses a regex that cannot compile.
-// Guards the audit N2 concern that verify would report such a DB as OK.
+// Guards against verify reporting such a DB as OK.
 func TestVerifyRejectsBrokenRegexWithValidChecksum(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "db.json")

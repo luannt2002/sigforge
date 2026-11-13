@@ -54,17 +54,17 @@ func TestVersionAffectedEq(t *testing.T) {
 		want            bool
 		wantDeterminate bool
 	}{
-		// AC1 — eq on the lower bound: exact only.
+		// eq on the lower bound: exact only.
 		{"eq min exact", "1.2.3", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, true, true},
 		{"eq min below", "1.2.2", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, false, true},
 		{"eq min above", "1.2.4", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, false, true},
-		// AC2 — eq on the upper bound, symmetric.
+		// eq on the upper bound, symmetric.
 		{"eq max exact", "1.2.3", feedVuln{MaxVersion: "1.2.3", MaxOp: "eq"}, true, true},
 		{"eq max below", "1.2.2", feedVuln{MaxVersion: "1.2.3", MaxOp: "eq"}, false, true},
 		{"eq max above", "1.2.4", feedVuln{MaxVersion: "1.2.3", MaxOp: "eq"}, false, true},
-		// AC4 — version that cannot be ordered (build-date / hash) ⇒ indeterminate.
+		// a version that cannot be ordered (build-date / hash) ⇒ indeterminate.
 		{"eq unreadable version", "nightly-20231001", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, false, false},
-		// AC5 — the old FP: eq advisory, version just outside ⇒ not affected.
+		// a former false positive: eq advisory, version just outside ⇒ not affected.
 		{"eq fp regression", "1.2.4", feedVuln{MinVersion: "1.2.3", MinOp: "eq"}, false, true},
 	}
 	for _, c := range cases {
@@ -118,7 +118,7 @@ func TestCheckCompatibility(t *testing.T) {
 }
 
 // Severity is passed through from a numeric CVSS only, never invented. A bare
-// vector (no numeric score) keeps the raw vector but leaves severity null (§2).
+// vector (no numeric score) keeps the raw vector but leaves severity null.
 func TestLeadSeverityPassthrough(t *testing.T) {
 	withScore := feedVuln{CVSSScore: "9.8"}
 	lead := leadFrom(&withScore)
@@ -442,9 +442,9 @@ func TestBoundsUnderPHPOrderAndUncomparableBounds(t *testing.T) {
 	}
 }
 
-// ── WordPress CORE vulnerability lookup (T3.3) ──────────────────────────────────
+// ── WordPress CORE vulnerability lookup ──────────────────────────────────────────
 
-// AC1 — a core version sitting inside a published vulnerable range is a LEAD, via
+// A core version sitting inside a published vulnerable range is a LEAD, via
 // the SAME feed shape + versionAffected mechanism as plugins.
 func TestLookupCoreWithVuln(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -467,7 +467,7 @@ func TestLookupCoreWithVuln(t *testing.T) {
 	}
 }
 
-// AC2 — feed OFF ⇒ UNKNOWN (Resolved=false), never "0 CVE = clean", and zero network.
+// Feed OFF ⇒ UNKNOWN (Resolved=false), never "0 CVE = clean", and zero network.
 func TestLookupCoreFeedOffIsUnknown(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -484,7 +484,7 @@ func TestLookupCoreFeedOffIsUnknown(t *testing.T) {
 	}
 }
 
-// AC2 negative — a NEW core version the feed KNOWS but none of its ranges bracket ⇒
+// Unlike the feed-off case: a NEW core version the feed KNOWS but none of its ranges bracket ⇒
 // measured not-affected (Resolved=true, no vulns), distinct from UNKNOWN above.
 func TestLookupCoreNewVersionNotAffected(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

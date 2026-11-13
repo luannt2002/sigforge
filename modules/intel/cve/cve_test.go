@@ -179,9 +179,9 @@ func TestParseRejectsBodiesThatAreNotNVD(t *testing.T) {
 	}
 }
 
-// --- T3.12: honest descriptions, partial paging, lookup by id ---
+// --- honest descriptions, partial paging, lookup by id ---
 
-// AC1: the English description is filled from descriptions[lang=en]; a CVE without one
+// The English description is filled from descriptions[lang=en]; a CVE without one
 // is "" (never fabricated), and a non-English-only entry does not leak in.
 func TestParseFillsEnglishDescription(t *testing.T) {
 	const body = `{"totalResults":2,"vulnerabilities":[
@@ -205,7 +205,7 @@ func TestParseFillsEnglishDescription(t *testing.T) {
 	}
 }
 
-// AC2: totalResults > records returned ⇒ Partial is set (results are "N of M", not the
+// totalResults > records returned ⇒ Partial is set (results are "N of M", not the
 // full/clean list). Negative: totalResults == records ⇒ not partial.
 func TestLookupExposesPartialWhenTruncated(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +229,7 @@ func TestLookupExposesPartialWhenTruncated(t *testing.T) {
 	}
 }
 
-// AC3: lookup by CVE-ID uses the feed's cveId query and returns that record.
+// Lookup by CVE-ID uses the feed's cveId query and returns that record.
 func TestLookupIDReturnsThatRecord(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("cveId") == "CVE-2023-1234" {
@@ -259,7 +259,7 @@ func TestLookupIDReturnsThatRecord(t *testing.T) {
 	}
 }
 
-// AC4: a rate-limited / failing feed (429, 5xx) is a failed lookup — StateUnknown with an
+// A rate-limited / failing feed (429, 5xx) is a failed lookup — StateUnknown with an
 // error — never downgraded to "no-known-cve" / clean.
 func TestLookupRateLimitedStaysUnknownNotClean(t *testing.T) {
 	for _, code := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {

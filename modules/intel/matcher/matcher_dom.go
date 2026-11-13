@@ -310,8 +310,8 @@ var (
 )
 
 // parseSelector splits a CSS selector into comma-separated branches of compounds and
-// collects each branch's literals: attribute values of at least four characters, ids
-// and classes of at least six characters or with a hyphen/underscore, and tag or
+// collects each branch's literals: attribute values of at least four bytes, ids
+// and classes of at least six bytes or with a hyphen/underscore, and tag or
 // attribute names with a hyphen/underscore (custom elements, data-*). A plain tag or
 // attribute name (script, content) sits on every kind of page, so it is never a literal.
 func parseSelector(sel string) []selBranch {
