@@ -11,7 +11,7 @@ import (
 // ToUnified maps one EOLStatus outcome (its Status and error) into a
 // unified.Result. An EOL version is treated as a LEAD (end of support is a real
 // risk), a supported version as not_checked with unified.NoteNoClearance (no clearance
-// in v0.4), and every kind of "we don't know" stays honestly unknown — never
+// is issued), and every kind of "we don't know" stays honestly unknown — never
 // "supported" on absence:
 //
 //	feed off (ErrFeedOff)          → StateNotChecked

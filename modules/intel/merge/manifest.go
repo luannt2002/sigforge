@@ -14,7 +14,7 @@ import (
 // refuses a snapshot whose manifest records a different MAJOR engine version, because a
 // major bump may change merge semantics the running build would misread. It is the
 // governance counterpart to schema.SchemaVersion, which versions the on-disk shape.
-const EngineVersion = "0.4.0"
+const EngineVersion = "0.5.0"
 
 // FreshnessSnapshot marks a manifest's data as a point-in-time merged snapshot — its age
 // is generated_at, never a live feed. A merged DB is a snapshot by construction, so this

@@ -204,7 +204,7 @@ func Enrich(ctx context.Context, dets []matcher.Detection, db *schema.DB, opt Op
 // Honesty carries through unchanged: a CVE/EOL advisory match is a LEAD on a
 // spoofable version, never proof. When Detection.VersionConflict is set the version
 // cannot be pinned: an advisory HIT is downgraded to potentially-affected and a clean
-// answer — none in v0.4 — to unknown_version (only one claimed version was asked). The CPE
+// answer — sigforge issues none — to unknown_version (only one claimed version was asked). The CPE
 // fed to CVE lookup is a dictionary-VERIFIED identity when the IdentityResolver
 // confirms one, else the source-ATTESTED fingerprint CPE; an unverified CPECandidate
 // is NEVER used (identity contamination).
@@ -454,7 +454,7 @@ func leadCVEs(l unified.Lead) []string {
 
 // applyVersionConflict honours Detection.VersionConflict: a conflicted version cannot
 // be pinned, so an advisory-range HIT is only POTENTIALLY affected and a "not affected"
-// answer — none in v0.4 — becomes unknown_version (the other claimed versions were never asked). Every
+// answer — sigforge issues none — becomes unknown_version (the other claimed versions were never asked). Every
 // other state is already unanswered and is left as-is; a note records the conflict.
 func applyVersionConflict(u unified.Result, d matcher.Detection) unified.Result {
 	if !d.VersionConflict {
