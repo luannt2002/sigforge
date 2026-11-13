@@ -25,7 +25,7 @@ const sourceID = "wpcve"
 // never an embedded snapshot); it stays unknown when nothing was fetched.
 func ToUnified(pr PluginResult) unified.Result {
 	r := unified.Result{
-		Scope:    scopeFor(pr.Kind),
+		Scope:    ScopeFor(pr.Kind),
 		Identity: pr.Slug,
 		Version:  pr.Version,
 		Source:   sourceID,
@@ -68,7 +68,8 @@ func CoreToUnified(cr CoreResult) unified.Result {
 		UnparsedVersion: cr.UnparsedVersion, Unpositioned: cr.Unpositioned, reason: cr.reason})
 }
 
-func scopeFor(kind string) string {
+// ScopeFor is the scope a WordPress result of this kind carries: theme and core their own, any other kind a plugin's.
+func ScopeFor(kind string) string {
 	if kind == "theme" {
 		return "wordpress:theme"
 	}

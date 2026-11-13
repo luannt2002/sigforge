@@ -14,6 +14,7 @@ package enrich
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/luannt2002/sigforge/modules/intel/cve"
@@ -23,6 +24,7 @@ import (
 	"github.com/luannt2002/sigforge/modules/intel/osv"
 	"github.com/luannt2002/sigforge/modules/intel/schema"
 	"github.com/luannt2002/sigforge/modules/intel/unified"
+	"github.com/luannt2002/sigforge/modules/intel/wpcve"
 )
 
 // EnrichedDetection is one technology with its breadth (tech/version/confidence/
@@ -289,14 +291,15 @@ func dispatchOSV(ctx context.Context, p PkgRef, opt Options) unified.Result {
 }
 
 func dispatchWP(ctx context.Context, w WPRef, opt Options) unified.Result {
-	scope := "wordpress:plugin"
-	if w.Kind == "theme" {
-		scope = "wordpress:theme"
+	if opt.WP != nil {
+		return opt.WP(ctx, w.Slug, w.Version, w.Kind)
 	}
-	if opt.WP == nil {
-		return offResult(scope, w.Slug, w.Version, "wpcve", "wp feed off")
+	switch w.Kind {
+	case "", "plugin", "theme", "core":
+		return offResult(wpcve.ScopeFor(w.Kind), w.Slug, w.Version, "wpcve", "wp feed off")
 	}
-	return opt.WP(ctx, w.Slug, w.Version, w.Kind)
+	// the result feedset's wired lookup gives this kind with the feed on: never looked up, never a plugin
+	return offResult("wordpress:"+w.Kind, w.Slug, w.Version, "wpcve", fmt.Sprintf("WordPress kind %q is not plugin, theme or core: not looked up", w.Kind))
 }
 
 func dispatchJS(ctx context.Context, l LibRef, opt Options) unified.Result {
