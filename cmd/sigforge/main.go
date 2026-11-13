@@ -784,6 +784,9 @@ func cmdEnrich(args []string) error {
 		if err := json.Unmarshal(in, &page); err != nil {
 			return fmt.Errorf("enrich: decode Page JSON from stdin: %w", err)
 		}
+	} else if *sbomPath == "" && len(packages)+len(wpPlugins)+len(wpThemes)+len(jsLibs) == 0 {
+		// "no detections" / [] here would read as a clean run, as when a timer's variables are unset
+		return errors.New("enrich: nothing to look up: no page on stdin and no --package, --sbom, --wp-plugin, --wp-theme or --jslib")
 	}
 
 	ctx := context.Background()

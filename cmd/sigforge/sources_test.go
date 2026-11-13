@@ -3,12 +3,14 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/luannt2002/sigforge/modules/intel/kev"
 	"github.com/luannt2002/sigforge/modules/intel/lifecycle"
+	"github.com/luannt2002/sigforge/modules/intel/osv"
 )
 
 // sources reports what the last sync left: each configured source ok, failed (with why) or never
@@ -53,5 +55,38 @@ func TestSourcesReportsEachSourceAndFailsOnABadOne(t *testing.T) {
 	defer func() { now = tick }()
 	if out = captureStdout(t, func() { err = cmdSources([]string{"--max-age", "2h"}) }); err == nil || !strings.Contains(out, "older than") {
 		t.Fatalf("a source synced more than --max-age ago must fail the check: %v\n%s", err, out)
+	}
+}
+
+// sources with no source in use checks nothing, so it fails naming each variable not set rather than
+// reading as quiet — as when a timer runs it without the source variables; an OSV dump in the store is
+// in use only with its variable set, and one source in use keeps the old outcome.
+func TestSourcesFailsWhenNoSourceIsInUse(t *testing.T) {
+	offline(t)
+	store := t.TempDir()
+	t.Setenv(EnvCacheDir, filepath.Join(store, "none")) // no store yet: nothing was ever synced
+	var err error
+	out := captureStdout(t, func() { err = cmdSources([]string{"--max-age", "26h"}) })
+	if err == nil || !strings.Contains(err.Error(), "no source in use") || strings.Count(out, " off (") != len(syncSources) {
+		t.Fatalf("every source off must fail the check after listing each: err=%v\n%s", err, out)
+	}
+	for _, s := range syncSources {
+		if !strings.Contains(err.Error(), s.env) {
+			t.Errorf("the error must name %s: %v", s.env, err)
+		}
+	}
+	t.Setenv(osv.EnvOSVURL, "http://127.0.0.1:1")
+	if out = captureStdout(t, func() { err = cmdSources(nil) }); err == nil || !strings.Contains(err.Error(), "no source in use") {
+		t.Fatalf("an OSV URL with no dump in the store gives sources nothing to check, want a failure: err=%v\n%s", err, out)
+	}
+	t.Setenv(EnvCacheDir, store)
+	recordSyncStatus(store, map[string]error{"OSV npm": nil, "OSV PyPI": nil})
+	t.Setenv(osv.EnvOSVURL, "")
+	if out = captureStdout(t, func() { err = cmdSources(nil) }); err == nil || strings.Count(err.Error(), osv.EnvOSVURL) != 1 {
+		t.Fatalf("dumps in the store with %s unset are off, and the error names it once: err=%v\n%s", osv.EnvOSVURL, err, out)
+	}
+	t.Setenv(osv.EnvOSVURL, "http://127.0.0.1:1")
+	if out = captureStdout(t, func() { err = cmdSources([]string{"--max-age", "26h"}) }); err != nil || strings.Count(out, "ok — synced") != 2 {
+		t.Fatalf("two OSV dumps in use and fresh, want success: err=%v\n%s", err, out)
 	}
 }

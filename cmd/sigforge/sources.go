@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -79,12 +80,14 @@ func cmdSources(args []string) error {
 		rows = append(rows, syncSource{name: name, env: osv.EnvOSVURL})
 	}
 	bad := 0
+	var unset []string
 	for _, r := range rows {
 		s, synced := st[r.name]
 		line := "ok — synced " + s.LastOK
 		switch {
 		case strings.TrimSpace(os.Getenv(r.env)) == "":
 			line = "off (" + r.env + " not set)"
+			unset = append(unset, r.env)
 		case !synced:
 			line, bad = "never synced", bad+1
 		case s.Err != "":
@@ -98,6 +101,10 @@ func cmdSources(args []string) error {
 			}
 		}
 		fmt.Printf("  %-22s %s\n", r.name, line)
+	}
+	// every source off checked nothing: passing would read as all well, as when a timer runs without the source variables
+	if len(unset) == len(rows) {
+		return fmt.Errorf("sources: no source in use, nothing was checked: %s not set", strings.Join(slices.Compact(unset), ", "))
 	}
 	if bad > 0 {
 		return fmt.Errorf("sources: %d source(s) in use are failing, never synced or too old", bad)
