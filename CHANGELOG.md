@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.6.0
 
 Every result now says in a code why it is not a conclusion, what KEV was checked against, and where its version came
 from, so a consumer never has to read a sentence — or an empty list — to tell "not checked" from "nothing found".
+`merge.EngineVersion` holds "0.6.0".
 
 ### New
 - `Result.Reason` (`reason`): one of 14 codes (`source_off`, `unsupported`, `no_identity`, `source_error`,
