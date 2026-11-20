@@ -60,12 +60,14 @@ from, so a consumer never has to read a sentence — or an empty list — to tel
   consulted); `kev=false` now means the catalog was checked. A result with no identity names its tech. A result with a
   `reason` prints it after the state, e.g. `not_checked (source_off)`, `potentially_affected (no_version)`.
 - `merge`, `refresh` and `rollback` take a publish lock — one the operating system holds on `<DB>.lock` (`flock`;
-  `LockFileEx` on Windows): a second run on the same DB exits 1 naming the file and the holder (its PID on Linux)
-  instead of interleaving its DB, sidecar and manifest with the first one's (which left a DB `verify` refused). The
-  system lets the lock go when the run ends, however it ends — interrupted, killed, or stopped by a broken pipe — so a
-  run that died never blocks the next one. `<DB>.lock` stays on disk, is never written, and is readable by every user,
-  so a publish under sudo once does not block the service user after; a symbolic link or anything but a plain file
-  there is refused, never followed (on Windows a link is followed, and nothing is written through it).
+  `LockFileEx` on Windows; none on Solaris, illumos, AIX, Plan 9, js/wasm or wasip1: the table in
+  `docs/snapshot-governance.md` §6): a second run on the same DB exits 1 naming the file and the holder (its PID on
+  Linux) instead of interleaving its DB, sidecar and manifest with the first one's (which left a DB `verify` refused).
+  The system lets the lock go when the run ends, however it ends — interrupted, killed, or stopped by a broken pipe
+  — so a run that died does not block the next one (on Windows one started right after may be refused once).
+  `<DB>.lock` stays on disk, is never written, and on a Unix system is readable by every user (mode 0644), so a publish
+  under sudo once does not block the service user after; a symbolic link or anything but a plain file there is refused,
+  never followed where the system has `O_NOFOLLOW` (on Windows a link is followed, and nothing is written through it).
 - `match` and `enrich` refuse a page on stdin over 64 MiB (the ceiling of a fetched body) instead of reading any size.
 - OSV leads come in an order the dump's own order never changes: the matched leads by severity, then id, and the leads
   a version cannot be placed against after them, ordered the same way. Of two advisories that alias each other, a
@@ -86,38 +88,75 @@ from, so a consumer never has to read a sentence — or an empty list — to tel
 - What a `Detection` reports for a version several patterns capture (`versionClaims`, in a conflict) is the claim first
   in field order, then by pattern; it was the one map iteration read first, so its `field` and `pattern` changed from
   run to run.
+- A plain file with another name — a hard link, say from copying a publish directory or store with `cp -al` — is
+  refused where the system counts a file's names, when it is a file sigforge wrote and reads back (the list in
+  `docs/snapshot-governance.md` §6), the DB, sidecar or manifest `merge` and `refresh` archive or a `<DB>.prev*`
+  `rollback` restores (a symbolic link there is archived and restored as the link, whatever its names), or `<DB>.lock`
+  on Solaris, illumos and AIX. Reading a DB as an input — `--db`, `verify`, `diff`, the live DB `refresh` compares —
+  does not count its names. A refused file may be refused at every run until it is replaced: copy it to a new name, then
+  move the copy over it. Keep these files with one name each: copy them, never hard-link them.
 
 ### Security
 Ways a user who can write the publish directory or the store made a run — under root, say — change, copy out or
-write into a file of that user's choosing, all present in v0.5.0 (`docs/snapshot-governance.md` §6):
-- Every write set the new file's mode by path after closing it: the temporary file, swapped for a link meanwhile,
-  had its target's mode set to 0644 (in one measurement on v0.5.0: 9 of 10 `merge` runs, 7 of 8 `sync` runs). The
-  mode is now set on the open file, every write works inside the directory it opened even once that directory's path
-  names another, and a swapped temporary file is refused — at the rename too, where the write fails if what landed is
-  not the file it wrote, and removes what landed.
-- `merge` copied what a link at the DB, sidecar or manifest pointed to into `<DB>.prev*`, mode 0644. A link is now
-  archived as the same link, unread.
-- `rollback` copied what a link at `<DB>.prev.manifest.json` pointed to into `<DB>.manifest.json`, mode 0644;
-  `sync`, `watch` and `merge --fetch` read their status, state and sync manifest through a link and wrote what they
-  read back. Every file sigforge wrote and reads back — the store's copies, indexes, overlay and dictionary, `sync`'s
-  status, `watch`'s state, the sync manifest — is now opened without following a link and only as a plain file: a
-  link or a FIFO there is no entry (store, status) or an error (state, sync manifest), never read and never waited on.
-  `rollback` restores each archived file as the archive kept it — a link as the same link, never copied out — and
-  refuses anything else there before it writes any file; a refusal over an archived link no longer quotes what was
-  read through it (v0.5.0 printed the digest of what `.prev` pointed to, and the first word of what the archived
-  checksum pointed to when it read as a digest). What the operator names — `--db`, a merge source, `--sbom`,
-  the DB `verify` checks — is read as before, through a link and from a pipe.
+write into a file of that user's choosing, all present in v0.5.0 (`docs/snapshot-governance.md` §6), fixed on Linux,
+Android, macOS, the BSDs, Solaris, illumos, AIX and Windows — not on Plan 9, js/wasm or wasip1, where it is not
+guaranteed:
+- Every write set the new file's mode by path after closing it: the temporary file, swapped for a link meanwhile, had
+  its target's mode set to 0644 (in one measurement on v0.5.0: 9 of 10 `merge` runs, 7 of 8 `sync` runs). The mode is
+  now set on the open file, every write works inside the directory it opened even once that directory's path names
+  another, and a swapped temporary file is refused — at the rename too, where the write fails if what landed is not
+  the file it wrote, and removes what landed (but for a plain file made under its number: Known limitations).
+- `merge` copied what a link at the DB, sidecar or manifest pointed to into `<DB>.prev*`, mode 0644. A link found there
+  is now archived as the same link, unread, and a file with another name (a hard link) is refused where the system
+  counts a file's names (what can be swapped in while the file is archived: Known limitations).
+- `rollback` copied what a link at `<DB>.prev.manifest.json` pointed to into `<DB>.manifest.json`, mode 0644; `sync`,
+  `watch` and `merge --fetch` read their status, state and sync manifest through a link and wrote what they read back.
+  The files sigforge wrote and reads back — the store's copies, indexes, overlay and dictionary, `sync`'s status,
+  `watch`'s state, the sync manifest — are now read only as the plain file looked at, with one name where the system
+  counts a file's names: a link or a FIFO there is no entry (store, status) or an error (state, sync manifest), and such
+  a hard link is refused when it is opened (a downloaded dump or dictionary is handed out by the store first) — never
+  read and never waited on (what can be swapped in between the look and the open: Known limitations). `rollback`
+  restores each archived file as the archive kept it — a link as the same link, never copied out — and refuses
+  anything else there before it writes any file; a refusal over an archived link no longer quotes what was read through
+  it (v0.5.0 printed the digest of what `.prev` pointed to, and the first word of what the archived checksum pointed to
+  when it read as a digest). What the operator names — `--db`, a merge source, `--sbom`, the DB `verify` checks — is
+  read as before, through a link and from a pipe.
+- `refresh` read the live DB at `--out` as any input the operator names: a FIFO there made it wait for a writer. It now
+  reads only a plain file there, through a link, refusing a FIFO or a device without waiting where the system has
+  `O_NONBLOCK` (what it still reads through a link: Known limitations).
 - A downloaded dump, the index cut from it, and the stored copies were created and renamed by name in the store; they
   are now made inside the store's directory opened once, with the checks every other write makes — an index that is
-  not the plain file cut when it is moved beside its dump is dropped, and cut again by the next run.
+  not the plain file cut when it is moved beside its dump is dropped, and cut again by the next run (but for a plain
+  file made under its number: Known limitations).
 - An incremental OSV sync followed a link put in place of its overlay directory and wrote the changed records where
   it pointed. The overlay is now made and written inside the store; a link out of it is refused.
-- On AIX, files sigforge reads back were opened without `O_NOFOLLOW` / `O_NONBLOCK`, which the system has: a link or
-  a FIFO swapped in after the check was followed or waited on. They are now opened with both, as on the other Unix
-  systems.
 
 ### Changed meaning
 - `unknown_product` is no longer used for "no identity to ask with": that is `not_checked` with `no_identity`.
+
+### Known limitations
+- What another user swaps in between sigforge looking at a file it reads back and opening it
+  (`docs/snapshot-governance.md` §6): a link is followed on Windows, Plan 9, js/wasm and wasip1 (no `O_NOFOLLOW`), and
+  on every system for a file read inside a directory opened once — the OSV overlay, the DB, sidecar and manifest being
+  archived, a plain file `rollback` restores; what it leads to is then read only if it carries the number of the file
+  looked at (next item).
+- `SameFile` compares inode numbers, and a removed file's number can go to the next file made (ext4 gives it at once): a
+  plain file another user makes at a name sigforge reads, archives or renames, after removing what was there, can carry
+  its number and pass — read, archived or left at the name as theirs, no more than they could do by writing there
+  before or after; a FIFO, a directory or a link made so is still refused.
+- On Windows, Plan 9, js/wasm and wasip1 (no `O_NONBLOCK`), where the system has FIFOs, a FIFO swapped in for a file
+  read back, or put at the target of an archived link `rollback` checks or at `refresh --out`, makes the open wait.
+- A `merge` or `refresh` with `--fetch` that the publish lock refuses has already put what it downloaded in the store
+  (`SIGFORGE_CACHE_DIR`, when set).
+- `refresh` reads the live DB at `--out` as the operator names it, once it holds the publish lock: a link there,
+  symbolic or hard, to another file is read, and the techs that file lists can be named in the gate's report, and what a
+  refused parse quotes of it in the error.
+- Where the system gives no count of a file's names (Windows, Plan 9, js/wasm, wasip1), a hard link put where sigforge
+  reads a file back, to another file, is read as that file: where a user may hard-link a file they cannot read, `merge`
+  and `refresh` can archive it into `<DB>.prev*`, and `sync`, `watch` and `merge --fetch` can write what they read of it
+  into their status, state or sync manifest, each mode 0644.
+- On Plan 9, js/wasm and wasip1 the guarantees of `docs/snapshot-governance.md` §6 are not made, and no system but
+  Linux runs the tests. The publish lock was not tried on a network file system such as NFS.
 
 ## v0.5.0
 
