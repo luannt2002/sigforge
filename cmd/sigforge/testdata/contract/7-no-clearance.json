@@ -1,0 +1,27 @@
+{
+  "case": "7-no-clearance",
+  "args": [
+    "--json",
+    "--package",
+    "npm:lodash@4.17.21"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_OSV_URL"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "not_checked",
+      "scope": "ecosystem:npm",
+      "identity": "lodash",
+      "version": "4.17.21",
+      "source": "osv",
+      "freshness": "live",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "full_data": true,
+      "error": "no advisory in the source's data matched; this release issues no clearance: a source can be cut short or stop tracking a release without saying so",
+      "reason": "no_clearance",
+      "version_from": "inventory"
+    }
+  ]
+}

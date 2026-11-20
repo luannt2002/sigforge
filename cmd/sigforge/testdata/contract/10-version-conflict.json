@@ -1,0 +1,50 @@
+{
+  "case": "10-version-conflict",
+  "args": [
+    "--json",
+    "--db",
+    "testdata/contract/conflict-db.json"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_CVE_URL"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "potentially_affected",
+      "scope": "cpe",
+      "identity": "cpe:2.3:a:acme:acme:9.5:*:*:*:*:*:*:*",
+      "version": "9.5",
+      "leads": [
+        {
+          "id": "CVE-2099-2222",
+          "cve": [
+            "CVE-2099-2222"
+          ]
+        }
+      ],
+      "source": "cve",
+      "freshness": "live",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "cpe_state": "attested",
+      "cpe_evidence": "source",
+      "tech": "Acme",
+      "error": "version conflict: 10.0 vs 9.5",
+      "reason": "version_conflict",
+      "kev": "sample",
+      "version_from": "header",
+      "detection_confidence": 100
+    },
+    {
+      "state": "not_checked",
+      "scope": "eol",
+      "version": "9.5",
+      "source": "lifecycle",
+      "tech": "Acme",
+      "error": "version conflict: 10.0 vs 9.5",
+      "reason": "source_off",
+      "version_from": "header",
+      "detection_confidence": 100
+    }
+  ]
+}

@@ -1,5 +1,85 @@
 # Changelog
 
+## Unreleased
+
+Every result now says in a code why it is not a conclusion, what KEV was checked against, and where its version came
+from, so a consumer never has to read a sentence — or an empty list — to tell "not checked" from "nothing found".
+
+### New
+- `Result.Reason` (`reason`): one of 13 codes (`source_off`, `unsupported`, `no_identity`, `source_error`,
+  `sample_only`, `partial_answer`, `not_provably_complete`, `no_clearance`, `not_in_source`, `no_version`,
+  `version_unreadable`, `version_unplaced`, `version_conflict`) on every result that is not a conclusion, every
+  `potentially_affected`, and an `affected_by_advisory` drawn from one page of a paged answer. `unified.Reasons` lists
+  them; `docs/unified-contract.md` says when each is set and what a consumer can do.
+- `Result.KEV` (`kev`): `catalog` or `sample` — what the leads' `known_exploited` flag was checked against; absent when
+  KEV was not consulted.
+- `Result.VersionFrom` (`version_from`) and `matcher.Detection.VersionFrom` (`versionFrom`): the page field a version
+  came from (`header`, `cookie`, `meta`, `html`, `scriptSrc`, `dom`, `pattern`), or `inventory` for one the operator
+  gave.
+- `Result.DetectionConfidence` (`detection_confidence`): the fingerprint's confidence for a page detection — how sure
+  the detection is, not how likely an advisory is to apply.
+- `unified.NoteVersionUnreadable`; consumer fixtures of `enrich --json` in `cmd/sigforge/testdata/contract/` (ten cases,
+  with a README), each held to a lossless round trip through `unified.Result`.
+
+### Changed behaviour
+- A detection with no CPE is `not_checked` (`no_identity`), not `unknown_product`: the CVE source was not asked, so it
+  is no longer counted as looked up. `cve.ToUnified` with an empty CPE answers the same.
+- End-of-life: a tech the source has no product name for is `not_checked` (`no_identity`) with the feed on — the bundle
+  answers `unknown_product` (`not_in_source`) only when it was asked by the tech's CPE — and `not_checked`
+  (`source_off`) with the feed off, like every other tech; it was `unknown_product` either way, counted as looked up.
+  `sigforge eol` and `eol --explain` say why from the same `reason`: "not looked up" only for a tech with no product
+  name to ask with, "the end-of-life source does not list it" when the source was asked (it said "not tracked at
+  endoflife.date" for both); `eol` exits 1 with the feed off. An answer read from the stored copy adds a line naming it
+  and its time — and, when the source failed, why — and `--explain` says the stored copy does not list the tech.
+- A CPE the end-of-life bundle lists under more than one product is `not_checked` (`no_identity`, the sharing named in
+  `error`): none is guessed. It was `unknown_product`, though the bundle lists it. A tech asked by several CPEs gets
+  the same kind of answer whatever order the DB lists them in: one naming a product (the first listed, when two name
+  different products), then one listed under two products, then "not listed".
+- An end-of-life bundle's answer that it does not list a product carries the bundle's freshness (`live`, `snapshot`,
+  or `stale` with why in `error`) and `fetched_at`; it had `unknown` and no time, even from a stale stored copy. The
+  freshness comes from what was read: a stored copy written without a fetch time keeps it, with no `fetched_at`.
+- A detected platform release with OSV off adds one `not_checked` result (`source_off`) per core package that would
+  have been asked, instead of leaving the release lookup out.
+- OSV with a version its ecosystem's order cannot read says so (`version_unreadable`, the version kept); it said "no
+  version detected". The product's advisories stay as leads, `potentially_affected`.
+- `enrich --sbom FILE` with no page and no component carrying a usable purl exits 1 and prints no result, as `watch`
+  does; it printed `no detections` and exited 0.
+- The `enrich` table prints `kev=-` for a lead the KEV catalog was not checked for (only the embedded sample, or KEV not
+  consulted); `kev=false` now means the catalog was checked. A result with no identity names its tech. A result with a
+  `reason` prints it after the state, e.g. `not_checked (source_off)`, `potentially_affected (no_version)`.
+- `merge`, `refresh` and `rollback` take a publish lock — one the operating system holds on `<DB>.lock` (`flock`;
+  `LockFileEx` on Windows): a second run on the same DB exits 1 naming the file and the holder (its PID on Linux)
+  instead of interleaving its DB, sidecar and manifest with the first one's (which left a DB `verify` refused). The
+  system lets the lock go when the run ends, however it ends — interrupted, killed, or stopped by a broken pipe — so a
+  run that died never blocks the next one. `<DB>.lock` stays on disk, is never written, and is readable by every user,
+  so a publish under sudo once does not block the service user after; on Linux, macOS and the BSDs a symbolic link or
+  anything but a plain file there is refused, never followed.
+- `match` and `enrich` refuse a page on stdin over 64 MiB (the ceiling of a fetched body) instead of reading any size.
+- OSV leads come in an order the dump's own order never changes: the matched leads by severity, then id, and the leads
+  a version cannot be placed against after them, ordered the same way. Of two advisories that alias each other, a
+  match is kept over one matched only outside the versions it lists or not placed at all, and between two of the same
+  kind the smaller id.
+- `diff` and the `refresh` gate no longer count a tech as changed when only the layout of its `dom` JSON differs (a DB
+  re-indented on its way to disk).
+- The WordPress feed's "failed" result now says why; its "off" and "no slug" results are told apart; a kind it has no
+  lookup for carries `unsupported` with the feed on too.
+- An OSV match drawn from a dump read in part carries `partial_answer`, as a match on one page of the CVE API does.
+
+### Security
+Three ways a user who can write the publish directory or the store made a run — under root, say — change, copy out
+or write into a file of that user's choosing, all present in v0.5.0 (`docs/snapshot-governance.md` §6):
+- Every write set the new file's mode by path after closing it: the temporary file, swapped for a link meanwhile,
+  had its target's mode set to 0644 (measured on v0.5.0: 9 of 10 `merge` runs, 7 of 8 `sync` runs). The mode is now
+  set on the open file, writes stay inside the directory they opened, and a swapped temporary file is refused — at
+  the rename too, where the write fails if what landed is not the file it wrote.
+- `merge` copied what a link at the DB, sidecar or manifest pointed to into `<DB>.prev*`, mode 0644. A link is now
+  archived as the same link, unread.
+- An incremental OSV sync followed a link put in place of its overlay directory and wrote the changed records where
+  it pointed. The overlay is now made and written inside the store; a link out of it is refused.
+
+### Changed meaning
+- `unknown_product` is no longer used for "no identity to ask with": that is `not_checked` with `no_identity`.
+
 ## v0.5.0
 
 v0.5.0 adds monitoring of an inventory between syncs (`watch`, `sources`), new lookups (WordPress core, CVE by ID,

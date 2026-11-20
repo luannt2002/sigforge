@@ -218,8 +218,8 @@ func TestEnrichUnifiedNeverUsesCPECandidate(t *testing.T) {
 	if len(rec.queried) != 0 {
 		t.Errorf("CPECandidate must NEVER be queried for CVEs, queried %v", rec.queried)
 	}
-	if len(got) != 1 || got[0].State != unified.StateUnknownProduct {
-		t.Errorf("no verified/attested cpe → StateUnknownProduct, got %+v", got)
+	if len(got) != 1 || got[0].State != unified.StateNotChecked || got[0].Reason != unified.ReasonNoIdentity {
+		t.Errorf("no verified/attested cpe → not_checked / no_identity (the CVE source was not asked), got %+v", got)
 	}
 }
 
@@ -499,7 +499,7 @@ func TestEnrichDeterministicReplay(t *testing.T) {
 	js := string(want)
 	for _, must := range []string{
 		"affected_by_advisory", "potentially_affected", "version conflict",
-		"CVE-2021-23017", "unknown_product", "ecosystem:npm", "jslib",
+		"CVE-2021-23017", "no_identity", "ecosystem:npm", "jslib",
 	} {
 		if !strings.Contains(js, must) {
 			t.Fatalf("replay output missing %q — fixture does not exercise the pipeline: %s", must, js)
@@ -791,7 +791,8 @@ func TestKEVRemediationReachesLeads(t *testing.T) {
 // A PHP platform detected with a version is also looked up as its core Composer packages in OSV;
 // an advisory the CVE source (or an earlier package) already named is not repeated, so one CVE
 // never becomes two findings. No version, one without its patch level ("Drupal 9" in a header,
-// "Magento/2.4": every 9.x or 2.4.x range would match), or OSV off: no package lookup.
+// "Magento/2.4": every 9.x or 2.4.x range would match): no package lookup. OSV off: nothing is asked,
+// and each package that would have been is one not_checked result (TestPlatformOSVOffIsReported).
 func TestEnrichLooksUpPlatformCorePackagesInOSV(t *testing.T) {
 	db := &schema.DB{SchemaVersion: schema.SchemaVersion, Fingerprints: map[string]schema.Fingerprint{
 		"Drupal": {CPE: []string{"cpe:2.3:a:drupal:drupal:*:*:*:*:*:*:*:*"}},
@@ -825,9 +826,14 @@ func TestEnrichLooksUpPlatformCorePackagesInOSV(t *testing.T) {
 	if len(asked) != 0 {
 		t.Fatalf("no version or OSV off must ask OSV nothing, asked %v", asked)
 	}
-	for _, r := range append(noVersion, off...) {
+	for _, r := range noVersion {
 		if r.Source == "osv" {
-			t.Fatalf("no version or OSV off must add no OSV result (an unanswered one only inflates the gaps): %+v", r)
+			t.Fatalf("no release version must add no OSV result: %+v", r)
+		}
+	}
+	for _, r := range off {
+		if r.Source == "osv" && (r.State != unified.StateNotChecked || r.Reason != unified.ReasonSourceOff) {
+			t.Fatalf("OSV off must name the release lookup not made, not answer it: %+v", r)
 		}
 	}
 	EnrichUnified(context.Background(), []matcher.Detection{{Tech: "Drupal", Version: "7.59"}}, db, opt)

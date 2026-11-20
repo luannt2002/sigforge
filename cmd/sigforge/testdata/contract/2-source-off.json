@@ -1,0 +1,21 @@
+{
+  "case": "2-source-off",
+  "args": [
+    "--json",
+    "--package",
+    "npm:lodash@4.17.20"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "not_checked",
+      "scope": "ecosystem:npm",
+      "identity": "lodash",
+      "version": "4.17.20",
+      "source": "osv",
+      "error": "osv feed off",
+      "reason": "source_off",
+      "version_from": "inventory"
+    }
+  ]
+}

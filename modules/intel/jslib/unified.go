@@ -38,9 +38,9 @@ func ToUnified(res Result) unified.Result {
 		u.State = unified.AdvisoryState(res.Version != "" && !res.Unpositioned)
 		switch {
 		case res.Version == "":
-			u.Err = unified.NoteNoVersion
+			u.Err, u.Reason = unified.NoteNoVersion, unified.ReasonNoVersion
 		case res.Unpositioned:
-			u.Err = "a version or advisory bound is not one the npm order can compare: whether these advisories apply is unknown"
+			u.Err, u.Reason = "a version or advisory bound is not one the npm order can compare: whether these advisories apply is unknown", unified.ReasonVersionUnplaced
 		}
 		if res.Unpositioned {
 			u.Leads = unifiedLeads(res.Vulns, noteUnplaced)
@@ -50,14 +50,17 @@ func ToUnified(res Result) unified.Result {
 	case res.Resolved:
 		// The repository carries no count to prove itself whole: "nothing matched" is never a clearance.
 		u.State, _ = unified.Clean(unified.Evidence{FullData: false, Positioned: true})
-		u.Err = "no Retire.js advisory matched; that data cannot prove itself complete, so it is not a clearance"
+		u.Err, u.Reason = "no Retire.js advisory matched; that data cannot prove itself complete, so it is not a clearance", unified.ReasonNotProvablyComplete
 		if res.Sample {
-			u.Err = "only the embedded Retire.js sample is in use: no advisory in it matched, which is not a clearance"
+			u.Err, u.Reason = "only the embedded Retire.js sample is in use: no advisory in it matched, which is not a clearance", unified.ReasonSampleOnly
 		}
 	case res.UnparsedVersion:
-		u.State = unified.StateUnknownVersion
+		u.State, u.Reason = unified.StateUnknownVersion, unified.ReasonVersionUnreadable
 	default: // !KnownLib (feed off/dead collapses here via the snapshot fallback)
-		u.State = unified.StateUnknownProduct
+		u.State, u.Reason = unified.StateUnknownProduct, unified.ReasonNotInSource
+		if res.Sample {
+			u.Err, u.Reason = "only the embedded Retire.js sample is in use and it does not list this library", unified.ReasonSampleOnly
+		}
 	}
 	if res.Err != "" {
 		why := "Retire.js source failed: " + res.Err

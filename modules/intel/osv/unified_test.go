@@ -91,8 +91,8 @@ func TestUnavailableSourceOffVsDead(t *testing.T) {
 		t.Fatal("source off must error")
 	}
 	u := Unavailable("npm", "lodash", "4.0.0", offErr)
-	if u.State != unified.StateNotChecked {
-		t.Fatalf("source off must map to not_checked, got %s", u.State)
+	if u.State != unified.StateNotChecked || u.Reason != unified.ReasonSourceOff {
+		t.Fatalf("source off must map to not_checked / source_off, got %s / %q", u.State, u.Reason)
 	}
 	if u.Scope != "ecosystem:npm" || u.Source != "osv" || u.Err == "" {
 		t.Fatalf("envelope/err missing on not_checked: %+v", u)
@@ -102,8 +102,8 @@ func TestUnavailableSourceOffVsDead(t *testing.T) {
 	}
 
 	dead := Unavailable("npm", "lodash", "4.0.0", fmt.Errorf("osv npm: download: status 500"))
-	if dead.State != unified.StateSourceUnavailable {
-		t.Fatalf("a dead source must map to source_unavailable, got %s", dead.State)
+	if dead.State != unified.StateSourceUnavailable || dead.Reason != unified.ReasonSourceError {
+		t.Fatalf("a dead source must map to source_unavailable / source_error, got %s / %q", dead.State, dead.Reason)
 	}
 	if dead.Freshness != unified.FreshnessUnknown {
 		t.Fatalf("source_unavailable carries no fetched data ⇒ freshness unknown, got %s", dead.Freshness)

@@ -74,6 +74,9 @@ func TestReleaseUnplacedAdvisoryIsKeptApartWithItsReason(t *testing.T) {
 				}
 			}
 			got = append(got, r.State.String()+":"+strings.Join(ids, ",")+":"+r.Err)
+			if r.State == unified.StatePotentiallyAffected && r.Reason != unified.ReasonVersionUnplaced {
+				t.Errorf("%s: doubted release leads must say why in reason, got %q", tc.row, r.Reason)
+			}
 		}
 		srv.Close()
 		if !reflect.DeepEqual(got, tc.want) {

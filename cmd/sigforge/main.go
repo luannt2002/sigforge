@@ -27,6 +27,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,11 +35,13 @@ import (
 	"fmt"
 	"github.com/luannt2002/sigforge/modules/intel/feedset"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/luannt2002/sigforge/framework/define"
@@ -209,6 +212,11 @@ func cmdMerge(args []string) error {
 	if err != nil {
 		return err
 	}
+	release, err := lockPublish(*out)
+	if err != nil {
+		return fmt.Errorf("merge: %w", err)
+	}
+	defer release()
 	if err := publish(*out, merged); err != nil {
 		return err
 	}
@@ -292,31 +300,131 @@ func publish(out string, merged *schema.DB) error {
 	return fsio.WriteAtomic(merge.ManifestPath(out), man, 0o644)
 }
 
+// maxStdinBytes caps the page read from stdin — the ceiling a fetched body has (a var so a test can lower it).
+var maxStdinBytes = fetch.DefaultMaxBytes
+
+// readStdin reads stdin whole, refusing one over maxStdinBytes instead of holding any size in memory.
+func readStdin() ([]byte, error) {
+	in, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinBytes+1))
+	if err == nil && int64(len(in)) > maxStdinBytes {
+		err = fmt.Errorf("stdin is over the %d bytes a page may have", maxStdinBytes)
+	}
+	return in, err
+}
+
+// lockFile is the system's lock call (tryLock); a test replaces it to make the call fail.
+var lockFile = tryLock
+
+// lockPublish takes the publish lock of out — a lock the system holds on <out>.lock (flock, or LockFileEx on Windows)
+// for this run — so two publishes never interleave the DB, its sidecar and its manifest. The system lets it go when
+// release closes the file or the run ends, however it ends (Ctrl-C, a broken pipe, a kill), so a run that died never
+// blocks the next one. The file is a lock target only: sigforge never writes it, never removes it (removing it while
+// held would let another run lock a new file of the same name), and changes its mode only when this run created it
+// (0644, so every user who may publish the DB can lock it read-only). On Linux, macOS and the BSDs a symbolic link or
+// anything but a plain file at <out>.lock is refused, never followed (elsewhere a link is followed; nothing is written
+// through it). A second run while it is held exits naming the holder's PID as the system
+// reports it (Linux), or "another run". release must stay reachable until the publish is done — every caller defers
+// it: an unreachable *os.File is closed by its finalizer, which lets the lock go.
+func lockPublish(out string) (release func(), err error) {
+	lock := out + ".lock"
+	f, created, err := openLock(lock)
+	if err != nil {
+		return nil, fmt.Errorf("publish lock %s: %w", lock, err)
+	}
+	st, err := f.Stat()
+	if err == nil && !st.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a plain file", lock)
+	}
+	if err == nil && created {
+		_ = f.Chmod(0o644) // whatever the umask, so a run of another user can lock it read-only; at worst it keeps the umask's mode
+	}
+	held := false
+	if err == nil {
+		held, err = lockFile(f) // a lock call that failed is never taken for a lock
+	}
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("publish lock %s: %w", lock, err)
+	}
+	if held {
+		holder := "another run"
+		if pid := holderPID(f); pid != "" {
+			holder = "PID " + pid
+		}
+		f.Close()
+		return nil, fmt.Errorf("another publish of %s is running: %s held by %s (try again once it is done)", out, lock, holder)
+	}
+	var once sync.Once
+	return func() { once.Do(func() { f.Close() }) }, nil
+}
+
 // archivePrev snapshots the DB currently at out (and its sidecar/manifest, when present)
 // to <out>.prev* before a merge overwrites it. First merge (no file at out) archives
 // nothing; an older DB without a sidecar/manifest archives whatever it does have.
+// Nothing is read through a link: a link is archived as the same link, its target unread
+// — in a directory another user can write, out may be their link to a file this run must
+// not copy out — and a plain file is read through the file opened, checked to be the one
+// looked at.
 func archivePrev(out string) error {
-	if _, err := os.Stat(out); err != nil {
+	root, err := os.OpenRoot(filepath.Dir(out))
+	if err != nil {
+		return fmt.Errorf("merge: archive: %w", err)
+	}
+	defer root.Close()
+	base, prev := filepath.Base(out), filepath.Base(out)+".prev"
+	if _, err := root.Lstat(base); err != nil {
 		return nil // nothing to archive (first merge, or out missing)
 	}
-	prev := out + ".prev"
 	for _, f := range []struct{ src, dst string }{
-		{out, prev},
-		{merge.SidecarPath(out), merge.SidecarPath(prev)},
-		{merge.ManifestPath(out), merge.ManifestPath(prev)},
+		{base, prev},
+		{merge.SidecarPath(base), merge.SidecarPath(prev)},
+		{merge.ManifestPath(base), merge.ManifestPath(prev)},
 	} {
-		data, err := os.ReadFile(f.src)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("merge: archive %q: %w", f.src, err)
-		}
-		if err := fsio.WriteAtomic(f.dst, data, 0o644); err != nil {
-			return err
+		if err := archiveOne(root, f.src, f.dst); err != nil {
+			return fmt.Errorf("merge: archive %q: %w", filepath.Join(root.Name(), f.src), err)
 		}
 	}
 	return nil
+}
+
+// archiveLooked runs between looking at an archived file and opening it: a test swaps the file there.
+var archiveLooked = func(root *os.Root, name string) {}
+
+// archiveOne copies src to dst in root's directory without following a link: a link is
+// archived as the same link, a plain file through the file opened; a missing src archives
+// nothing, anything else is refused.
+func archiveOne(root *os.Root, src, dst string) error {
+	st, err := root.Lstat(src)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st.Mode()&fs.ModeSymlink != 0 {
+		target, err := root.Readlink(src)
+		if err != nil {
+			return err
+		}
+		return fsio.SymlinkAtomicIn(root, dst, target)
+	}
+	if !st.Mode().IsRegular() {
+		return errors.New("not a plain file") // a FIFO would hold the run on open; a directory has no content to keep
+	}
+	archiveLooked(root, src)
+	f, err := root.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if opened, err := f.Stat(); err != nil || !os.SameFile(st, opened) {
+		return errors.New("replaced while it was archived")
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return err
+	}
+	return fsio.WriteAtomicIn(root, dst, data, 0o644)
 }
 
 // cmdRollback restores the one previous snapshot archived at <out>.prev* by the last
@@ -331,6 +439,11 @@ func cmdRollback(args []string) error {
 		return fmt.Errorf("rollback: want exactly one FILE (the merged DB to restore)")
 	}
 	out := args[0]
+	release, err := lockPublish(out)
+	if err != nil {
+		return fmt.Errorf("rollback: %w", err)
+	}
+	defer release()
 	prev := out + ".prev"
 	data, err := fsio.Read(prev)
 	if err != nil {
@@ -447,6 +560,13 @@ func cmdRefresh(args []string) error {
 		return fmt.Errorf("refresh: candidate invalid — keeping current DB: %w", err)
 	}
 
+	// Held from reading the live DB to publishing: the gate must compare with the DB this run replaces.
+	release, err := lockPublish(*out)
+	if err != nil {
+		return fmt.Errorf("refresh: %w", err)
+	}
+	defer release()
+
 	// The live DB is the baseline to regress against; a missing one is the first publish
 	// (nothing to lose), so current is nil and the gate passes.
 	current, err := loadCurrentOrNil(*out)
@@ -543,7 +663,12 @@ func cmdEOL(args []string) error {
 		return fmt.Errorf("eol: %w", err)
 	}
 	if st.Product == "" {
-		fmt.Printf("%s %s: unknown (not tracked at endoflife.date)\n", tech, version)
+		msg := "the end-of-life source does not list it"
+		if lifecycle.ToUnified(st, nil).Reason == unified.ReasonNoIdentity { // the one place that decides whether it was asked
+			msg = "no end-of-life product is known for this name: not looked up"
+		}
+		fmt.Printf("%s %s: unknown (%s)\n", tech, version, msg)
+		fmt.Print(eolFrom(st))
 		if *explain {
 			fmt.Print(explainEOL(st, tech))
 		}
@@ -551,10 +676,29 @@ func cmdEOL(args []string) error {
 	}
 	fmt.Printf("%s %s → product=%s cycle=%s eol=%s status=%s\n",
 		tech, version, st.Product, orDash(st.Cycle), orDash(st.EOLDate), st.IsEOL)
+	fmt.Print(eolFrom(st))
 	if *explain {
 		fmt.Print(explainEOL(st, tech))
 	}
 	return nil
+}
+
+// eolFrom names where an end-of-life answer came from when it is not the source's answer now — read from the one
+// place that decides freshness (lifecycle.ToUnified), so a stored entry written without a time still says it is the
+// stored copy. An answer fetched now, or no answer, adds nothing.
+func eolFrom(st lifecycle.Status) string {
+	u := lifecycle.ToUnified(st, nil)
+	at := u.FetchedAt
+	if at == "" {
+		at = "an unknown time"
+	}
+	switch u.Freshness {
+	case unified.FreshnessSnapshot:
+		return fmt.Sprintf("  from:   the stored copy of %s (within %s): the source was not asked now\n", at, feedset.EnvCacheMaxAge)
+	case unified.FreshnessStale:
+		return fmt.Sprintf("  from:   the stored copy of %s, kept because the source failed: %s\n", at, st.Err)
+	}
+	return ""
 }
 
 // explainEOL returns the version→product→cycle→eol reasoning behind a status, plus
@@ -562,7 +706,13 @@ func cmdEOL(args []string) error {
 // unknown, never dressed up as "supported".
 func explainEOL(st lifecycle.Status, tech string) string {
 	if st.Product == "" {
-		return fmt.Sprintf("  why:    no endoflife.date product is mapped for %q → unknown, never 'supported'\n", tech)
+		if lifecycle.ToUnified(st, nil).Reason == unified.ReasonNoIdentity {
+			return fmt.Sprintf("  why:    no product name of the end-of-life source is known for %q: it was not asked → unknown, never 'supported'\n", tech)
+		}
+		if st.Cached {
+			return fmt.Sprintf("  why:    the stored copy of the end-of-life source does not list %q → unknown, never 'supported'\n", tech)
+		}
+		return fmt.Sprintf("  why:    the end-of-life source was asked for %q and does not list it → unknown, never 'supported'\n", tech)
 	}
 	if st.Cycle == "" {
 		return fmt.Sprintf("  why:    version %s maps to product %q but matched no release cycle in the feed → unknown, never 'supported'\n", st.Version, st.Product)
@@ -707,7 +857,7 @@ func cmdMatch(args []string) error {
 	if err != nil {
 		return err
 	}
-	in, err := io.ReadAll(os.Stdin)
+	in, err := readStdin()
 	if err != nil {
 		return fmt.Errorf("match: read stdin: %w", err)
 	}
@@ -775,7 +925,7 @@ func cmdEnrich(args []string) error {
 	if skipped > 0 {
 		fmt.Fprintf(os.Stderr, "note: %d SBOM component(s) without a usable purl were not looked up\n", skipped)
 	}
-	in, err := io.ReadAll(os.Stdin)
+	in, err := readStdin()
 	if err != nil {
 		return fmt.Errorf("enrich: read stdin: %w", err)
 	}
@@ -784,8 +934,11 @@ func cmdEnrich(args []string) error {
 		if err := json.Unmarshal(in, &page); err != nil {
 			return fmt.Errorf("enrich: decode Page JSON from stdin: %w", err)
 		}
-	} else if *sbomPath == "" && len(packages)+len(wpPlugins)+len(wpThemes)+len(jsLibs) == 0 {
+	} else if len(inp.Packages)+len(inp.WPSlugs)+len(inp.JSLibs) == 0 {
 		// "no detections" / [] here would read as a clean run, as when a timer's variables are unset
+		if *sbomPath != "" {
+			return errors.New("enrich: nothing to look up: no page on stdin and the SBOM has no component with a usable purl")
+		}
 		return errors.New("enrich: nothing to look up: no page on stdin and no --package, --sbom, --wp-plugin, --wp-theme or --jslib")
 	}
 
@@ -1064,7 +1217,10 @@ func printEnrich(results []unified.Result) {
 		return
 	}
 	for _, r := range results {
-		fmt.Printf("[%s] %s %s → %s", r.Scope, orDash(r.Identity), orDash(r.Version), r.State)
+		fmt.Printf("[%s] %s %s → %s", r.Scope, orDash(cmp.Or(r.Identity, r.Tech)), orDash(r.Version), r.State)
+		if r.Reason != "" {
+			fmt.Printf(" (%s)", r.Reason)
+		}
 		if r.Source != "" {
 			fmt.Printf("  source=%s", r.Source)
 		}
@@ -1076,8 +1232,8 @@ func printEnrich(results []unified.Result) {
 			fmt.Printf("    note: %s\n", r.Err)
 		}
 		for _, l := range r.Leads {
-			fmt.Printf("    lead %-16s %-8s cvss=%s epss=%s kev=%t\n",
-				l.ID, orDash(l.Severity), orDash(l.CVSS), scoreStr(l.EPSS), l.KnownExpl)
+			fmt.Printf("    lead %-16s %-8s cvss=%s epss=%s kev=%s\n",
+				l.ID, orDash(l.Severity), orDash(l.CVSS), scoreStr(l.EPSS), kevStr(l, r.KEV))
 			if l.Note != "" {
 				fmt.Printf("      note: %s\n", l.Note)
 			}
@@ -1087,6 +1243,18 @@ func printEnrich(results []unified.Result) {
 	fmt.Printf("looked up %d/%d · concluded %d/%d · not concluded %d (not_checked %d, source_unavailable %d, unknown_product %d, unknown_version %d) — not concluded is not clean\n",
 		c.LookedUp, c.Total, c.Answered, c.Total, c.Unanswered, c.ByState["not_checked"], c.ByState["source_unavailable"],
 		c.ByState["unknown_product"], c.ByState["unknown_version"])
+}
+
+// kevStr is a lead's KEV mark: true when listed; false only when the CISA KEV catalog was checked — absent from the
+// embedded sample, or with KEV not consulted, it is "-" (not known), never false.
+func kevStr(l unified.Lead, checked string) string {
+	switch {
+	case l.KnownExpl:
+		return "true"
+	case checked == "catalog":
+		return "false"
+	}
+	return "-"
 }
 
 // cmdCoverage reports how much of a DB can reach a CVE lookup or extract a version,

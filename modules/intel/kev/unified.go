@@ -49,6 +49,10 @@ func MapSignal(s Signal, fresh unified.Freshness, fullCatalog bool) unified.Resu
 		u.Leads = []unified.Lead{SignalToLead(s)}
 	default:
 		u.State, u.Err = unified.Clean(unified.Evidence{FullData: fullCatalog, Positioned: true})
+		u.Reason = unified.ReasonNoClearance
+		if !fullCatalog {
+			u.Reason = unified.ReasonSampleOnly
+		}
 	}
 	return u
 }

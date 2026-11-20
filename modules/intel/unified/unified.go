@@ -139,6 +139,34 @@ func AdvisoryState(versionPinned bool) State {
 // a missing version, so every source explains it the same way.
 const NoteNoVersion = "no version detected: advisories for the product, not pinned to the running version"
 
+// NoteVersionUnreadable is the shared Err note for a version that was given but that the source's
+// version order cannot read: its advisories are the product's, none pinned to that version.
+const NoteVersionUnreadable = "a version was given but is not one this source's version order can read: advisories for the product, not pinned to it"
+
+// Result.Reason codes — why a result is not a conclusion, or why a lead set may not apply, in a form a
+// consumer reads without parsing Err (Err stays the sentence for people). A consumer reads a code it
+// does not know as "not concluded", never as clean.
+const (
+	ReasonSourceOff           = "source_off"            // the source is not configured: it was not asked
+	ReasonUnsupported         = "unsupported"           // the source does not cover this kind of identity
+	ReasonNoIdentity          = "no_identity"           // nothing to ask the source with (no CPE, no slug, no distro release)
+	ReasonSourceError         = "source_error"          // the source failed, or answered with what is not its data
+	ReasonSampleOnly          = "sample_only"           // only the small sample embedded in the binary was read
+	ReasonPartialAnswer       = "partial_answer"        // part of the answer was read: one page of a paged feed, a cut-off list
+	ReasonNotProvablyComplete = "not_provably_complete" // nothing matched, in data the source cannot prove whole
+	ReasonNoClearance         = "no_clearance"          // nothing matched in the source's whole data: still not a clearance
+	ReasonNotInSource         = "not_in_source"         // the source does not list this identity
+	ReasonNoVersion           = "no_version"            // no version: the product's advisories, none pinned
+	ReasonVersionUnreadable   = "version_unreadable"    // a version was given that the source's version order cannot read
+	ReasonVersionUnplaced     = "version_unplaced"      // the version could not be placed for certain against the source's bounds
+	ReasonVersionConflict     = "version_conflict"      // the page's version claims disagree: the one asked may not be the running one
+)
+
+// Reasons is every Result.Reason code, in the order docs/unified-contract.md lists them.
+var Reasons = []string{ReasonSourceOff, ReasonUnsupported, ReasonNoIdentity, ReasonSourceError, ReasonSampleOnly,
+	ReasonPartialAnswer, ReasonNotProvablyComplete, ReasonNoClearance, ReasonNotInSource, ReasonNoVersion,
+	ReasonVersionUnreadable, ReasonVersionUnplaced, ReasonVersionConflict}
+
 // Freshness — where the data behind this result came from, so a stale snapshot is never
 // read as live truth.
 type Freshness int
@@ -251,6 +279,20 @@ type Result struct {
 	// identity (a CPE, an EOL product slug) does not say which detection it came from.
 	Tech string `json:"tech,omitempty"`
 	Err  string `json:"error,omitempty"` // non-fatal note (why source_unavailable/unknown)
+	// Reason is Err as a code (one of Reasons): set on every result that is not a conclusion, on
+	// potentially_affected, and on an affected answer drawn from part of the source's data.
+	Reason string `json:"reason,omitempty"`
+	// KEV says what the leads' known_exploited flag was checked against: "catalog" (the CISA KEV catalog,
+	// live or synced) or "sample" (the few entries embedded in the binary: absent from it is not "not
+	// exploited"). Empty: KEV was not consulted, so known_exploited false means nothing.
+	KEV string `json:"kev,omitempty"`
+	// VersionFrom is where Version came from: a page field ("header", "cookie", "meta", "html", "scriptSrc",
+	// "dom", or "pattern" for a version pattern run over the page), all of them the site's own claim and
+	// spoofable; or "inventory" for a version the operator gave (--package, --sbom, --wp-*, --jslib).
+	VersionFrom string `json:"version_from,omitempty"`
+	// DetectionConfidence is the fingerprint's confidence (0–100) that the page runs Tech — how sure the
+	// detection is, not how likely any advisory is to apply. Zero for identities not detected on a page.
+	DetectionConfidence int `json:"detection_confidence,omitempty"`
 }
 
 // Unknown builds a not-looked-up / unavailable result for a scope+identity, so a

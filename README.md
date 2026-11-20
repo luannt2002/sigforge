@@ -28,19 +28,22 @@ jQuery 3.4.0  (confidence 100, baseline/Apache-2.0)
 ```
 
 **Attach CVE / end-of-life / KEV intel, and say what was not checked.** `enrich` looks up every
-detection. A feed whose URL is not set is off and answers `not_checked`, never "clean" (the CVE
-and end-of-life lines below). Retire.js, CISA KEV and the CPE dictionary fall back instead to a
-small sample embedded in the binary: the one lead here comes from the Retire.js sample, and `kev=`
-from the KEV sample:
+detection. A feed whose URL is not set is off and answers `not_checked` — the reason in brackets — never "clean" (the
+CVE and end-of-life lines below). Retire.js, CISA KEV and the CPE dictionary fall back instead to a
+small sample embedded in the binary: the one lead here comes from the Retire.js sample, and `kev=-`
+says only the KEV sample was checked for it, not the catalog. With OSV off, the jQuery release is not
+looked up as its npm package either, and the output says so:
 
 ```
 $ echo "$PAGE" | sigforge enrich
-[cpe] cpe:2.3:a:f5:nginx:1.18.0:*:*:*:*:*:*:* 1.18.0 → not_checked  source=cve
-[eol] nginx 1.18.0 → not_checked  source=lifecycle
+[cpe] cpe:2.3:a:f5:nginx:1.18.0:*:*:*:*:*:*:* 1.18.0 → not_checked (source_off)  source=cve
+[eol] nginx 1.18.0 → not_checked (source_off)  source=lifecycle
 …
 [jslib] jQuery 3.4.0 → affected_by_advisory  source=jslib freshness=snapshot
-    lead CVE-2020-11022   medium   cvss=- epss=- kev=false
-looked up 1/7 · concluded 1/7 · not concluded 6 (not_checked 6, …) — not concluded is not clean
+    lead CVE-2020-11022   medium   cvss=- epss=- kev=-
+[ecosystem:npm] jquery 3.4.0 → not_checked (source_off)  source=osv
+    note: osv feed off: the platform's release was not looked up as its packages
+looked up 1/8 · concluded 1/8 · not concluded 7 (not_checked 7, …) — not concluded is not clean
 ```
 
 **Report advisories that are new since the last run.** `sync` keeps a local copy of each
@@ -84,8 +87,8 @@ $ kill $!   # stop the feed
 $ SIGFORGE_CACHE_MAX_AGE=1h sigforge enrich --jslib jquery@3.3.1 < /dev/null
 requests: localhost:8765=0 sent (1 served from the local store)
 [jslib] jquery 3.3.1 → affected_by_advisory  source=jslib freshness=snapshot
-    lead CVE-2019-11358   medium   cvss=- epss=- kev=false
-    lead CVE-2020-11022   medium   cvss=- epss=- kev=false
+    lead CVE-2019-11358   medium   cvss=- epss=- kev=-
+    lead CVE-2020-11022   medium   cvss=- epss=- kev=-
 …
 ```
 

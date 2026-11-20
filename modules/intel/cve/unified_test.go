@@ -19,8 +19,8 @@ func TestToUnifiedStates(t *testing.T) {
 	}{
 		{"feed off → not_checked", Result{}, ErrFeedOff, unified.StateNotChecked, unified.FreshnessUnknown},
 		{"fetch error → source_unavailable", Result{}, errors.New("boom"), unified.StateSourceUnavailable, unified.FreshnessUnknown},
-		// empty CPE: honestly unknown-product, NEVER not_affected (a false "clean").
-		{"empty CPE → unknown_product", Result{State: StateUnknown}, nil, unified.StateUnknownProduct, unified.FreshnessUnknown},
+		// empty CPE: nothing to ask the feed with — not asked, NEVER not_affected (a false "clean").
+		{"empty CPE → not_checked (not asked)", Result{State: StateUnknown}, nil, unified.StateNotChecked, unified.FreshnessUnknown},
 		{"no known cve → not_checked (no clearance) + live", Result{State: StateNoKnownCVE}, nil, unified.StateNotChecked, unified.FreshnessLive},
 		{"has cve at a version → affected + live", Result{State: StateHasCVE, Version: "1.18.0"}, nil, unified.StateAffectedByAdvisory, unified.FreshnessLive},
 		// no version: the feed listed every advisory for the PRODUCT, none pinned to the

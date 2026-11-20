@@ -152,7 +152,7 @@ catalog, with the partial-data reason when only the small embedded KEV sample is
 
 | state | looked up | concluded | a lead absent from the answer is gone (`watch` GONE) |
 |---|---|---|---|
-| `not_checked` (off, unsupported, data cut short) | no | no | no: `UNCHECKED`, leads kept |
+| `not_checked` (off, unsupported, data cut short, nothing to ask with — a CPE the end-of-life bundle lists under two products included, though the bundle was read: `freshness` says so) | no | no | no: `UNCHECKED`, leads kept |
 | `not_checked` + `NoteNoClearance` (a whole-data miss) | yes | no | with `FullData` |
 | `source_unavailable` | no | no | no: `UNCHECKED`, leads kept |
 | `unknown_product` | yes | no | with `FullData` (a package absent from a whole OSV dump) |
@@ -170,6 +170,55 @@ answer without whole data, or for a version not compared, leaves out is kept and
 `UNCHECKED` with why, never `GONE`, while a new lead in that answer is still `NEW`. No WordPress or
 JavaScript answer sets `FullData`, so their leads are never `GONE`.
 
+### Reason codes
+
+`Result.Reason` is `Err` as a code, so a consumer tells the gaps apart without parsing a sentence (`Err` stays the
+sentence for people). It is set on every result that is not a conclusion, on every `potentially_affected`, and on an
+`affected_by_advisory` drawn from part of the source's data; a plain match carries none. A consumer must read a code it
+does not know as "not concluded", never as clean. Every source's paths are held to their code in
+`TestEveryUnconcludedResultNamesAReason` (`modules/intel/accuracy`); this table is held to the code list by
+`TestReasonCodesDocumented`.
+
+| reason | set when | what a consumer can do |
+|---|---|---|
+| `source_off` | the source is not configured (no env URL, no provider wired): it was not asked | configure the source |
+| `unsupported` | the source does not cover this kind of identity (an OSV ecosystem it lacks, a WordPress kind other than plugin, theme or core) | nothing in this source |
+| `no_identity` | there is nothing to ask the source with: no CPE for a detection, no slug, a distro package without its release, a tech the end-of-life source has no product name for and no CPE to ask the bundle with, a CPE the end-of-life bundle lists under more than one product | give the identity (an attested CPE, a purl with `?distro=`) |
+| `source_error` | the source failed (network, HTTP status, 429 hold-off) or answered with what is not its data | retry later; a stale stored copy, when one exists, answers with `freshness: stale` instead |
+| `sample_only` | only the small sample embedded in the binary was read (Retire.js, CISA KEV): the source is not configured, or it failed with no stored copy to fall back on | configure the source; when it is configured, `error` says why it failed |
+| `partial_answer` | part of the answer was read: one page of a paged feed, a cut-off list, a dump with entries it could not read | treat what is absent as not checked |
+| `not_provably_complete` | nothing matched, in data the source cannot prove whole (the CVE API, a WordPress feed, the Retire.js repository) | no clearance: verify the component another way |
+| `no_clearance` | nothing matched in the source's whole data — still not a clearance (see above) | no clearance: verify the component another way |
+| `not_in_source` | the source does not list this identity | try a source that tracks it |
+| `no_version` | no version was given: the product's advisories, none pinned | establish the running version |
+| `version_unreadable` | a version was given that the source's version order cannot read; it is kept in `version`, never treated as missing | establish a version in the ecosystem's own form |
+| `version_unplaced` | the version could not be placed for certain against the source's bounds (an advisory bound it cannot compare, no release cycle matching it, a release older than every version a package's advisories name) | read each lead's `note`; confirm the release |
+| `version_conflict` | the page's version claims disagree, so the version asked may not be the running one (a hit becomes `potentially_affected`) | establish which claim is right |
+
+The CVE source compares versions on its side (sigforge writes the version into the CPE it asks with), so it never
+reports `version_unreadable`. `kev`'s own results — CVE-centric, used inside `enrich` to rank leads — are the one
+`potentially_affected` without a reason: an EPSS probability exists, which is not a version question.
+
+An advisory OSV marks withdrawn is left out of the index, never kept as a lead: a withdrawn advisory no longer says
+anything about the package, and listing it beside live ones would be a claim nobody makes.
+
+### What else a result says about its evidence
+
+- **`kev`** — what the leads' `known_exploited` flag was checked against: `catalog` (the CISA KEV catalog, live,
+  synced or stale), `sample` (the few entries embedded in the binary: absent from them is *not* "not exploited"), or
+  absent (KEV not consulted). `known_exploited: false` means "not listed" only with `kev: catalog`; the `enrich` text
+  prints `kev=-` otherwise. Set only on results with a lead naming a CVE.
+- **`version_from`** — where `version` came from: a page field (`header`, `cookie`, `meta`, `html`, `scriptSrc`,
+  `dom`, or `pattern` for a version pattern run over the page) — the site's own claim, spoofable — or `inventory`
+  for a version the operator gave (`--package`, `--sbom`, `--wp-*`, `--jslib`). The matcher records it as
+  `Detection.VersionFrom`.
+- **`detection_confidence`** — the fingerprint's confidence (0–100) that the page runs the tech. It says how sure the
+  *detection* is, not how likely an advisory is to apply or be exploitable; absent for identities not detected on a page.
+- **CVE answers compare the upstream release.** A `cpe` or `eol` result compares the version a page names with the
+  upstream project's releases. A distro build can carry a fix without changing that version (a backport), so such a
+  hit stays a lead to confirm against the package's own patch level; only an OSV distro package
+  (`ecosystem:Debian:12`, given as a purl with its release) is compared with the distro's own advisories.
+
 ## 3. Freshness — a snapshot is never live truth
 
 `Result.Freshness` travels with every result so a stale offline snapshot is never read
@@ -183,10 +232,26 @@ as a live lookup:
 | `FreshnessStale` | `stale` | a cache/snapshot known to be past its freshness window |
 
 A source only claims `live` on the states that actually reached the feed; the off and
-error paths leave freshness `unknown` rather than claiming a fetch. `jslib` reports
+error paths leave freshness `unknown` rather than claiming a fetch. An answer that the
+source does not list the product (`not_in_source`) was read from the source, so it
+carries the freshness and `fetched_at` of the copy it was read from, like any other answer. So does an end-of-life
+`not_checked` (`no_identity`) for a CPE the bundle lists under more than one product: the bundle was read, and named
+no one product (`TestEOLByCPEThatNamesNoOneProduct`). `jslib` reports
 `snapshot` when it fell back to its embedded Retire.js snapshot and `live` only when
 the operator's URL answered; `kev` reports `snapshot` when the live catalog was
 unavailable and the embedded CISA KEV baseline was used.
+
+Each source's labels on each path, and the test that holds them:
+
+| source | off | failed | answered now | stored copy within `SIGFORGE_CACHE_MAX_AGE` | stored copy after the source failed |
+|---|---|---|---|---|---|
+| `cve` (per-query API) | unknown — `TestUnansweredResultsClaimNoFreshness` | unknown — same | live — `TestToUnifiedFetchedAt` | never: asked every lookup — `TestQueryFeedsAreNeverServedFromTheStore` | never: `source_unavailable` — same |
+| `wpcve` (per-query feed) | unknown — `TestUnansweredResultsClaimNoFreshness` | unknown — same | live — same | never: asked every lookup — `TestQueryFeedsAreNeverServedFromTheStore` | never: `source_unavailable` — same |
+| `lifecycle` bundle | unknown — `TestUnansweredResultsClaimNoFreshness` | unknown — same | live — `TestRunReplacesTheStoredBundleWithAGoodOne` | snapshot — `TestBundleFromSyncedStoreIsSnapshot` | stale — `TestBundleStaleCopyWhenSourceFails` |
+| `lifecycle` bundle, product not listed (`not_in_source`, by name or by CPE) | not asked — as the row above | not answered — as the row above | live — `TestBundleMissCarriesItsFreshness` | snapshot — same | stale, why in `error` — same; also from a stored copy written without a fetch time (no `fetched_at`) — `TestBundleMissWithoutAStoredTime` |
+| `osv` dump | unknown — `TestUnansweredResultsClaimNoFreshness` | unknown — same | live — `TestRunReplacesTheStoredDumpWithAGoodOne` | snapshot — `TestLookuperUsesStoredDump` | stale — same, `TestRunKeepsTheStoredDumpOverJunk` |
+| `jslib` repository | snapshot (embedded sample) — `TestToUnifiedFreshnessSnapshot` | snapshot (sample) — `TestRunRechecksAStoredRepositoryServedUnchecked` | live — `TestToUnifiedFreshnessLive` | snapshot — `TestRepoFromSyncedStoreIsNotLive` | stale — `TestRepoStaleCopyWhenSourceFails` |
+| `kev` catalog | snapshot (embedded sample) — `TestEnrichUnifiedSnapshotFreshness` | snapshot (sample) — `TestRunRechecksAStoredCatalogServedUnchecked` | live — `TestEnrichUnifiedLiveFreshnessAndFetchedAt` | snapshot — `TestKEVFromSyncedStoreIsSnapshot` | stale — `TestKEVStaleCopyWhenSourceFails` |
 
 ## 4. `Lead.Score` and `Lead.EPSS` are `*float64` — nil ≠ 0.0, never mixed
 
@@ -215,4 +280,18 @@ provenance pair `CPEState` / `CPEEvidence` — which records HOW the CPE was res
 borrowed and never queried, or `none`) kept **apart from** `Err` so a resolution note
 is never mistaken for a lookup failure. `unified.Unknown(scope, identity, state, err)`
 builds a not-looked-up result, so an adapter never returns a zero `Result` a consumer
-could misread as clean.
+could misread as clean. `Reason`, `KEV`, `VersionFrom` and `DetectionConfidence` are described under "Reason codes" and
+"What else a result says about its evidence" above.
+
+## 6. Reading the JSON, and how it changes
+
+`sigforge enrich --json` prints a JSON array of these results. Fixtures of what it prints for the cases a consumer must
+tell apart — nothing to look up, a source off, a source failing, an identity the source does not list, a version it
+cannot read, a match, a whole-data miss, a stale stored copy, KEV read from the embedded sample — are in
+`cmd/sigforge/testdata/contract/`, each with the command, its exit code and its output, held by `TestContractFixtures`.
+The six looked-up-or-not cases each carry their own (`state`, `reason`) pair.
+
+How the shape changes: fields are added, never removed or renamed, and a field's meaning is not reused for another;
+`state` and `freshness` names are fixed (a Go consumer gets an error decoding a name it does not know). A consumer must
+read an unknown `state` or `reason` as not concluded, and an absent field as "not said" — never as false, zero or clean.
+A change of meaning is listed under "Changed meaning" in `CHANGELOG.md`.

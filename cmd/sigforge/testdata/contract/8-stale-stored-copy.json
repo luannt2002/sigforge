@@ -1,0 +1,41 @@
+{
+  "case": "8-stale-stored-copy",
+  "args": [
+    "--json",
+    "--package",
+    "npm:lodash@4.17.20"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_OSV_URL",
+    "SIGFORGE_CACHE_DIR"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "affected_by_advisory",
+      "scope": "ecosystem:npm",
+      "identity": "lodash",
+      "version": "4.17.20",
+      "leads": [
+        {
+          "id": "GHSA-test-0001",
+          "cve": [
+            "CVE-2099-1111"
+          ],
+          "title": "npm: lodash is vulnerable, fixed in 4.17.21 (OSV)",
+          "severity": "high",
+          "references": [
+            "https://osv.dev/vulnerability/GHSA-test-0001"
+          ]
+        }
+      ],
+      "source": "osv",
+      "freshness": "stale",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "full_data": true,
+      "error": "osv source failed: verdict from the last synced dump (stale): fetch: get \"http://source.test/ok/npm/all.zip\": status 500",
+      "kev": "sample",
+      "version_from": "inventory"
+    }
+  ]
+}

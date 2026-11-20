@@ -1,0 +1,24 @@
+{
+  "case": "3-source-error",
+  "args": [
+    "--json",
+    "--package",
+    "npm:lodash@4.17.20"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_OSV_URL"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "source_unavailable",
+      "scope": "ecosystem:npm",
+      "identity": "lodash",
+      "version": "4.17.20",
+      "source": "osv",
+      "error": "osv npm: fetch: get \"http://source.test/bad/npm/all.zip\": status 500",
+      "reason": "source_error",
+      "version_from": "inventory"
+    }
+  ]
+}

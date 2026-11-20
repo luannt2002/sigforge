@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/luannt2002/sigforge/modules/intel/matcher"
+	"github.com/luannt2002/sigforge/modules/intel/osv"
 	"github.com/luannt2002/sigforge/modules/intel/unified"
 )
 
@@ -92,14 +93,19 @@ func inReleaseLine(name, version string) bool {
 // platformResults looks a detected platform's core packages up in OSV — only with a version that
 // names a release (advisories are bounded by releases, so "Drupal 9" from a header or "Magento/2.4"
 // would fall inside every 9.x or 2.4.x range; without one the CVE source already lists the
-// product's advisories) and only when the release lookup is on, so an off source adds no unanswered lookups.
+// product's advisories). With the release lookup off each package that would have been asked is one
+// not_checked result: the gap is named, not left for the CVE source to look like the whole answer.
 func platformResults(ctx context.Context, d matcher.Detection, opt Options) []unified.Result {
-	if opt.OSVRelease == nil || strings.Count(strings.TrimSpace(d.Version), ".") < releaseDots(d.Tech, d.Version) {
+	if strings.Count(strings.TrimSpace(d.Version), ".") < releaseDots(d.Tech, d.Version) {
 		return nil
 	}
 	var out []unified.Result
 	for _, p := range platformPackages[d.Tech] {
 		if !inReleaseLine(p.name, d.Version) {
+			continue
+		}
+		if opt.OSVRelease == nil {
+			out = append(out, applyVersionConflict(offResult(osv.Scope(p.eco), p.name, d.Version, "osv", "osv feed off: the platform's release was not looked up as its packages"), d))
 			continue
 		}
 		out = append(out, keepDoubtsApart(applyVersionConflict(opt.OSVRelease(ctx, p.eco, p.name, d.Version), d))...)
@@ -133,6 +139,7 @@ func keepDoubtsApart(r unified.Result) []unified.Result {
 		}
 	}
 	d.State, d.Leads, d.Err = unified.StatePotentiallyAffected, doubt, strings.TrimSuffix(strings.Join(why, "; ")+"; "+r.Err, "; ")
+	d.Reason = unified.ReasonVersionUnplaced
 	if len(sure) == 0 {
 		return []unified.Result{d}
 	}

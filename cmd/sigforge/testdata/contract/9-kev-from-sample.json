@@ -1,0 +1,46 @@
+{
+  "case": "9-kev-from-sample",
+  "args": [
+    "--json",
+    "--jslib",
+    "jquery@1.8.0"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "affected_by_advisory",
+      "scope": "jslib",
+      "identity": "jquery",
+      "version": "1.8.0",
+      "leads": [
+        {
+          "id": "CVE-2019-11358",
+          "cve": [
+            "CVE-2019-11358"
+          ],
+          "title": "jQuery before 3.4.0 prototype pollution via jQuery.extend",
+          "severity": "medium",
+          "references": [
+            "https://nvd.nist.gov/vuln/detail/CVE-2019-11358"
+          ]
+        },
+        {
+          "id": "CVE-2020-11022",
+          "cve": [
+            "CVE-2020-11022",
+            "CVE-2020-11023"
+          ],
+          "title": "Potential XSS via jQuery.htmlPrefilter on untrusted HTML",
+          "severity": "medium",
+          "references": [
+            "https://nvd.nist.gov/vuln/detail/CVE-2020-11023"
+          ]
+        }
+      ],
+      "source": "jslib",
+      "freshness": "snapshot",
+      "kev": "sample",
+      "version_from": "inventory"
+    }
+  ]
+}

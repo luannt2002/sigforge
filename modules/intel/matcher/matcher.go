@@ -54,6 +54,9 @@ type Detection struct {
 	// distinct claims behind a conflict so the operator can judge them.
 	VersionConflict bool           `json:"versionConflict,omitempty"`
 	VersionClaims   []VersionClaim `json:"versionClaims,omitempty"`
+	// VersionFrom is the page field Version was captured from ("header", "cookie", "meta", "html", "scriptSrc",
+	// "dom"), or "pattern" when a version pattern run over the page found it: either way the site's own claim.
+	VersionFrom string `json:"versionFrom,omitempty"`
 	// ExcludedBy names the resolved techs that exclude this one; a tech present only through
 	// labeled techs — implied by them, or admitted by a requires/requiresCategory gate they
 	// meet — carries their labels too. The lead is kept and labeled, not dropped, so the
@@ -84,6 +87,7 @@ const maxImplyDepth = 4
 type hit struct {
 	conf     int
 	version  string // resolved version, filled once matching for this tech is done
+	from     string // the field version came from
 	conflict bool
 	claims   []VersionClaim // every version a pattern captured, pre-resolution
 	fp       schema.Fingerprint
@@ -123,6 +127,7 @@ func Match(db *schema.DB, page Page) []Detection {
 		}
 		if h.conf > 0 {
 			h.version, h.conflict = resolveVersion(h.claims)
+			h.from = claimField(h.claims, h.version)
 			refineVersion(fp, html, headers, h) // fills only when no claim captured a version
 			sortEvidence(h.evidence)            // map iteration order must not leak into output
 			hits[name] = h
@@ -139,14 +144,15 @@ func Match(db *schema.DB, page Page) []Detection {
 			conf = 100
 		}
 		d := Detection{
-			Tech:       name,
-			Version:    h.version,
-			Confidence: conf,
-			Categories: h.fp.Cats,
-			Provenance: h.fp.Provenance,
-			License:    h.fp.License,
-			Evidence:   h.evidence,
-			ExcludedBy: labels[name],
+			Tech:        name,
+			Version:     h.version,
+			VersionFrom: h.from,
+			Confidence:  conf,
+			Categories:  h.fp.Cats,
+			Provenance:  h.fp.Provenance,
+			License:     h.fp.License,
+			Evidence:    h.evidence,
+			ExcludedBy:  labels[name],
 		}
 		if h.conflict {
 			d.VersionConflict = true
@@ -268,7 +274,7 @@ func refineVersion(fp schema.Fingerprint, html string, headers map[string][]stri
 		}
 		if m := re.FindStringSubmatch(s); m != nil {
 			if v := substitute(ver, m); v != "" {
-				h.version = v
+				h.version, h.from = v, "pattern"
 				return
 			}
 		}
@@ -311,6 +317,17 @@ func resolveVersion(claims []VersionClaim) (version string, conflict bool) {
 		}
 	}
 	return best.Version, conflict
+}
+
+// claimField is the field of the highest-ranked claim of version, "" when no claim captured it.
+func claimField(claims []VersionClaim, version string) string {
+	field := ""
+	for _, c := range claims {
+		if c.Version == version && (field == "" || fieldRank(c.Field) < fieldRank(field)) {
+			field = c.Field
+		}
+	}
+	return field
 }
 
 func betterClaim(a, b VersionClaim) bool {

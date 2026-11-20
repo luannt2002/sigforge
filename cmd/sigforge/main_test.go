@@ -313,9 +313,11 @@ func TestExplainEOL(t *testing.T) {
 		tech     string
 		contains string
 	}{
-		"unmapped": {lifecycle.Status{}, "FooTech", `no endoflife.date product is mapped for "FooTech"`},
-		"no-cycle": {lifecycle.Status{Product: "php", Version: "99.9"}, "PHP", "matched no release cycle"},
-		"matched":  {lifecycle.Status{Product: "php", Version: "7.2.34", Cycle: "7.2", EOLDate: "2020-11-30", IsEOL: lifecycle.StateEOL}, "PHP", `cycle "7.2" owns it`},
+		// a bare Status reads as the source's answer "not listed" (lifecycle.ToUnified decides); the not-asked
+		// case comes only from the adapter and is held by TestCmdEOLSaysWhatTheSourceDid
+		"not listed": {lifecycle.Status{}, "FooTech", `was asked for "FooTech" and does not list it`},
+		"no-cycle":   {lifecycle.Status{Product: "php", Version: "99.9"}, "PHP", "matched no release cycle"},
+		"matched":    {lifecycle.Status{Product: "php", Version: "7.2.34", Cycle: "7.2", EOLDate: "2020-11-30", IsEOL: lifecycle.StateEOL}, "PHP", `cycle "7.2" owns it`},
 	}
 	for name, c := range cases {
 		if got := explainEOL(c.st, c.tech); !strings.Contains(got, c.contains) {

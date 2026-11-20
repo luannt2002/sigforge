@@ -90,7 +90,7 @@ func New(client *fetch.Client) *Set {
 			}
 			// a plugin answer for any other kind would be about a different product
 			r := unified.Unknown("wordpress:"+kind, slug, unified.StateNotChecked, fmt.Sprintf("WordPress kind %q is not plugin, theme or core: not looked up", kind))
-			r.Source, r.Version = "wpcve", version
+			r.Source, r.Version, r.Reason = "wpcve", version, unified.ReasonUnsupported
 			return r
 		},
 		JS: func(ctx context.Context, name, version string) unified.Result {

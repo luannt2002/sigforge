@@ -1,0 +1,41 @@
+{
+  "case": "5-version-unreadable",
+  "args": [
+    "--json",
+    "--package",
+    "npm:lodash@not.a.version"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_OSV_URL"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "potentially_affected",
+      "scope": "ecosystem:npm",
+      "identity": "lodash",
+      "version": "not.a.version",
+      "leads": [
+        {
+          "id": "GHSA-test-0001",
+          "cve": [
+            "CVE-2099-1111"
+          ],
+          "title": "npm: lodash is vulnerable, fixed in 4.17.21 (OSV)",
+          "severity": "high",
+          "references": [
+            "https://osv.dev/vulnerability/GHSA-test-0001"
+          ]
+        }
+      ],
+      "source": "osv",
+      "freshness": "live",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "full_data": true,
+      "error": "a version was given but is not one this source's version order can read: advisories for the product, not pinned to it",
+      "reason": "version_unreadable",
+      "kev": "sample",
+      "version_from": "inventory"
+    }
+  ]
+}

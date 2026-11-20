@@ -86,3 +86,47 @@ transactional.
 > `.prev` generation), not a versioned history. The next merge overwrites `.prev`, and
 > rolling back twice is a no-op. If an operator needs deeper history, they keep their own
 > versioned copies — sigforge does not pretend to.
+
+## 5. One publish at a time
+
+`merge`, `refresh` and `rollback` take the publish lock of the DB before writing: a lock the operating system holds on
+`<out>.lock` for the run — `flock` on Linux, macOS and the BSDs, `LockFileEx` on Windows. A second run of any of them on
+the same DB while it is held exits 1 naming the file and the holder — its PID as the system reports it on Linux,
+"another run" elsewhere — and writes nothing: two publishes used to interleave, leaving the DB of one with the sidecar
+and manifest of the other, which `verify` then refused until the next publish. `refresh` holds the lock from reading
+the live DB to publishing, so its gate compares the candidate with the DB it replaces.
+
+The system lets the lock go when the run ends, however it ends — done, failed, interrupted, killed, or stopped by a
+broken pipe (`sigforge refresh … | head -1`) — so a run that died never blocks the next one and nothing is removed by
+hand. `<out>.lock` stays on disk after a run; the file alone is not a lock. It is a lock target only: sigforge never
+writes it, never removes it (removing it while held would let another run lock a new file of the same name), and sets
+its mode — 0644, whatever the umask, so every user who may publish the DB can lock it read-only — only when the run
+created it. On Linux, macOS and the BSDs a symbolic link or anything but a plain file at `<out>.lock` is refused,
+never followed; on Windows and other systems a link there is followed, and nothing is written through it. A lock file
+another user made that this one cannot read is reported by path: make it readable, or remove it while no publish
+runs.
+
+A run killed while it writes may leave a `.sigforge-*.tmp` file beside the DB, which nothing reads, and the DB may be
+newer than its sidecar: run `verify` before trusting it. The lock is tested on Linux; on Windows it is built, not
+tested — there the system lets a dead run's lock go "as soon as system resources allow", so a run started right after
+may be refused once. On a system with neither `flock` nor `LockFileEx` publishes are not serialized.
+
+The lock does not make the three files one write: a reader that runs `verify` while a publish is writing can see the new
+DB beside the previous sidecar and is refused — run it again once the publish is done. A reader that loads only the DB
+always gets a whole file.
+
+## 6. A directory another user can write
+
+A DB published into a directory another user can write is only as trustworthy as that user: they can replace the DB,
+its sidecar and its manifest at any time, and `verify` cannot tell their consistent set from yours. Keep the
+directory — and the store `SIGFORGE_CACHE_DIR` names — writable by the user who publishes only.
+
+What sigforge does guarantee, even run as root in such a directory, is that write access to the directory never
+becomes access to any other file. Every write opens the directory once and works inside it: the temporary file is
+created there (never an existing name), its mode is set on the open file, the rename is refused if that file was
+swapped meanwhile, and the write fails if what lands at the path is not the file it wrote — a swap in the very instant
+of the rename is reported, never silent. The archive of the previous DB (`<out>.prev*`) never reads through a link:
+a link is archived as the same link, unread, and a plain file is read through the file opened. The publish lock never
+follows a link (§5). The OSV store writes its changed records inside its own directory, never through a link out of
+it. Those were three ways a link or a swapped temporary file made a root run change the mode of, copy out, or write
+into a file of the other user's choosing (all present in v0.5.0).

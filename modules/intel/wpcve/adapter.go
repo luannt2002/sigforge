@@ -34,24 +34,27 @@ func ToUnified(pr PluginResult) unified.Result {
 	}
 	switch {
 	case pr.UnparsedVersion: // a version WAS detected but can't be compared — the feed was still reached
-		r.State, r.Freshness = unified.StateUnknownVersion, unified.FreshnessLive
+		r.State, r.Freshness, r.Reason = unified.StateUnknownVersion, unified.FreshnessLive, unified.ReasonVersionUnreadable
 	case !pr.Resolved:
-		switch pr.reason {
-		case reasonSourceDown:
-			r.State = unified.StateSourceUnavailable
-		case reasonUnknownSlug:
-			r.State, r.Freshness = unified.StateUnknownProduct, unified.FreshnessLive
-		default: // reasonFeedOff and the no-identity early return: nothing was looked up
-			r.State, r.Err = unified.StateNotChecked, "WordPress vulnerability feed off, or no slug to look up"
+		switch {
+		case pr.reason == reasonSourceDown:
+			r.State, r.Reason = unified.StateSourceUnavailable, unified.ReasonSourceError
+			r.Err = "the WordPress vulnerability feed failed, or answered with what is not its data"
+		case pr.reason == reasonUnknownSlug:
+			r.State, r.Freshness, r.Reason = unified.StateUnknownProduct, unified.FreshnessLive, unified.ReasonNotInSource
+		case pr.Slug == "": // the no-identity early return: nothing to look up
+			r.State, r.Reason, r.Err = unified.StateNotChecked, unified.ReasonNoIdentity, "no slug to look up"
+		default: // reasonFeedOff
+			r.State, r.Reason, r.Err = unified.StateNotChecked, unified.ReasonSourceOff, "WordPress vulnerability feed off"
 		}
 	case len(pr.Vulns) > 0:
 		// No version: lookup kept every vuln of the slug as a lead, none pinned.
 		r.State, r.Freshness = unified.AdvisoryState(pr.Version != "" && !pr.Unpositioned), unified.FreshnessLive
 		switch {
 		case pr.Version == "":
-			r.Err = unified.NoteNoVersion
+			r.Err, r.Reason = unified.NoteNoVersion, unified.ReasonNoVersion
 		case pr.Unpositioned:
-			r.Err = "an advisory bound is not a version PHP's version_compare can read: whether these advisories apply is unknown"
+			r.Err, r.Reason = "an advisory bound is not a version PHP's version_compare can read: whether these advisories apply is unknown", unified.ReasonVersionUnplaced
 		}
 		if pr.Unpositioned {
 			r.Leads = leadsFor(pr.Vulns, noteUnplaced)
@@ -63,6 +66,7 @@ func ToUnified(pr PluginResult) unified.Result {
 		r.Freshness = unified.FreshnessLive
 		r.State, _ = unified.Clean(unified.Evidence{FullData: false, Positioned: true})
 		r.Err = "the WordPress vulnerability feed listed nothing for this version; it cannot prove that list complete, so it is not a clearance"
+		r.Reason = unified.ReasonNotProvablyComplete
 	}
 	return r
 }

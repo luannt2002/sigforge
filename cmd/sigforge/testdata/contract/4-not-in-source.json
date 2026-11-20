@@ -1,0 +1,26 @@
+{
+  "case": "4-not-in-source",
+  "args": [
+    "--json",
+    "--package",
+    "npm:left-pad@1.0.0"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_OSV_URL"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "unknown_product",
+      "scope": "ecosystem:npm",
+      "identity": "left-pad",
+      "version": "1.0.0",
+      "source": "osv",
+      "freshness": "live",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "full_data": true,
+      "reason": "not_in_source",
+      "version_from": "inventory"
+    }
+  ]
+}

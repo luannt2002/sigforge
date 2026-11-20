@@ -28,7 +28,7 @@ stdin JSON Page ─▶ matcher.Match(db, page) ─▶ []Detection
         resolveCPEs ──▶ IdentityResolver verified CPE?  ── yes ─▶ cpe_state=verified (nvd-dict)
                          │ no
                          └─▶ schema.Fingerprint.CPE (attested) ─▶ cpe_state=attested (source)
-                         └─▶ none                                ─▶ unknown_product
+                         └─▶ none                                ─▶ not_checked (no_identity: not asked)
                                                  │
                         cveResults: opt.CVE.Lookup(cpe, version) ─▶ cve.ToUnified
                                                  │  + prioritize(KEV/EPSS) per lead
@@ -78,7 +78,7 @@ caller wires the real operator-gated adapters and a test wires fakes:
 | `KEV` | `kev.Adapter` (`KEVProvider`) | leads pass through unranked, never dropped |
 | `IdentityResolver` | `identity.Resolver.ResolveCPE` | falls back to the source-attested CPE |
 | `OSV` / `WP` / `JS` | the OSV/wpcve/jslib lookups | the dispatched identity yields `not_checked` |
-| `OSVRelease` | OSV for a detected platform's release (`osv.Adapter.Lookupers`) | the platform is not looked up as its packages |
+| `OSVRelease` | OSV for a detected platform's release (`osv.Adapter.Lookupers`) | one `not_checked` result (`source_off`) per package that would have been asked |
 
 The CLI (`sigforge enrich`) wires these from env URLs only (`cve.EnvVar`,
 `lifecycle.EnvVar`, `kev.EnvKEVURL` / `kev.EnvEPSSURL`, `identity.EnvCPEDictURL`). With
@@ -117,6 +117,14 @@ request is made to any target — safe to run against nothing.
   through unchanged. No lead is ever dropped for lacking a signal.
 - **Every match is a LEAD.** A detected version is spoofable; a CVE/EOL/advisory match
   is a lead to corroborate against a real asset, not proof of exploitability.
+- **Every gap names its reason, and evidence travels.** Each result that is not a conclusion carries a `reason` code;
+  a detection with no CPE is `not_checked` (`no_identity`: the CVE source was not asked, so it is not counted as looked
+  up), and so is an end-of-life lookup for a tech the source has no product name for, unless the bundle was asked by
+  CPE (then a product it does not list is `unknown_product`, `not_in_source`); with the end-of-life feed off every tech
+  is `not_checked` (`source_off`); a platform release with OSV off is reported `not_checked` per package rather than left out. Each result of a
+  page detection carries `version_from` (the page field the version came from) and `detection_confidence`; an
+  identity the operator gave carries `version_from: inventory`. `prioritize` records in `kev` whether the leads were
+  checked against the CISA KEV catalog or only the embedded sample (`docs/unified-contract.md`).
 
 ## 6. CLI
 

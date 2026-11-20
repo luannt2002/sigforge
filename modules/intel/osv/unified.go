@@ -42,17 +42,33 @@ func ToUnified(res Result, eco, name, version string, fetchedAt time.Time) unifi
 		u.State = unified.AdvisoryState(res.VersionPinned)
 		u.Leads = append(unifiedLeads(res.Vulns, ""), unifiedLeads(res.Unplaced, noteUnplaced)...)
 		if !res.VersionPinned {
-			u.Err = unified.NoteNoVersion
+			u.Err, u.Reason = unified.NoteNoVersion, unified.ReasonNoVersion
+			if strings.TrimSpace(version) != "" { // a version was given that the ecosystem's order cannot read
+				u.Err, u.Reason = unified.NoteVersionUnreadable, unified.ReasonVersionUnreadable
+			}
+		}
+		if res.Partial && u.Reason == "" { // a match from a dump read in part: other advisories may be missing
+			u.Reason = unified.ReasonPartialAnswer
 		}
 	case StatusNoKnownVuln:
 		u.State, u.Err = unified.Clean(unified.Evidence{FullData: !res.Partial, Positioned: res.VersionPinned})
+		switch {
+		case res.Partial:
+			u.Reason = unified.ReasonPartialAnswer
+		case !res.VersionPinned && strings.TrimSpace(version) == "":
+			u.Reason = unified.ReasonNoVersion
+		case !res.VersionPinned:
+			u.Reason = unified.ReasonVersionUnreadable
+		default:
+			u.Reason = unified.ReasonNoClearance
+		}
 	default: // StatusUnknown
 		if res.PackageKnown {
-			u.State = unified.StatePotentiallyAffected
+			u.State, u.Reason = unified.StatePotentiallyAffected, unified.ReasonVersionUnplaced
 			u.Err = "the version could not be placed against the package's advisories: whether they apply is unknown"
 			u.Leads = unifiedLeads(res.Vulns, noteUnplaced)
 		} else {
-			u.State = unified.StateUnknownProduct
+			u.State, u.Reason = unified.StateUnknownProduct, unified.ReasonNotInSource
 		}
 	}
 	return u
@@ -69,17 +85,16 @@ const noteOutsideListed = "the version is older than every version this package'
 // Unavailable maps a LoadIndex failure to an honest unified.Result: a disabled source (errSourceOff)
 // is not_checked, any other failure is source_unavailable — neither is ever read as "clean".
 func Unavailable(eco, name, version string, err error) unified.Result {
-	state := unified.StateSourceUnavailable
+	state, reason := unified.StateSourceUnavailable, unified.ReasonSourceError
 	if errors.Is(err, errSourceOff) {
-		state = unified.StateNotChecked
+		state, reason = unified.StateNotChecked, unified.ReasonSourceOff
 	}
 	msg := ""
 	if err != nil {
 		msg = err.Error()
 	}
 	u := unified.Unknown(Scope(eco), name, state, msg)
-	u.Version = version
-	u.Source = unifiedSource
+	u.Version, u.Source, u.Reason = version, unifiedSource, reason
 	return u
 }
 
@@ -148,18 +163,18 @@ func (a *Adapter) Lookupers() (pkg, release func(ctx context.Context, eco, name,
 	lookup := func(rel bool) func(ctx context.Context, eco, name, version string) unified.Result {
 		return func(ctx context.Context, eco, name, version string) unified.Result {
 			scope := Scope(eco)
-			unanswered := func(state unified.State, why string) unified.Result {
+			unanswered := func(state unified.State, reason, why string) unified.Result {
 				u := unified.Unknown(scope, name, state, why)
-				u.Version, u.Source = version, unifiedSource
+				u.Version, u.Source, u.Reason = version, unifiedSource, reason
 				return u
 			}
 			e, ok := Ecosystem(eco)
 			if !ok {
-				return unanswered(unified.StateNotChecked, "OSV ecosystem "+eco+" is not supported")
+				return unanswered(unified.StateNotChecked, unified.ReasonUnsupported, "OSV ecosystem "+eco+" is not supported")
 			}
 			eco = strings.TrimPrefix(scope, "ecosystem:") // the canonical name, release kept
 			if releaseScoped[e] && !strings.Contains(eco, ":") {
-				return unanswered(unified.StateNotChecked, e+" advisories differ per release: give the package as a purl with its distro qualifier (…?distro=<release>)")
+				return unanswered(unified.StateNotChecked, unified.ReasonNoIdentity, e+" advisories differ per release: give the package as a purl with its distro qualifier (…?distro=<release>)")
 			}
 			key := e
 			if releaseScoped[e] && a.client != nil && a.client.CacheDir != "" {
@@ -175,9 +190,9 @@ func (a *Adapter) Lookupers() (pkg, release func(ctx context.Context, eco, name,
 			l.once.Do(func() { l.idx, l.err = a.LoadIndex(ctx, key) })
 			switch {
 			case errors.Is(l.err, errSourceOff):
-				return unanswered(unified.StateNotChecked, "osv feed off")
+				return unanswered(unified.StateNotChecked, unified.ReasonSourceOff, "osv feed off")
 			case l.err != nil:
-				return unanswered(unified.StateSourceUnavailable, l.err.Error())
+				return unanswered(unified.StateSourceUnavailable, unified.ReasonSourceError, l.err.Error())
 			}
 			u := ToUnified(l.idx.lookup(eco, name, version, rel), eco, name, version, l.idx.BuiltAt)
 			switch {

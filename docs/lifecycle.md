@@ -39,11 +39,15 @@ detection like "PHP 7.2" becomes an actionable risk lead ("PHP 7.2 reached EOL o
   `StateUnknown` with an error the operator must see.
 - `Classify(cycles, version, now)` is PURE (no network) and fixture-tested; the
   feed URL is operator-supplied, off by default.
-- `sigforge eol TECH VERSION` prints the status; unset env errors with a hint.
+- `sigforge eol TECH VERSION` prints the status; unset env errors with a hint. An unknown says why from the `reason`
+  of `ToUnified`: "not looked up" only for a tech with no product name to ask with, "the end-of-life source does
+  not list it" when the source was asked; `--explain` gives the same reason. An answer read from the stored copy adds a
+  `from:` line naming it and its time (and why, when the source failed).
 - `ToUnified` maps a status onto the unified contract: EOL → `affected_by_advisory`
   (a lead), supported → `not_checked` with `unified.NoteNoClearance` (v0.4 issues no
-  clearance; see `docs/unified-contract.md`), every
-  unknown → `unknown_product` / `unknown_version` (see `docs/unified-contract.md`).
+  clearance; see `docs/unified-contract.md`), feed off → `not_checked` (`source_off`), nothing to ask with →
+  `not_checked` (`no_identity`), asked and not listed → `unknown_product` (`not_in_source`, with the freshness of the
+  copy that answered), version not placed → `unknown_version` (see `docs/unified-contract.md`).
 
 ## 4. Definition of Done
 

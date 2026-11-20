@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,14 +87,20 @@ func TestStateString(t *testing.T) {
 	}
 }
 
+// A tech with no product name of the source is never "supported": with the feed off it is off like any other tech;
+// with the feed on the source cannot be asked about it, so the result is not looked up (no_identity), never "unknown
+// to the source" (unknown_product), which would claim an answer that was never asked for.
 func TestEOLStatusUnknownProduct(t *testing.T) {
-	a := New("", fetch.New())
-	st, err := a.EOLStatus(context.Background(), "Cloudflare", "1.0")
-	if err != nil {
-		t.Fatalf("unknown product should not error: %v", err)
+	ctx := context.Background()
+	if st, err := New("", fetch.New()).EOLStatus(ctx, "Cloudflare", "1.0"); !errors.Is(err, ErrFeedOff) || st.IsEOL != StateUnknown {
+		t.Errorf("feed off, unmapped tech → %+v %v, want StateUnknown and ErrFeedOff", st, err)
 	}
-	if st.IsEOL != StateUnknown || st.Product != "" {
-		t.Errorf("unknown product → %+v, want empty product + StateUnknown", st)
+	st, err := New("http://127.0.0.1:9", fetch.New()).EOLStatus(ctx, "Cloudflare", "1.0")
+	if err != nil || st.IsEOL != StateUnknown || st.Product != "" {
+		t.Fatalf("feed on, unmapped tech → %+v %v, want empty product + StateUnknown, no error", st, err)
+	}
+	if u := ToUnified(st, err); u.State != unified.StateNotChecked || u.Reason != unified.ReasonNoIdentity {
+		t.Errorf("feed on, unmapped tech → %s / %q, want not_checked / no_identity", u.State, u.Reason)
 	}
 }
 

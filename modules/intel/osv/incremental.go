@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -61,10 +62,17 @@ func (a *Adapter) syncChanged(ctx context.Context, eco, zipPath, lastModified st
 	if err != nil {
 		return false, err
 	}
-	dir := overlayDir(zipPath)
-	m := readMark(dir)
+	// Every write goes through the store's own directory (an os.Root): the overlay is made and opened inside it, so a
+	// link another user put in its place is never followed out of the store.
+	store, err := os.OpenRoot(filepath.Dir(zipPath))
+	if err != nil {
+		return false, err
+	}
+	defer store.Close()
+	name := filepath.Base(overlayDir(zipPath))
+	m := readMark(overlayDir(zipPath))
 	if m.Stamp != dumpStamp(st) { // none yet, or an overlay of another dump
-		_ = os.RemoveAll(dir)
+		_ = store.RemoveAll(name)
 		start := fetchedAt
 		if t, err := http.ParseTime(lastModified); err == nil {
 			start = t
@@ -82,11 +90,16 @@ func (a *Adapter) syncChanged(ctx context.Context, eco, zipPath, lastModified st
 	if err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := store.Mkdir(name, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 		return false, err
 	}
+	overlay, err := store.OpenRoot(name) // a link out of the store is refused here
+	if err != nil {
+		return false, fmt.Errorf("osv: overlay %q: %w", overlayDir(zipPath), err)
+	}
+	defer overlay.Close()
 	for _, id := range ids {
-		if err := a.fetchRecord(ctx, eco, id, dir); errors.Is(err, errMissing) {
+		if err := a.fetchRecord(ctx, eco, id, overlay); errors.Is(err, errMissing) {
 			return false, nil
 		} else if err != nil {
 			return false, err
@@ -99,7 +112,7 @@ func (a *Adapter) syncChanged(ctx context.Context, eco, zipPath, lastModified st
 	if err != nil {
 		return false, err
 	}
-	return true, fsio.WriteAtomic(filepath.Join(dir, "mark.json"), b, 0o644) // last: a sync cut short fetches again
+	return true, fsio.WriteAtomicIn(overlay, "mark.json", b, 0o644) // last: a sync cut short fetches again
 }
 
 // changedSince reads modified_id.csv down to since and returns the ids changed after it (each once)
@@ -151,7 +164,7 @@ func (a *Adapter) changedSince(ctx context.Context, eco string, since time.Time)
 }
 
 // fetchRecord puts one changed record's JSON in the overlay.
-func (a *Adapter) fetchRecord(ctx context.Context, eco, id, dir string) error {
+func (a *Adapter) fetchRecord(ctx context.Context, eco, id string, overlay *os.Root) error {
 	resp, err := a.get(ctx, a.baseURL+"/"+url.PathEscape(eco)+"/"+url.PathEscape(id)+".json")
 	if err != nil {
 		return err
@@ -161,7 +174,7 @@ func (a *Adapter) fetchRecord(ctx context.Context, eco, id, dir string) error {
 	if err != nil {
 		return err
 	}
-	return fsio.WriteAtomic(filepath.Join(dir, fileName(id)+".json"), b, 0o644)
+	return fsio.WriteAtomicIn(overlay, fileName(id)+".json", b, 0o644)
 }
 
 // get asks the source through the client's choke point; a non-2xx answer is an error, errMissing for a 404.

@@ -70,7 +70,7 @@ func (s State) String() string {
 // Status is one lifecycle lookup's result. Cycle and EOLDate are filled only when
 // a cycle matched; EOLDate is the raw feed value ("2020-11-30", or "false").
 type Status struct {
-	Product   string    // endoflife.date product id the tech maps to, "" if unmapped
+	Product   string    // endoflife.date product id the tech maps to, "" if unmapped or the source does not list it
 	Version   string    // the (spoofable) detected version that was looked up
 	Cycle     string    // the matched release cycle, e.g. "7.2"; "" if none matched
 	EOLDate   string    // the cycle's eol field as seen in the feed; "" if none matched
@@ -79,6 +79,9 @@ type Status struct {
 	Cached    bool      // the answer came from the locally synced bundle (a snapshot as of FetchedAt), not a fetch now
 	Stale     bool      // ...because the source failed: the last synced bundle, kept past its freshness
 	Err       string    // why the source failed, when Stale
+	unasked   bool      // no product name or CPE the source can be asked with: Product "" says nothing about the source
+	answered  bool      // the bundle answered (a verdict or "not listed"): the result carries the bundle's freshness
+	shared    bool      // the bundle lists the CPE asked with under more than one product: none is guessed
 }
 
 // Cycle is one release line from an endoflife.date product feed. EOL is a raw
@@ -127,15 +130,19 @@ func NewBundle(bundleURL string, client *fetch.Client) *Adapter {
 // EOLStatus maps tech→product, fetches that product's cycles from the feed, and
 // classifies version against them as of now.
 //
-// It returns StateUnknown (and a nil error) for an unmapped tech or an unmatched
-// cycle — legitimate "we don't track this" answers. It returns an error (with
-// StateUnknown) when the feed is off or the fetch/decode fails — operational
+// It returns StateUnknown (and a nil error) for a tech it has no product name for (not
+// asked), a product the bundle does not list, or an unmatched cycle. It returns an error
+// (with StateUnknown) when the feed is off or the fetch/decode fails — operational
 // problems the operator must see. It never reports StateSupported on absence.
 func (a *Adapter) EOLStatus(ctx context.Context, tech, version string) (Status, error) {
 	st := Status{Version: version, IsEOL: StateUnknown}
 	product, ok := ProductFor(tech)
 	if !ok {
-		return st, nil // unknown product → unknown, honestly
+		if a.bundleURL == "" && a.baseURL == "" {
+			return st, ErrFeedOff // off is off, whatever the tech
+		}
+		st.unasked = true // no product name to ask with: the source was not asked
+		return st, nil
 	}
 	st.Product = product
 	if a.bundleURL != "" {
@@ -170,19 +177,27 @@ func ParseCycles(raw []byte) ([]Cycle, error) {
 
 // EOLStatusByCPE resolves the product from a CPE instead of the tech name: with the bundle,
 // every product whose identifiers list that CPE's vendor:product is covered — far beyond
-// the hand-kept name map. A CPE two products share stays unknown (no guess), and the
-// per-product feed has no identifiers, so it always answers unknown.
+// the hand-kept name map. A CPE the bundle lists under two products names no one product (no
+// guess, no_identity); the per-product feed takes names, not CPEs, so it is never asked by CPE
+// (not asked, no_identity). A string naming no vendor and product is looked up like any CPE: the
+// bundle, read once for the run, lists no such key, so it is not_in_source.
 func (a *Adapter) EOLStatusByCPE(ctx context.Context, cpe, version string) (Status, error) {
 	st := Status{Version: version, IsEOL: StateUnknown}
 	if a.bundleURL == "" {
+		if a.baseURL == "" {
+			return st, ErrFeedOff
+		}
+		st.unasked = true // the per-product feed is asked by product name, never by CPE
 		return st, nil
 	}
 	a.once.Do(func() { a.loadBundle(ctx) })
 	if a.bundleErr != nil {
 		return st, a.bundleErr
 	}
-	product := a.byCPE[cpeVendorProduct(cpe)]
+	product, listed := a.byCPE[cpeVendorProduct(cpe)]
 	if product == "" {
+		st = a.answeredAt(st) // the bundle answered: it does not list this CPE, or lists it under two products
+		st.shared = listed
 		return st, nil
 	}
 	return a.fromBundle(ctx, st, product, version)
@@ -199,12 +214,19 @@ func (a *Adapter) fromBundle(ctx context.Context, st Status, product, version st
 	cycles, ok := a.bundle[product]
 	if !ok {
 		st.Product = "" // the feed does not track it: unknown product, never "supported"
-		return st, nil
+		return a.answeredAt(st), nil
 	}
 	st.Product = product
 	st.Cycle, st.EOLDate, st.IsEOL = Classify(cycles, version, time.Now())
+	return a.answeredAt(st), nil
+}
+
+// answeredAt stamps st with the bundle's freshness: a miss is an answer from that bundle, as fresh or stale as a
+// verdict. answered says so outright — a stored copy written without a fetch time has a zero FetchedAt.
+func (a *Adapter) answeredAt(st Status) Status {
 	st.FetchedAt, st.Cached, st.Stale, st.Err = a.bundleAt, a.bundleHit, a.bundleOld, a.bundleWhy
-	return st, nil
+	st.answered = true
+	return st
 }
 
 func (a *Adapter) loadBundle(ctx context.Context) {

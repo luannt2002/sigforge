@@ -8,6 +8,8 @@
 package diff
 
 import (
+	"bytes"
+	"encoding/json"
 	"reflect"
 	"sort"
 
@@ -39,7 +41,7 @@ func Diff(old, new *schema.DB) Result {
 		switch {
 		case !ok:
 			r.Added = append(r.Added, name)
-		case !reflect.DeepEqual(oldFP, newFP):
+		case !reflect.DeepEqual(compactDom(oldFP), compactDom(newFP)):
 			r.Changed = append(r.Changed, name)
 		}
 	}
@@ -52,6 +54,15 @@ func Diff(old, new *schema.DB) Result {
 	sort.Strings(r.Removed)
 	sort.Strings(r.Changed)
 	return r
+}
+
+// compactDom is fp with its dom JSON compacted: a DB re-indented on its way to disk is not a changed DB.
+func compactDom(fp schema.Fingerprint) schema.Fingerprint {
+	var b bytes.Buffer
+	if json.Compact(&b, fp.Dom) == nil {
+		fp.Dom = b.Bytes()
+	}
+	return fp
 }
 
 func fingerprints(db *schema.DB) map[string]schema.Fingerprint {

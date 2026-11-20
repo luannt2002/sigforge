@@ -16,7 +16,7 @@ import (
 //
 //	feed off (ErrFeedOff)        → StateNotChecked        (we did NOT query)
 //	fetch/decode error           → StateSourceUnavailable (queried, source broke)
-//	StateUnknown (empty CPE)     → StateUnknownProduct    (no CPE to bridge)
+//	StateUnknown (empty CPE)     → StateNotChecked        (no CPE: nothing to ask the feed with)
 //	StateNoKnownCVE              → StateNotChecked        (a paged per-query API: a miss is never a clearance)
 //	StateHasCVE                  → StateAffectedByAdvisory + one Lead per CVE
 //	StateHasCVE, no version      → StatePotentiallyAffected (advisories exist, none pinned)
@@ -32,25 +32,31 @@ func ToUnified(res Result, err error) unified.Result {
 	}
 	switch {
 	case errors.Is(err, ErrFeedOff):
-		u.State = unified.StateNotChecked
+		u.State, u.Reason = unified.StateNotChecked, unified.ReasonSourceOff
 	case err != nil:
-		u.State = unified.StateSourceUnavailable
+		u.State, u.Reason = unified.StateSourceUnavailable, unified.ReasonSourceError
 		u.Err = err.Error()
 	case res.State == StateUnknown:
-		u.State = unified.StateUnknownProduct
+		u.State, u.Reason = unified.StateNotChecked, unified.ReasonNoIdentity
+		u.Err = "no CPE to look up: the CVE source was not asked"
 	case res.State == StateNoKnownCVE:
 		// A per-query, paged API cannot prove its "no CVE" complete: never a clearance.
 		u.State, _ = unified.Clean(unified.Evidence{FullData: false, Positioned: true})
 		u.Err = "the CVE source listed no CVE for this CPE and version; that answer is not provably complete, so it is not a clearance"
+		u.Reason = unified.ReasonNotProvablyComplete
+		if res.Total > len(res.CVEs) {
+			u.Reason = unified.ReasonPartialAnswer
+		}
 		u.Freshness = unified.FreshnessLive
 	case res.State == StateHasCVE:
 		// A query with no version lists every advisory for the product.
 		u.State = unified.AdvisoryState(res.Version != "")
-		if res.Version == "" {
-			u.Err = unified.NoteNoVersion
-		}
 		if res.Total > len(res.CVEs) {
-			u.Err = joinNote(u.Err, fmt.Sprintf("partial: %d of %d CVEs returned (one page of a paged feed)", len(res.CVEs), res.Total))
+			u.Err = fmt.Sprintf("partial: %d of %d CVEs returned (one page of a paged feed)", len(res.CVEs), res.Total)
+			u.Reason = unified.ReasonPartialAnswer
+		}
+		if res.Version == "" {
+			u.Err, u.Reason = joinNote(unified.NoteNoVersion, u.Err), unified.ReasonNoVersion
 		}
 		u.Freshness = unified.FreshnessLive
 		u.Leads = leadsFromCVEs(res.CVEs)

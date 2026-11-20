@@ -15,10 +15,12 @@ package enrich
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/luannt2002/sigforge/modules/intel/cve"
 	"github.com/luannt2002/sigforge/modules/intel/identity"
+	"github.com/luannt2002/sigforge/modules/intel/kev"
 	"github.com/luannt2002/sigforge/modules/intel/lifecycle"
 	"github.com/luannt2002/sigforge/modules/intel/matcher"
 	"github.com/luannt2002/sigforge/modules/intel/osv"
@@ -224,7 +226,10 @@ func enrichDetections(ctx context.Context, dets []matcher.Detection, db *schema.
 		}
 		out = append(out, platformResults(ctx, d, opt)...)
 		for i := from; i < len(out); i++ {
-			out[i].Tech = d.Tech
+			out[i].Tech, out[i].DetectionConfidence = d.Tech, d.Confidence
+			if out[i].Version != "" {
+				out[i].VersionFrom = d.VersionFrom
+			}
 			out[i] = applyExcludedBy(out[i], d)
 		}
 		out = out[:from+len(dropRepeated(out[from:]))]
@@ -258,6 +263,7 @@ func isJSLib(db *schema.DB, tech string) bool {
 // only pass detections get exactly EnrichUnified's output.
 func EnrichUnifiedExt(ctx context.Context, dets []matcher.Detection, db *schema.DB, inp EnrichInput, opt Options) []unified.Result {
 	out := enrichDetections(ctx, dets, db, opt)
+	fromPage := len(out)
 	seenJS := map[string]bool{} // a library the page already revealed is not looked up again
 	for _, d := range dets {
 		if opt.JS != nil && isJSLib(db, d.Tech) {
@@ -275,6 +281,11 @@ func EnrichUnifiedExt(ctx context.Context, dets []matcher.Detection, db *schema.
 			continue
 		}
 		out = append(out, dispatchJS(ctx, l, opt))
+	}
+	for i := fromPage; i < len(out); i++ {
+		if out[i].Version != "" {
+			out[i].VersionFrom = "inventory"
+		}
 	}
 	return prioritize(ctx, out, opt)
 }
@@ -295,7 +306,9 @@ func dispatchWP(ctx context.Context, w WPRef, opt Options) unified.Result {
 		return offResult(wpcve.ScopeFor(w.Kind), w.Slug, w.Version, "wpcve", "wp feed off")
 	}
 	// the result feedset's wired lookup gives this kind with the feed on: never looked up, never a plugin
-	return offResult("wordpress:"+w.Kind, w.Slug, w.Version, "wpcve", fmt.Sprintf("WordPress kind %q is not plugin, theme or core: not looked up", w.Kind))
+	r := offResult("wordpress:"+w.Kind, w.Slug, w.Version, "wpcve", fmt.Sprintf("WordPress kind %q is not plugin, theme or core: not looked up", w.Kind))
+	r.Reason = unified.ReasonUnsupported
+	return r
 }
 
 func dispatchJS(ctx context.Context, l LibRef, opt Options) unified.Result {
@@ -309,7 +322,7 @@ func dispatchJS(ctx context.Context, l LibRef, opt Options) unified.Result {
 // never clean.
 func offResult(scope, id, version, source, note string) unified.Result {
 	r := unified.Unknown(scope, id, unified.StateNotChecked, note)
-	r.Source, r.Version = source, version
+	r.Source, r.Version, r.Reason = source, version, unified.ReasonSourceOff
 	return r
 }
 
@@ -334,7 +347,7 @@ func resolveCPEs(ctx context.Context, d matcher.Detection, db *schema.DB, opt Op
 // unified results, upgrading each lead with KEV/EPSS prioritization and reflecting a
 // version conflict. How the CPE was resolved rides on CPEState/CPEEvidence (not Err, so
 // it is never mistaken for a lookup failure). Provider off → one StateNotChecked result;
-// no CPE to query → one StateUnknownProduct result (honestly "no verified identity").
+// no CPE to query → one StateNotChecked result (no_identity: the source was not asked).
 func cveResults(ctx context.Context, d matcher.Detection, cpes []string, cpeState, cpeEvidence string, opt Options) []unified.Result {
 	withCPE := func(r unified.Result) unified.Result {
 		r.CPEState, r.CPEEvidence = cpeState, cpeEvidence
@@ -342,12 +355,12 @@ func cveResults(ctx context.Context, d matcher.Detection, cpes []string, cpeStat
 	}
 	if opt.CVE == nil {
 		r := unified.Unknown("cpe", first(cpes), unified.StateNotChecked, "cve feed off")
-		r.Source, r.Version = "cve", d.Version
+		r.Source, r.Version, r.Reason = "cve", d.Version, unified.ReasonSourceOff
 		return []unified.Result{withCPE(applyVersionConflict(r, d))}
 	}
 	if len(cpes) == 0 {
-		r := unified.Unknown("cpe", "", unified.StateUnknownProduct, "no verified/attested cpe to query")
-		r.Source, r.Version = "cve", d.Version
+		r := unified.Unknown("cpe", "", unified.StateNotChecked, "no verified/attested cpe to query: the CVE source was not asked")
+		r.Source, r.Version, r.Reason = "cve", d.Version, unified.ReasonNoIdentity
 		return []unified.Result{withCPE(applyVersionConflict(r, d))}
 	}
 	out := make([]unified.Result, 0, len(cpes))
@@ -370,19 +383,36 @@ type EOLByCPE interface {
 func eolResult(ctx context.Context, d matcher.Detection, cpes []string, opt Options) unified.Result {
 	if opt.EOL == nil {
 		r := unified.Unknown("eol", d.Tech, unified.StateNotChecked, "eol feed off")
-		r.Source, r.Version = "lifecycle", d.Version
+		r.Source, r.Version, r.Reason = "lifecycle", d.Version, unified.ReasonSourceOff
 		return applyVersionConflict(r, d)
 	}
 	st, err := opt.EOL.EOLStatus(ctx, d.Tech, d.Version)
 	if byCPE, ok := opt.EOL.(EOLByCPE); ok && err == nil && st.Product == "" {
+		rank := -1
 		for _, c := range cpes {
-			if s, e := byCPE.EOLStatusByCPE(ctx, c, d.Version); e != nil || s.Product != "" {
-				st, err = s, e
+			next, nerr := byCPE.EOLStatusByCPE(ctx, c, d.Version) // asked by CPE: its answer replaces "no name to ask with"
+			if nerr != nil {
+				st, err = next, nerr
 				break
+			}
+			if r := cpeAnswerRank(next); r > rank { // the best answer, whatever order the DB lists the CPEs in
+				st, rank = next, r
 			}
 		}
 	}
 	return applyVersionConflict(lifecycle.ToUnified(st, err), d)
+}
+
+// cpeAnswerRank orders the end-of-life answers to a tech's CPEs: one naming a product, then one the source lists
+// under more than one product (none guessed: no_identity, as lifecycle.ToUnified decides), then "not listed".
+func cpeAnswerRank(st lifecycle.Status) int {
+	switch {
+	case st.Product != "":
+		return 2
+	case lifecycle.ToUnified(st, nil).Reason == unified.ReasonNoIdentity:
+		return 1
+	}
+	return 0
 }
 
 // prioritize upgrades every lead of the run that names a CVE — the CVE source's own leads
@@ -410,7 +440,16 @@ func prioritize(ctx context.Context, rs []unified.Result, opt Options) []unified
 		return rs
 	}
 	sig := opt.KEV.EnrichUnified(ctx, ids)
+	checked := "" // a provider that cannot say which data it read leaves kev empty: known_exploited false then means nothing
+	if st, ok := opt.KEV.(interface {
+		Status(context.Context) kev.CatalogStatus
+	}); ok {
+		checked = map[string]string{"live": "catalog", "snapshot": "sample"}[st.Status(ctx).Source]
+	}
 	for ri := range rs {
+		if checked != "" && slices.ContainsFunc(rs[ri].Leads, func(l unified.Lead) bool { return len(leadCVEs(l)) > 0 }) {
+			rs[ri].KEV = checked
+		}
 		for i := range rs[ri].Leads {
 			l := &rs[ri].Leads[i]
 			for _, id := range leadCVEs(*l) {
@@ -462,9 +501,9 @@ func applyVersionConflict(u unified.Result, d matcher.Detection) unified.Result 
 	}
 	switch u.State {
 	case unified.StateAffectedByAdvisory:
-		u.State = unified.StatePotentiallyAffected
+		u.State, u.Reason = unified.StatePotentiallyAffected, unified.ReasonVersionConflict
 	case unified.StateNotAffectedByAdvisory:
-		u.State = unified.StateUnknownVersion // only one claimed version was asked; the others never were
+		u.State, u.Reason = unified.StateUnknownVersion, unified.ReasonVersionConflict // only one claimed version was asked; the others never were
 	}
 	u.Err = joinNote(u.Err, "version conflict: "+versionClaims(d))
 	return u

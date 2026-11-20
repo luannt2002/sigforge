@@ -28,6 +28,7 @@
 package osv
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -35,7 +36,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -276,6 +277,8 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 		// ecosystem mismatch or a coverage gap, so this is not asserted as "no vulnerability".
 		return Result{Status: StatusUnknown}
 	}
+	// by id, on a copy: which of two aliased records is kept, and in what order, never depends on the dump's order
+	recs = slices.SortedStableFunc(slices.Values(recs), func(a, b record) int { return strings.Compare(a.id, b.id) })
 	ver := CleanVersion(version)
 	pinned := ver != ""
 	below := release && pinned && belowNamedVersions(recs, ver)
@@ -339,6 +342,7 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 	for _, r := range unplacedRecs {
 		add(&unplaced, r, seen) // after every match: an advisory one record places and another cannot is reported once, placed
 	}
+	slices.SortFunc(unplaced, byRank)
 	if len(out) == 0 {
 		if indeterminate {
 			// The version could not be positioned under this ecosystem's rules (versioncmp ok=false):
@@ -351,8 +355,16 @@ func (idx *Index) lookupIn(ecosystem, name, version string, release bool) Result
 		// "no known vulnerability for this version", distinct from the unknown cases above.
 		return Result{Status: StatusNoKnownVuln, PackageKnown: true, VersionPinned: pinned, BelowListed: below}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return severityRank(out[i].Severity) > severityRank(out[j].Severity) })
+	slices.SortFunc(out, byRank)
 	return Result{Status: StatusVulnerable, Vulns: out, PackageKnown: true, VersionPinned: pinned, BelowListed: below, Unplaced: unplaced}
+}
+
+// byRank orders leads by severity, most severe first, then by id: the dump's own order never decides.
+func byRank(a, b Vuln) int {
+	if c := cmp.Compare(severityRank(b.Severity), severityRank(a.Severity)); c != 0 {
+		return c
+	}
+	return strings.Compare(a.ID, b.ID)
 }
 
 // listsRegistryReleases are the ecosystems whose advisories list the registry's releases in a range.

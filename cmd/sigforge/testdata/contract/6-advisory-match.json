@@ -1,0 +1,39 @@
+{
+  "case": "6-advisory-match",
+  "args": [
+    "--json",
+    "--package",
+    "npm:lodash@4.17.20"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_OSV_URL"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "affected_by_advisory",
+      "scope": "ecosystem:npm",
+      "identity": "lodash",
+      "version": "4.17.20",
+      "leads": [
+        {
+          "id": "GHSA-test-0001",
+          "cve": [
+            "CVE-2099-1111"
+          ],
+          "title": "npm: lodash is vulnerable, fixed in 4.17.21 (OSV)",
+          "severity": "high",
+          "references": [
+            "https://osv.dev/vulnerability/GHSA-test-0001"
+          ]
+        }
+      ],
+      "source": "osv",
+      "freshness": "live",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "full_data": true,
+      "kev": "sample",
+      "version_from": "inventory"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "case": "1-nothing-to-look-up",
+  "args": [
+    "--json"
+  ],
+  "exit": 1,
+  "error": "enrich: nothing to look up: no page on stdin and no --package, --sbom, --wp-plugin, --wp-theme or --jslib"
+}
