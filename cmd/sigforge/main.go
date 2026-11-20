@@ -415,8 +415,8 @@ func archiveOne(root *os.Root, src, dst string) error {
 		return errors.New("not a plain file") // a FIFO would hold the run on open; a directory has no content to keep
 	}
 	archiveLooked(root, src)
-	// fsio-exempt (*os.Root).Open: the plain file looked at above, checked to be that file once open
-	f, err := root.Open(src)
+	// fsio-exempt fsio.OpenPlainIn: the plain file looked at above, never waited on, checked to be that file once open
+	f, err := fsio.OpenPlainIn(root, src)
 	if err != nil {
 		return err
 	}
@@ -698,7 +698,12 @@ func loadCurrentOrNil(path string) (*schema.DB, error) {
 		}
 		return nil, err
 	}
-	return schema.LoadFile(path)
+	// fsio-exempt fsio.ReadPlain: the live DB at --out, as the operator names it (a link into a release), never waited on
+	b, err := fsio.ReadPlain(path)
+	if err != nil {
+		return nil, err
+	}
+	return schema.Parse(b)
 }
 
 // cmdDiff loads two DBs and prints what a re-sync added/removed/changed between

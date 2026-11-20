@@ -50,7 +50,8 @@ func ReadPlain(path string) ([]byte, error) {
 
 // OpenOwn opens a plain file sigforge wrote itself — in the store, the publish directory, a state file — never
 // through a link: in a directory another user can write, they may have put one in its place, and what is read is
-// often written back (docs/snapshot-governance.md §6). A link, a FIFO or a directory there is refused, never waited on.
+// often written back (docs/snapshot-governance.md §6). A link, a FIFO, a directory or a file with another name (a hard
+// link) there is refused, never waited on.
 func OpenOwn(path string) (*os.File, error) {
 	before, err := os.Lstat(path)
 	if err != nil {
@@ -62,6 +63,10 @@ func OpenOwn(path string) (*os.File, error) {
 	ownLooked(path)
 	f, err := os.OpenFile(path, os.O_RDONLY|noFollow|nonBlock, 0)
 	if err != nil {
+		return nil, err
+	}
+	if err := plainOpened(f, path); err != nil {
+		f.Close()
 		return nil, err
 	}
 	if now, err := f.Stat(); err != nil || !os.SameFile(before, now) {
@@ -82,7 +87,7 @@ func OpenOwnIn(root *os.Root, name string) (*os.File, error) {
 		return nil, err
 	}
 	ownLooked(shown)
-	f, err := root.OpenFile(name, os.O_RDONLY|nonBlock, 0)
+	f, err := OpenPlainIn(root, name)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +96,37 @@ func OpenOwnIn(root *os.Root, name string) (*os.File, error) {
 		return nil, fmt.Errorf("fsio: %q was replaced while it was opened", shown)
 	}
 	return f, nil
+}
+
+// OpenPlainIn opens name in root's directory to read it, never waiting on what is there, and only a plain file with one
+// name. It does not check that this is the file a caller looked at: the caller compares it (os.SameFile) with its look.
+func OpenPlainIn(root *os.Root, name string) (*os.File, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|nonBlock, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := plainOpened(f, filepath.Join(root.Name(), name)); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// plainOpened refuses an open file that is not a plain file with one name. A number check (os.SameFile) passes what
+// another user made at the name under a removed file's inode number, given out again — a FIFO, say — never this one;
+// and a hard link to a file they cannot read is that file, every check on the name passing.
+func plainOpened(f *os.File, shown string) error {
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("fsio: %q is not a plain file", shown)
+	}
+	if n, ok := linkCount(st); ok && n > 1 {
+		return fmt.Errorf("fsio: %q has another name (a hard link): a file sigforge wrote has one", shown)
+	}
+	return nil
 }
 
 // ReadOwn returns the bytes of a plain file sigforge wrote itself, never read through a link (see OpenOwn).
@@ -144,7 +180,8 @@ var beforeRename = func(dir, tmpName string) {}
 // Every step acts on what this call opened — the directory (an os.Root), the temporary file it created (O_EXCL) — and
 // never on a name looked up again: the mode is set on the open file, the rename is refused if the temporary file was
 // replaced meanwhile, and the write fails if what landed at path is not the file it wrote (a swap in the instant
-// between that check and the rename). In a directory another user can write, that user can still replace path
+// between that check and the rename) — save a plain file another user made there under the inode number of the one it
+// replaced, no more than their replacing path afterwards. In a directory another user can write, that user can still replace path
 // afterwards — as they could anyway — but never makes this write change, read or create any other file.
 func WriteAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
@@ -226,18 +263,21 @@ func (t *Temp) Commit(name string, perm os.FileMode) error {
 		return fmt.Errorf("fsio: chmod %q: %w", shown, err)
 	}
 	mine, serr := t.File.Stat()
+	if serr == nil { // checked while the file is open: its inode number goes to nothing else until it closes
+		if now, err := t.root.Lstat(t.name); err != nil || !os.SameFile(mine, now) {
+			t.File.Close()
+			return fmt.Errorf("fsio: %q was replaced while it was written: refused", shown)
+		}
+	}
 	if err := errors.Join(serr, t.File.Close()); err != nil {
 		return fmt.Errorf("fsio: close %q: %w", shown, err)
-	}
-	if now, err := t.root.Lstat(t.name); err != nil || !os.SameFile(mine, now) {
-		return fmt.Errorf("fsio: %q was replaced while it was written: refused", shown)
 	}
 	beforeRename(t.root.Name(), t.name)
 	if err := t.root.Rename(t.name, name); err != nil {
 		return fmt.Errorf("fsio: rename to %q: %w", filepath.Join(t.root.Name(), name), err)
 	}
 	renamed = true
-	if now, err := t.root.Lstat(name); err != nil || !os.SameFile(mine, now) {
+	if now, err := t.root.Lstat(name); err != nil || !now.Mode().IsRegular() || !os.SameFile(mine, now) {
 		t.root.Remove(name) // what landed is not this write's: never left at the name, as RenameIn
 		return fmt.Errorf("fsio: %q was replaced as it was renamed into place: what landed is not this write's, removed",
 			filepath.Join(t.root.Name(), name))
@@ -260,7 +300,7 @@ func RenameIn(root *os.Root, from, to string) error {
 	if err := root.Rename(from, to); err != nil {
 		return err
 	}
-	if now, err := root.Lstat(to); err != nil || !os.SameFile(st, now) {
+	if now, err := root.Lstat(to); err != nil || !now.Mode().IsRegular() || !os.SameFile(st, now) {
 		root.Remove(to)
 		return fmt.Errorf("fsio: %q was replaced as it was moved: removed", filepath.Join(root.Name(), to))
 	}
