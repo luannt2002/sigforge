@@ -90,6 +90,7 @@ func TestTransformsNeverMakeAResultSurer(t *testing.T) {
 		return unified.Result{}
 	}
 	plain := matcher.Detection{Tech: "Acme", Version: "1.0"}
+	distroBuilt := matcher.Detection{Tech: "Acme", Version: "1.0", Distro: "Debian"}
 	conflicted := matcher.Detection{Tech: "Acme", Version: "1.0", VersionConflict: true,
 		VersionClaims: []matcher.VersionClaim{{Version: "1.0", Field: "header"}, {Version: "2.0", Field: "html"}}}
 
@@ -103,6 +104,7 @@ func TestTransformsNeverMakeAResultSurer(t *testing.T) {
 		{"one version claim → claims that disagree", cpeOf(attested, plain), cpeOf(attested, conflicted), true},
 		{"stored copy fresh → stale", live, stale, false},
 		{"attested identity → borrowed candidate only", cpeOf(attested, plain), cpeOf(borrowed, plain), true},
+		{"upstream build → a distro's package build", cpeOf(attested, plain), cpeOf(attested, distroBuilt), true},
 	} {
 		if b, a := sureness(tc.before.State), sureness(tc.after.State); a > b || (tc.less && a == b) {
 			t.Errorf("%s: %s → %s — want less claimed after the input got worse", tc.name, tc.before.State, tc.after.State)

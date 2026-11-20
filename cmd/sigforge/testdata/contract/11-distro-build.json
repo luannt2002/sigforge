@@ -1,0 +1,50 @@
+{
+  "case": "11-distro-build",
+  "args": [
+    "--json"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_CVE_URL"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "potentially_affected",
+      "scope": "cpe",
+      "identity": "cpe:2.3:a:apache:http_server:2.4.6:*:*:*:*:*:*:*",
+      "version": "2.4.6",
+      "leads": [
+        {
+          "id": "CVE-2099-2222",
+          "cve": [
+            "CVE-2099-2222"
+          ]
+        }
+      ],
+      "source": "cve",
+      "freshness": "live",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "cpe_state": "attested",
+      "cpe_evidence": "source",
+      "tech": "Apache",
+      "error": "version from a package build of CentOS: CentOS may have backported the fix or still support the release, so check its own advisories for the package",
+      "reason": "distro_build",
+      "kev": "sample",
+      "version_from": "header",
+      "detection_confidence": 100,
+      "distro": "CentOS"
+    },
+    {
+      "state": "not_checked",
+      "scope": "eol",
+      "identity": "apache-http-server",
+      "version": "2.4.6",
+      "source": "lifecycle",
+      "tech": "Apache",
+      "reason": "source_off",
+      "version_from": "header",
+      "detection_confidence": 100,
+      "distro": "CentOS"
+    }
+  ]
+}

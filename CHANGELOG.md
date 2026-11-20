@@ -6,11 +6,11 @@ Every result now says in a code why it is not a conclusion, what KEV was checked
 from, so a consumer never has to read a sentence — or an empty list — to tell "not checked" from "nothing found".
 
 ### New
-- `Result.Reason` (`reason`): one of 13 codes (`source_off`, `unsupported`, `no_identity`, `source_error`,
+- `Result.Reason` (`reason`): one of 14 codes (`source_off`, `unsupported`, `no_identity`, `source_error`,
   `sample_only`, `partial_answer`, `not_provably_complete`, `no_clearance`, `not_in_source`, `no_version`,
-  `version_unreadable`, `version_unplaced`, `version_conflict`) on every result that is not a conclusion, every
-  `potentially_affected`, and an `affected_by_advisory` drawn from one page of a paged answer. `unified.Reasons` lists
-  them; `docs/unified-contract.md` says when each is set and what a consumer can do.
+  `version_unreadable`, `version_unplaced`, `version_conflict`, `distro_build`) on every result that is not a
+  conclusion, every `potentially_affected`, and an `affected_by_advisory` drawn from one page of a paged answer.
+  `unified.Reasons` lists them; `docs/unified-contract.md` says when each is set and what a consumer can do.
 - `Result.KEV` (`kev`): `catalog` or `sample` — what the leads' `known_exploited` flag was checked against; absent when
   KEV was not consulted.
 - `Result.VersionFrom` (`version_from`) and `matcher.Detection.VersionFrom` (`versionFrom`): the page field a version
@@ -18,10 +18,17 @@ from, so a consumer never has to read a sentence — or an empty list — to tel
   gave.
 - `Result.DetectionConfidence` (`detection_confidence`): the fingerprint's confidence for a page detection — how sure
   the detection is, not how likely an advisory is to apply.
-- `unified.NoteVersionUnreadable`; consumer fixtures of `enrich --json` in `cmd/sigforge/testdata/contract/` (ten cases,
-  with a README), each held to a lossless round trip through `unified.Result`.
+- `Result.Distro` (`distro`), `matcher.Detection.Distro` and `matcher.VersionClaim.Distro`: the distro whose package
+  build a page's version was read from, when the banner names it (`Apache/2.4.6 (CentOS)`, `nginx/1.18.0 (Ubuntu)`,
+  `PHP/7.4.3-4ubuntu2.19`, `PHP/7.3.31-1~deb10u1`); read from header, cookie and meta values. The reason code
+  `distro_build`.
+- `unified.NoteVersionUnreadable`; consumer fixtures of `enrich --json` in `cmd/sigforge/testdata/contract/` (eleven
+  cases, with a README), each held to a lossless round trip through `unified.Result`.
 
 ### Changed behaviour
+- A CVE or end-of-life hit on a version a banner shows as a distro's package build is `potentially_affected`
+  (`distro_build`), its leads kept and the distro named in `error`: the package may carry a fix backported into the
+  upstream number (it was `affected_by_advisory`). `match` prints the distro (`Apache 2.4.6  (…, CentOS package)`).
 - A detection with no CPE is `not_checked` (`no_identity`), not `unknown_product`: the CVE source was not asked, so it
   is no longer counted as looked up. `cve.ToUnified` with an empty CPE answers the same.
 - End-of-life: a tech the source has no product name for is `not_checked` (`no_identity`) with the feed on — the bundle

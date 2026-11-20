@@ -160,12 +160,13 @@ const (
 	ReasonVersionUnreadable   = "version_unreadable"    // a version was given that the source's version order cannot read
 	ReasonVersionUnplaced     = "version_unplaced"      // the version could not be placed for certain against the source's bounds
 	ReasonVersionConflict     = "version_conflict"      // the page's version claims disagree: the one asked may not be the running one
+	ReasonDistroBuild         = "distro_build"          // the version is a distro package's: a backport may have fixed what upstream had
 )
 
 // Reasons is every Result.Reason code, in the order docs/unified-contract.md lists them.
 var Reasons = []string{ReasonSourceOff, ReasonUnsupported, ReasonNoIdentity, ReasonSourceError, ReasonSampleOnly,
 	ReasonPartialAnswer, ReasonNotProvablyComplete, ReasonNoClearance, ReasonNotInSource, ReasonNoVersion,
-	ReasonVersionUnreadable, ReasonVersionUnplaced, ReasonVersionConflict}
+	ReasonVersionUnreadable, ReasonVersionUnplaced, ReasonVersionConflict, ReasonDistroBuild}
 
 // Freshness — where the data behind this result came from, so a stale snapshot is never
 // read as live truth.
@@ -293,6 +294,9 @@ type Result struct {
 	// DetectionConfidence is the fingerprint's confidence (0–100) that the page runs Tech — how sure the
 	// detection is, not how likely any advisory is to apply. Zero for identities not detected on a page.
 	DetectionConfidence int `json:"detection_confidence,omitempty"`
+	// Distro names the distro whose package build Version was read from ("Debian", "Ubuntu", "CentOS"…), when the
+	// banner said so: the package may carry fixes the upstream version does not, so the number alone settles nothing.
+	Distro string `json:"distro,omitempty"`
 }
 
 // Unknown builds a not-looked-up / unavailable result for a scope+identity, so a

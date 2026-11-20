@@ -194,6 +194,7 @@ does not know as "not concluded", never as clean. Every source's paths are held 
 | `version_unreadable` | a version was given that the source's version order cannot read; it is kept in `version`, never treated as missing | establish a version in the ecosystem's own form |
 | `version_unplaced` | the version could not be placed for certain against the source's bounds (an advisory bound it cannot compare, no release cycle matching it, a release older than every version a package's advisories name) | read each lead's `note`; confirm the release |
 | `version_conflict` | the page's version claims disagree, so the version asked may not be the running one (a hit becomes `potentially_affected`) | establish which claim is right |
+| `distro_build` | the version was read from a distro's package build (`distro` names it): the package may carry a fix backported into the upstream number, or the distro may still support a release upstream ended, so a CVE or end-of-life hit becomes `potentially_affected` (`distro_build` replaces any other reason of the hit, `partial_answer` included — the "partial" note stays in `error` — except `version_conflict`, which is kept, with the distro added to its note) | check the distro's own advisory for the package, or give the package as a purl with its release (an OSV distro package is compared with the distro's advisories) |
 
 The CVE source compares versions on its side (sigforge writes the version into the CPE it asks with), so it never
 reports `version_unreadable`. `kev`'s own results — CVE-centric, used inside `enrich` to rank leads — are the one
@@ -214,9 +215,14 @@ anything about the package, and listing it beside live ones would be a claim nob
   `Detection.VersionFrom`.
 - **`detection_confidence`** — the fingerprint's confidence (0–100) that the page runs the tech. It says how sure the
   *detection* is, not how likely an advisory is to apply or be exploitable; absent for identities not detected on a page.
+- **`distro`** — the distro whose package build `version` was read from, when the banner says so: the OS token a
+  packager compiles into it (`Apache/2.4.38 (Debian)`, `nginx/1.18.0 (Ubuntu)`) or the package revision appended to
+  the upstream version (`PHP/7.4.3-4ubuntu2.19`, `PHP/7.3.31-1~deb10u1`). Read from header, cookie and meta values only
+  — a banner in a page's HTML (an error page footer) is not read. The matcher records it as `Detection.Distro`.
 - **CVE answers compare the upstream release.** A `cpe` or `eol` result compares the version a page names with the
-  upstream project's releases. A distro build can carry a fix without changing that version (a backport), so such a
-  hit stays a lead to confirm against the package's own patch level; only an OSV distro package
+  upstream project's releases. A distro build can carry a fix without changing that version (a backport): when the
+  banner names the distro, a hit is `potentially_affected` (`distro_build`) with its leads kept; when it does not, the
+  hit stays a lead to confirm against the package's own patch level. Only an OSV distro package
   (`ecosystem:Debian:12`, given as a purl with its release) is compared with the distro's own advisories.
 
 ## 3. Freshness — a snapshot is never live truth

@@ -57,6 +57,11 @@ type Detection struct {
 	// VersionFrom is the page field Version was captured from ("header", "cookie", "meta", "html", "scriptSrc",
 	// "dom"), or "pattern" when a version pattern run over the page found it: either way the site's own claim.
 	VersionFrom string `json:"versionFrom,omitempty"`
+	// Distro names the distro whose package build the version was read from, when the same field value says so — the
+	// OS token a packager compiles into a banner ("Apache/2.4.38 (Debian)") or the package revision it appends to the
+	// upstream version ("PHP/7.4.3-4ubuntu2.19"). The version stays the upstream number the banner shows; the package
+	// may carry fixes that number does not (a backport). Read from header, cookie and meta values only.
+	Distro string `json:"distro,omitempty"`
 	// ExcludedBy names the resolved techs that exclude this one; a tech present only through
 	// labeled techs — implied by them, or admitted by a requires/requiresCategory gate they
 	// meet — carries their labels too. The lead is kept and labeled, not dropped, so the
@@ -70,6 +75,7 @@ type VersionClaim struct {
 	Version string `json:"version"`
 	Field   string `json:"field"`
 	Pattern string `json:"pattern,omitempty"`
+	Distro  string `json:"distro,omitempty"` // the distro whose package build the field value names, see Detection.Distro
 }
 
 // MatchEvidence records why one detection fired: which field carried the signal,
@@ -88,6 +94,7 @@ type hit struct {
 	conf     int
 	version  string // resolved version, filled once matching for this tech is done
 	from     string // the field version came from
+	distro   string // the distro whose package build a claim of version names
 	conflict bool
 	claims   []VersionClaim // every version a pattern captured, pre-resolution
 	fp       schema.Fingerprint
@@ -128,6 +135,7 @@ func Match(db *schema.DB, page Page) []Detection {
 		if h.conf > 0 {
 			h.version, h.conflict = resolveVersion(h.claims)
 			h.from = claimField(h.claims, h.version)
+			h.distro = claimDistro(h.claims, h.version)
 			refineVersion(fp, html, headers, h) // fills only when no claim captured a version
 			sortEvidence(h.evidence)            // map iteration order must not leak into output
 			hits[name] = h
@@ -147,6 +155,7 @@ func Match(db *schema.DB, page Page) []Detection {
 			Tech:        name,
 			Version:     h.version,
 			VersionFrom: h.from,
+			Distro:      h.distro,
 			Confidence:  conf,
 			Categories:  h.fp.Cats,
 			Provenance:  h.fp.Provenance,
@@ -190,7 +199,11 @@ func matchNamed(pats map[string]schema.StringList, src map[string][]string, fiel
 			}
 			for _, v := range vals {
 				if m := re.FindStringSubmatch(v); m != nil {
+					n := len(h.claims)
 					record(h, confOf(conf, fp), ver, field, expr, m[0], m)
+					if len(h.claims) > n { // a version was captured: the value it came from may name a distro build
+						h.claims[n].Distro = distroOf(v)
+					}
 					break
 				}
 			}
@@ -383,6 +396,7 @@ func distinctClaims(claims []VersionClaim) []VersionClaim {
 	for _, c := range claims {
 		if !seen[c.Version] {
 			seen[c.Version] = true
+			c.Distro = claimDistro(claims, c.Version) // every claim of the version decides, not the one read first
 			out = append(out, c)
 		}
 	}

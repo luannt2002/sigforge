@@ -229,6 +229,7 @@ func enrichDetections(ctx context.Context, dets []matcher.Detection, db *schema.
 			out[i].Tech, out[i].DetectionConfidence = d.Tech, d.Confidence
 			if out[i].Version != "" {
 				out[i].VersionFrom = d.VersionFrom
+				out[i] = applyDistroBuild(out[i], d)
 			}
 			out[i] = applyExcludedBy(out[i], d)
 		}
@@ -506,6 +507,26 @@ func applyVersionConflict(u unified.Result, d matcher.Detection) unified.Result 
 		u.State, u.Reason = unified.StateUnknownVersion, unified.ReasonVersionConflict // only one claimed version was asked; the others never were
 	}
 	u.Err = joinNote(u.Err, "version conflict: "+versionClaims(d))
+	return u
+}
+
+// applyDistroBuild honours Detection.Distro: a version read from a distro's package build is the upstream number,
+// and the package may carry a fix backported into it — or support the distro still gives a release upstream ended —
+// so an advisory or end-of-life HIT on that number is only POTENTIALLY affected, its leads kept — distro_build replaces
+// any other reason of the hit (partial_answer too; its "partial" note stays). Every other state is unanswered and
+// keeps its reason; a result with leads names the distro in its note.
+func applyDistroBuild(u unified.Result, d matcher.Detection) unified.Result {
+	if d.Distro == "" {
+		return u
+	}
+	u.Distro = d.Distro
+	if u.State == unified.StateAffectedByAdvisory {
+		u.State, u.Reason = unified.StatePotentiallyAffected, unified.ReasonDistroBuild
+	}
+	if len(u.Leads) > 0 {
+		u.Err = joinNote(u.Err, "version from a package build of "+d.Distro+": "+d.Distro+
+			" may have backported the fix or still support the release, so check its own advisories for the package")
+	}
 	return u
 }
 

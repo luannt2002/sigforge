@@ -879,6 +879,9 @@ func cmdMatch(args []string) error {
 		if d.Provenance != "" {
 			fmt.Printf(", %s/%s", d.Provenance, orDash(d.License))
 		}
+		if d.Distro != "" { // the version is the upstream number of a package that may carry backported fixes
+			fmt.Printf(", %s package", d.Distro)
+		}
 		if len(d.ExcludedBy) > 0 { // the lead is kept, so the contradiction must be visible
 			fmt.Printf(", excluded by %s", strings.Join(d.ExcludedBy, ", "))
 		}

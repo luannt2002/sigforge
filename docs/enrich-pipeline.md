@@ -123,7 +123,9 @@ request is made to any target — safe to run against nothing.
   CPE (then a product it does not list is `unknown_product`, `not_in_source`); with the end-of-life feed off every tech
   is `not_checked` (`source_off`); a platform release with OSV off is reported `not_checked` per package rather than left out. Each result of a
   page detection carries `version_from` (the page field the version came from) and `detection_confidence`; an
-  identity the operator gave carries `version_from: inventory`. `prioritize` records in `kev` whether the leads were
+  identity the operator gave carries `version_from: inventory`. A version a banner shows as a distro's package build
+  carries `distro`, and a CVE or end-of-life hit on it is `potentially_affected` (`distro_build`): the package may
+  carry a backported fix. `prioritize` records in `kev` whether the leads were
   checked against the CISA KEV catalog or only the embedded sample (`docs/unified-contract.md`).
 
 ## 6. CLI

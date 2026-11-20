@@ -92,6 +92,9 @@ func TestContractFixtures(t *testing.T) {
 		{"10-version-conflict", []string{"--json", "--db", "testdata/contract/conflict-db.json"}, []string{cve.EnvVar + "=" + srv.URL + "/cve"}, func() {
 			page = `{"headers":{"X-Acme":["acme/9.5"]},"html":"acme-v10.0"}` // two version claims that disagree
 		}},
+		{"11-distro-build", []string{"--json"}, []string{cve.EnvVar + "=" + srv.URL + "/cve"}, func() {
+			page = `{"headers":{"Server":["Apache/2.4.6 (CentOS)"]}}` // the upstream number of a distro's package build
+		}},
 	}
 	normalize := regexp.MustCompile(`"fetched_at": "[^"]*"`)
 	seen := map[[2]string]string{}
@@ -133,7 +136,7 @@ func TestContractFixtures(t *testing.T) {
 		if rerr != nil || string(want) != string(b)+"\n" {
 			t.Errorf("%s: output differs from %s (rerun with -update-contract after review):\n%s", c.name, path, b)
 		}
-		if len(got.Results) == 1 && c.name != "8-stale-stored-copy" && c.name != "9-kev-from-sample" && c.name != "10-version-conflict" {
+		if len(got.Results) == 1 && c.name != "8-stale-stored-copy" && c.name != "9-kev-from-sample" && c.name != "10-version-conflict" && c.name != "11-distro-build" {
 			key := [2]string{got.Results[0].State.String(), got.Results[0].Reason}
 			if prev, dup := seen[key]; dup {
 				t.Errorf("%s and %s share state/reason %v: a consumer could not tell them apart", prev, c.name, key)
@@ -212,8 +215,8 @@ func TestEnrichTextNamesTheTechOfAResultWithNoIdentity(t *testing.T) {
 // concluded that gives no reason.
 func TestContractFixturesRoundTrip(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "contract", "[0-9]*.json"))
-	if err != nil || len(files) < 10 {
-		t.Fatalf("want the 10 contract fixtures, got %d (%v)", len(files), err)
+	if err != nil || len(files) < 11 {
+		t.Fatalf("want the 11 contract fixtures, got %d (%v)", len(files), err)
 	}
 	results, clean, noReason := 0, 0, 0
 	for _, f := range files {
