@@ -86,3 +86,21 @@ func TestToUnifiedStaleSupportedKeepsItsNote(t *testing.T) {
 		t.Errorf("got %v %v %q, want not_checked, stale, with the stale note and the no-clearance note", u.State, u.Freshness, u.Err)
 	}
 }
+
+// A cycle the source says has ended without giving a date — the bundle's isEol true with no eolFrom, the per-product
+// feed's eol true — is reported as ended with no date: the lead never puts the flag where a date goes.
+func TestEOLLeadWithNoDateSaysSo(t *testing.T) {
+	for _, field := range []string{"true", ""} {
+		u := ToUnified(Status{Product: "nginx", Version: "1.18.0", Cycle: "1.18", EOLDate: field, IsEOL: StateEOL}, nil)
+		if len(u.Leads) != 1 {
+			t.Fatalf("EOLDate %q: leads %+v", field, u.Leads)
+		}
+		if got := u.Leads[0].Title; strings.Contains(got, " on ") || !strings.Contains(got, "no date") {
+			t.Errorf("EOLDate %q: lead title %q, want it ended with no date given", field, got)
+		}
+	}
+	u := ToUnified(Status{Product: "php", Version: "7.2.34", Cycle: "7.2", EOLDate: "2020-11-30", IsEOL: StateEOL}, nil)
+	if got := u.Leads[0].Title; got != "cycle 7.2 reached end-of-life on 2020-11-30" {
+		t.Errorf("a dated cycle: lead title %q", got)
+	}
+}

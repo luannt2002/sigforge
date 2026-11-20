@@ -20,7 +20,7 @@ func holderPID(f *os.File) string {
 		return ""
 	}
 	key := devKey(uint64(sys.Dev), uint64(sys.Ino))
-	locks, err := os.ReadFile("/proc/locks")
+	locks, err := os.ReadFile("/proc/locks") // fsio-exempt os.ReadFile: the kernel's lock table
 	if err != nil {
 		return ""
 	}

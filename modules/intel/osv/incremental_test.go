@@ -3,6 +3,7 @@ package osv
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -345,5 +346,157 @@ func TestOverlayOfAnotherDumpIsNotApplied(t *testing.T) {
 	}
 	if u := look("4.17.21"); u.State != unified.StateAffectedByAdvisory || len(u.Leads) != 1 || u.Leads[0].ID != "GHSA-new2" {
 		t.Fatalf("a record fetched after the dump was taken whole again must be applied: %+v", u)
+	}
+}
+
+// The incremental sync is for the store too: when the store cannot record that the dump is current (its directory
+// cannot take the new meta), Sync fails instead of reporting the dump's size.
+func TestIncrementalSyncFailsWhenTheStoreKeepsNoMeta(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a read-only directory does not stop root")
+	}
+	r, _ := makeZip(t, map[string]string{"npm/GHSA-old.json": lodashAdv("GHSA-old", "4.17.21", "")})
+	dump := mustBytes(r)
+	newAdv := `{"id":"GHSA-new","modified":"2026-11-09T04:00:00Z","affected":[{"package":{"name":"lodash","ecosystem":"npm"},` +
+		`"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.17.22"}]}]}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/npm/all.zip":
+			w.Header().Set("Last-Modified", "Mon, 09 Nov 2026 02:00:00 GMT")
+			_, _ = w.Write(dump)
+		case "/npm/modified_id.csv":
+			_, _ = w.Write([]byte("2026-11-09T04:00:00Z,GHSA-new\n2026-11-08T20:00:00Z,GHSA-old\n"))
+		case "/npm/GHSA-new.json":
+			_, _ = w.Write([]byte(newAdv))
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer srv.Close()
+	c := fetch.New()
+	c.CacheDir = t.TempDir()
+	ctx := context.Background()
+	if _, err := New(srv.URL, c).Sync(ctx, "npm"); err != nil {
+		t.Fatal(err)
+	}
+	bodies, _ := filepath.Glob(filepath.Join(c.CacheDir, "*.body"))
+	if len(bodies) != 1 {
+		t.Fatalf("want the stored dump, found %v", bodies)
+	}
+	metas, _ := filepath.Glob(filepath.Join(c.CacheDir, "*.meta"))
+	for _, mp := range metas { // taken hours ago: the next sync is the incremental one
+		var m map[string]any
+		b, _ := os.ReadFile(mp)
+		if json.Unmarshal(b, &m) == nil {
+			m["fetched_at"] = time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339)
+			b, _ = json.Marshal(m)
+			if err := os.WriteFile(mp, b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.Mkdir(bodies[0]+".overlay", 0o755); err != nil { // the records still have somewhere to go
+		t.Fatal(err)
+	}
+	if err := os.Chmod(c.CacheDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(c.CacheDir, 0o755)
+	if n, err := New(srv.URL, c).Sync(ctx, "npm"); err == nil {
+		t.Errorf("incremental Sync with a store that cannot take the meta = %d bytes, nil; want an error", n)
+	}
+}
+
+// syncedTwice makes a store holding the npm dump and, from an incremental sync, an overlay with GHSA-new (fixed in
+// 4.17.22): what a run reads.
+func syncedTwice(t *testing.T) (*fetch.Client, string, func()) {
+	t.Helper()
+	r, _ := makeZip(t, map[string]string{"npm/GHSA-old.json": lodashAdv("GHSA-old", "4.17.21", "")})
+	dump := mustBytes(r)
+	newAdv := `{"id":"GHSA-new","modified":"2026-11-09T04:00:00Z","affected":[{"package":{"name":"lodash","ecosystem":"npm"},` +
+		`"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.17.22"}]}]}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/npm/all.zip":
+			w.Header().Set("Last-Modified", "Mon, 09 Nov 2026 02:00:00 GMT")
+			_, _ = w.Write(dump)
+		case "/npm/modified_id.csv":
+			_, _ = w.Write([]byte("2026-11-09T04:00:00Z,GHSA-new\n2026-11-08T20:00:00Z,GHSA-old\n"))
+		case "/npm/GHSA-new.json":
+			_, _ = w.Write([]byte(newAdv))
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	c := fetch.New()
+	c.CacheDir = t.TempDir()
+	ctx := context.Background()
+	if _, err := New(srv.URL, c).Sync(ctx, "npm"); err != nil {
+		t.Fatal(err)
+	}
+	metas, _ := filepath.Glob(filepath.Join(c.CacheDir, "*.meta"))
+	for _, mp := range metas {
+		var m map[string]any
+		b, _ := os.ReadFile(mp)
+		if json.Unmarshal(b, &m) == nil {
+			m["fetched_at"] = time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339)
+			b, _ = json.Marshal(m)
+			if err := os.WriteFile(mp, b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := New(srv.URL, c).Sync(ctx, "npm"); err != nil {
+		t.Fatal(err)
+	}
+	bodies, _ := filepath.Glob(filepath.Join(c.CacheDir, "*.body"))
+	if len(bodies) != 1 {
+		t.Fatalf("want the stored dump, found %v", bodies)
+	}
+	return c, srv.URL, srv.Close
+}
+
+// A record of the overlay is the sync's own file: one replaced by a link — even to a copy of that very record, inside
+// the overlay — is never read; a run does not report what it holds.
+func TestOverlayRecordIsNeverReadThroughALink(t *testing.T) {
+	c, url, done := syncedTwice(t)
+	defer done()
+	bodies, _ := filepath.Glob(filepath.Join(c.CacheDir, "*.body"))
+	rec := filepath.Join(bodies[0]+".overlay", "GHSA-new.json")
+	if err := errors.Join(os.Rename(rec, filepath.Join(filepath.Dir(rec), "copy.dat")), os.Symlink("copy.dat", rec)); err != nil {
+		t.Fatal(err)
+	}
+	rc := fetch.New()
+	rc.CacheDir, rc.MaxAge = c.CacheDir, time.Hour
+	u := New(url, rc).Lookuper()(context.Background(), "npm", "lodash", "4.17.21")
+	for _, l := range u.Leads {
+		if l.ID == "GHSA-new" {
+			t.Errorf("a run read the overlay record through its link: %+v", u)
+		}
+	}
+}
+
+// The index cut from the stored dump is the store's own file: one replaced by a link — even to a copy of itself — is
+// never read; the run cuts the index again, and a plain file stands there after.
+func TestIndexFileIsNeverReadThroughALink(t *testing.T) {
+	c, url, done := syncedTwice(t)
+	defer done()
+	idx, _ := filepath.Glob(filepath.Join(c.CacheDir, "*.idx.gz"))
+	if len(idx) != 1 {
+		t.Fatalf("want the dump's index, found %v", idx)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "idx.gz")
+	b, err := os.ReadFile(idx[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(os.WriteFile(elsewhere, b, 0o600), os.Remove(idx[0]), os.Symlink(elsewhere, idx[0])); err != nil {
+		t.Fatal(err)
+	}
+	rc := fetch.New()
+	rc.CacheDir, rc.MaxAge = c.CacheDir, time.Hour
+	_ = New(url, rc).Lookuper()(context.Background(), "npm", "lodash", "4.17.21")
+	if st, err := os.Lstat(idx[0]); err != nil || !st.Mode().IsRegular() {
+		t.Errorf("after a run the index is %v (%v), want the plain file cut again", st, err)
 	}
 }

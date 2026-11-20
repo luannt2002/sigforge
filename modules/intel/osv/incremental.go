@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,9 +47,16 @@ type overlayMark struct {
 
 func overlayDir(zipPath string) string { return zipPath + ".overlay" }
 
-func readMark(dir string) overlayMark {
+// readMark reads the mark of the overlay name in the store's own directory: the overlay is opened inside the store and
+// the mark is never read through a link; none, or one unreadable, is the zero mark (no overlay of this dump).
+func readMark(store *os.Root, name string) overlayMark {
 	var m overlayMark
-	if b, err := os.ReadFile(filepath.Join(dir, "mark.json")); err == nil {
+	overlay, err := store.OpenRoot(name)
+	if err != nil {
+		return m
+	}
+	defer overlay.Close()
+	if b, err := fsio.ReadOwnIn(overlay, "mark.json"); err == nil {
 		_ = json.Unmarshal(b, &m)
 	}
 	return m
@@ -64,13 +72,14 @@ func (a *Adapter) syncChanged(ctx context.Context, eco, zipPath, lastModified st
 	}
 	// Every write goes through the store's own directory (an os.Root): the overlay is made and opened inside it, so a
 	// link another user put in its place is never followed out of the store.
+	// fsio-exempt os.OpenRoot: the store's directory, where the dump is
 	store, err := os.OpenRoot(filepath.Dir(zipPath))
 	if err != nil {
 		return false, err
 	}
 	defer store.Close()
 	name := filepath.Base(overlayDir(zipPath))
-	m := readMark(overlayDir(zipPath))
+	m := readMark(store, name)
 	if m.Stamp != dumpStamp(st) { // none yet, or an overlay of another dump
 		_ = store.RemoveAll(name)
 		start := fetchedAt
@@ -212,15 +221,36 @@ func fileName(id string) string {
 // applyOverlay puts the overlay of the dump at zipPath over idx: a changed record replaces every
 // row of its id, a withdrawn one takes them away. An overlay record that cannot be read
 // counts as an unreadable entry, so the data is not provably whole.
+//
+// The overlay is read as the sync wrote it — inside the store's own directory, each record never through a link.
 func applyOverlay(idx *Index, zipPath string, st os.FileInfo, eco string, keep func(*record) bool) {
-	dir := overlayDir(zipPath)
-	if readMark(dir).Stamp != dumpStamp(st) {
-		return
-	}
-	entries, err := os.ReadDir(dir)
+	// fsio-exempt os.OpenRoot: the store's directory, where the dump is
+	store, err := os.OpenRoot(filepath.Dir(zipPath))
 	if err != nil {
 		return
 	}
+	defer store.Close()
+	name := filepath.Base(overlayDir(zipPath))
+	if readMark(store, name).Stamp != dumpStamp(st) {
+		return
+	}
+	overlay, err := store.OpenRoot(name)
+	if err != nil {
+		return
+	}
+	defer overlay.Close()
+	// fsio-exempt (*os.Root).Open: the overlay's own directory, listed; each record is opened with OpenOwnIn
+	d, err := overlay.Open(".")
+	if err != nil {
+		return
+	}
+	entries, err := d.ReadDir(-1)
+	d.Close()
+	if err != nil {
+		return
+	}
+	// in name order, as os.ReadDir gives them
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	changed := map[string]bool{}
 	var add []record
 	for _, e := range entries {
@@ -228,7 +258,7 @@ func applyOverlay(idx *Index, zipPath string, st os.FileInfo, eco string, keep f
 		if !strings.HasSuffix(name, ".json") || name == "mark.json" {
 			continue
 		}
-		f, err := os.Open(filepath.Join(dir, name))
+		f, err := fsio.OpenOwnIn(overlay, name)
 		if err != nil {
 			idx.skipped++
 			continue

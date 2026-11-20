@@ -80,7 +80,11 @@ merge. It **refuses a blind rollback**: the archived DB must still match its own
 checksum sidecar and parse clean through schema validation; a corrupt or missing archive
 is never restored. On success it restores the DB, its sidecar and (when archived) its
 manifest — each write is atomic on its own, though the three are not jointly
-transactional.
+transactional. Each is restored as the archive kept it: a link as the same link (a DB, sidecar
+and manifest published as links into a `releases/` directory come back as those links), a plain
+file as its bytes. Anything else in place of an archived file — a FIFO, a directory — is refused,
+and all three are read and checked before any is written, so a refused rollback changes nothing. A refusal over
+an archived link names the link and quotes nothing read through it — no digest, no word of its target.
 
 > Honest limit (stated in the code): this is a **single-step, file-based** rollback (one
 > `.prev` generation), not a versioned history. The next merge overwrites `.prev`, and
@@ -101,10 +105,12 @@ broken pipe (`sigforge refresh … | head -1`) — so a run that died never bloc
 hand. `<out>.lock` stays on disk after a run; the file alone is not a lock. It is a lock target only: sigforge never
 writes it, never removes it (removing it while held would let another run lock a new file of the same name), and sets
 its mode — 0644, whatever the umask, so every user who may publish the DB can lock it read-only — only when the run
-created it. On Linux, macOS and the BSDs a symbolic link or anything but a plain file at `<out>.lock` is refused,
-never followed; on Windows and other systems a link there is followed, and nothing is written through it. A lock file
-another user made that this one cannot read is reported by path: make it readable, or remove it while no publish
-runs.
+created it. On Linux, macOS and the BSDs a symbolic link or anything but a plain file at `<out>.lock` is refused, never
+followed; on Windows a link there is followed, and nothing is written through it; on a system with neither `flock` nor
+`LockFileEx` (Solaris, illumos, AIX, Plan 9), where no lock is taken, the file there is opened as every file sigforge
+reads back is (§6) — a link refused, never followed, a FIFO never waited on — through the same code the tests run on
+Linux (that system itself is not in the tests). A lock file another user made that this one cannot read is reported by
+path: make it readable, or remove it while no publish runs.
 
 A run killed while it writes may leave a `.sigforge-*.tmp` file beside the DB, which nothing reads, and the DB may be
 newer than its sidecar: run `verify` before trusting it. The lock is tested on Linux; on Windows it is built, not
@@ -121,12 +127,47 @@ A DB published into a directory another user can write is only as trustworthy as
 its sidecar and its manifest at any time, and `verify` cannot tell their consistent set from yours. Keep the
 directory — and the store `SIGFORGE_CACHE_DIR` names — writable by the user who publishes only.
 
-What sigforge does guarantee, even run as root in such a directory, is that write access to the directory never
-becomes access to any other file. Every write opens the directory once and works inside it: the temporary file is
-created there (never an existing name), its mode is set on the open file, the rename is refused if that file was
-swapped meanwhile, and the write fails if what lands at the path is not the file it wrote — a swap in the very instant
-of the rename is reported, never silent. The archive of the previous DB (`<out>.prev*`) never reads through a link:
-a link is archived as the same link, unread, and a plain file is read through the file opened. The publish lock never
-follows a link (§5). The OSV store writes its changed records inside its own directory, never through a link out of
-it. Those were three ways a link or a swapped temporary file made a root run change the mode of, copy out, or write
-into a file of the other user's choosing (all present in v0.5.0).
+What sigforge does guarantee, even run as root in such a directory, is that write access to the directory never becomes
+access to any other file. Every write — a published DB, a stored copy, a downloaded dump, an index cut from it — opens
+the directory once and works inside it: the temporary file is created there (never an existing name), its mode is set on
+the open file, the rename is refused if that file was swapped meanwhile, and the write fails if what lands at the path
+is not the file it wrote, removing what landed — a swap in the very instant of the rename is reported, never silent, and
+never left at the path; a write works in the directory it opened even once that directory's path names another. The
+archive of the previous DB (`<out>.prev*`) never reads through a link: a link is archived as the same link, unread, and
+a plain file is read through the file opened. The publish lock never follows a link (§5). The OSV store writes its
+changed records inside its own directory, never through a link out of it.
+
+Every file sigforge wrote and reads back is opened without following a link and only as a plain file: the store's
+copies, indexes, overlay and dictionary, `sync`'s status (`sync-status.json`), `watch`'s state and the sync manifest.
+A link, a FIFO or a directory there is no entry for the store and the status, and an error for the others — never
+read, never waited on. `rollback` restores what the archive kept (§4): a link is restored as the same link, never
+copied out — its target is read only to check the DB against its checksum, without waiting on it — so no file
+`rollback` writes ever holds what a link someone put among the archived files points to. What the operator names is
+read as they name it, through a link and from a pipe, as before: `--db`, a merge source, `--sbom`, and the DB `verify`
+checks with its sidecar and manifest (`verify` writes nothing). `sync` reads the store back before it calls a source
+ok: a copy the store did not keep — a write refused, a file swapped under it — fails the source.
+
+Those were the ways a link or a swapped temporary file made a root run change the mode of, copy out, or write into a
+file of the other user's choosing (all present in v0.5.0). A test holds the module to them, deny by default. What it
+type-checks covers what can be built: every Go file a build of the module compiles for Linux, Windows, macOS or Plan 9
+is type-checked whole, and each of these fails it outright — a Go file none of those builds takes (another
+architecture's or system's, a cgo file: the test builds with cgo off), outside what the go tool leaves out of `./...`
+(`testdata`, a directory whose name starts with `.` or `_`, a nested module — a directory holding its own `go.mod`
+file); a file the go tool compiles or links that is not Go (assembly, C, a `.syso` object), for any system or
+architecture, anywhere in the module; a `//go:` directive other than `build`, `embed` and `generate` (`go:linkname`,
+`go:cgo_import_dynamic`, …), a `//line` directive, and a `godebug` line in `go.mod`; a package of another module under
+the module's path that a build of it imports. Outside `framework/fsio` (and, for the network, `framework/fetch`):
+importing a standard package that is not on a short list of pure ones, or calling a file system or network function or
+method that is not on a short list of safe ones (metadata, an open file, an `os.Root` working inside its directory),
+fails the test unless a comment on its line names it and says why. Every use of an interface's method — a call, a method
+value or expression, through a type parameter's constraint or an embedded field — is checked against every type the
+module holds a value of: it fails the test outright when one of them has a judged method of that name whose signature
+matches (aliases resolved, a type parameter matching any type, any other kind that holds a type parameter matching as
+well) — `WriteFile` on an interface an `*os.Root` could answer, `Do` on one an `*http.Client` could. It is the call that
+is checked, so the path the value took to the interface does not matter. A type only its owner holds (a network
+connection inside `framework/fetch`) is the owner's: what it hands out through an interface is its API, reviewed with
+it. A value that carries a judged method is also held to the uses that keep its type where it flows into code the test
+does not read (the standard library), and taking a judged function as a value fails the test outright. What the test
+cannot decide — whether an allowed call is given a path inside a directory another user can write — the comment states,
+and review and the behaviour tests hold; so is a change to the test itself, and an `unsafe` import, which needs a
+comment naming it.

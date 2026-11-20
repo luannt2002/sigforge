@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/luannt2002/sigforge/modules/intel/unified"
@@ -55,25 +54,28 @@ func ToUnified(st Status, err error) unified.Result {
 	case st.IsEOL == StateEOL:
 		u.State = unified.AdvisoryState(st.Version != "")
 		if st.Version == "" {
-			u.Err, u.Reason = strings.TrimPrefix(u.Err+"; "+unified.NoteNoVersion, "; "), unified.ReasonNoVersion // keep a stale note
+			u.Err, u.Reason = unified.JoinNotes(u.Err, unified.NoteNoVersion), unified.ReasonNoVersion // keep a stale note
 		}
 		u.Freshness = fresh
-		u.Leads = []unified.Lead{{
-			ID:    "eol:" + st.Product + ":" + st.Cycle,
-			Title: "cycle " + st.Cycle + " reached end-of-life on " + st.EOLDate,
-		}}
+		title := "cycle " + st.Cycle + " reached end-of-life"
+		if _, err := time.Parse("2006-01-02", st.EOLDate); err == nil {
+			title += " on " + st.EOLDate
+		} else {
+			title += " (the source gives no date)" // the feed's flag (isEol / eol true), never put where a date goes
+		}
+		u.Leads = []unified.Lead{{ID: "eol:" + st.Product + ":" + st.Cycle, Title: title}}
 	case st.IsEOL == StateSupported:
 		var why string
 		u.State, why = unified.Clean(unified.Evidence{FullData: true, Positioned: true})
 		if u.Err != "" {
-			why = u.Err + "; " + why // keep the stale note
+			why = unified.JoinNotes(u.Err, why) // keep the stale note
 		}
 		u.Err = why
 		u.Reason = unified.ReasonNoClearance
 		u.Freshness = fresh
 	case st.shared: // set only when the bundle named no one product
 		u.State, u.Reason = unified.StateNotChecked, unified.ReasonNoIdentity
-		u.Err = strings.TrimPrefix(u.Err+"; the end-of-life source lists this CPE under more than one product: none is guessed", "; ")
+		u.Err = unified.JoinNotes(u.Err, "the end-of-life source lists this CPE under more than one product: none is guessed")
 		u.Freshness = fresh // the bundle was read
 	case st.Product == "" && st.unasked:
 		u.State, u.Reason = unified.StateNotChecked, unified.ReasonNoIdentity

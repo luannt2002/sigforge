@@ -198,11 +198,7 @@ func (a *Adapter) Lookupers() (pkg, release func(ctx context.Context, eco, name,
 			switch {
 			case l.idx.fetched.Stale:
 				u.Freshness = unified.FreshnessStale
-				note := "osv source failed: verdict from the last synced dump (stale): " + l.idx.fetched.Err
-				if u.Err != "" {
-					note = u.Err + "; " + note // keep why the verdict is what it is
-				}
-				u.Err = note
+				u.Err = unified.JoinNotes(u.Err, "osv source failed: verdict from the last synced dump (stale): "+l.idx.fetched.Err)
 			case l.idx.fetched.Cached:
 				u.Freshness = unified.FreshnessSnapshot
 			}

@@ -56,19 +56,12 @@ func ToUnified(res Result, err error) unified.Result {
 			u.Reason = unified.ReasonPartialAnswer
 		}
 		if res.Version == "" {
-			u.Err, u.Reason = joinNote(unified.NoteNoVersion, u.Err), unified.ReasonNoVersion
+			u.Err, u.Reason = unified.JoinNotes(unified.NoteNoVersion, u.Err), unified.ReasonNoVersion
 		}
 		u.Freshness = unified.FreshnessLive
 		u.Leads = leadsFromCVEs(res.CVEs)
 	}
 	return u
-}
-
-func joinNote(a, b string) string {
-	if a == "" {
-		return b
-	}
-	return a + "; " + b
 }
 
 // LookupUnified is Lookup plus ToUnified — the one call a unified consumer makes.

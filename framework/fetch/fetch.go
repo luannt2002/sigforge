@@ -320,37 +320,46 @@ func (c *Client) DownloadChecked(ctx context.Context, url string, max int64, che
 	dir := c.CacheDir
 	if dir == "" {
 		dir = os.TempDir()
-	} else if err := os.MkdirAll(dir, 0o755); err != nil {
+	} else if err := os.MkdirAll(dir, 0o755); err != nil { // fsio-exempt os.MkdirAll: the operator's store root
 		return fail(err)
 	}
-	tmp, err := os.CreateTemp(dir, "download-*")
+	// The download is made and moved inside the directory opened here (fsio.CreateIn, Commit), never by name.
+	// fsio-exempt os.OpenRoot: the store the operator configured, or the system's temporary directory
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return fail(err)
 	}
-	n, err := io.Copy(tmp, io.LimitReader(resp.Body, max+1))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
+	tmp, err := fsio.CreateIn(root)
+	if err != nil {
+		root.Close()
+		return fail(err)
 	}
+	abort := func() { tmp.Abort(); root.Close() }
+	n, err := io.Copy(tmp.File, io.LimitReader(resp.Body, max+1))
 	if err == nil && n > max {
 		err = fmt.Errorf("fetch: %q body exceeds the %d byte ceiling", url, max)
 	}
 	if err != nil {
-		os.Remove(tmp.Name())
+		abort()
 		return fail(fmt.Errorf("fetch: read %q: %w", url, err))
 	}
 	if check != nil {
-		if err := check(tmp.Name()); err != nil {
-			os.Remove(tmp.Name())
+		if err := check(tmp.Path()); err != nil {
+			abort()
 			return fail(fmt.Errorf("fetch: %q: unusable body: %w", url, err))
 		}
 	}
-	removeTmp := func() { os.Remove(tmp.Name()) }
 	if c.CacheDir == "" {
-		return tmp.Name(), Meta{FetchedAt: fetched}, removeTmp, nil
+		if err := tmp.Close(); err != nil {
+			abort()
+			return fail(err)
+		}
+		return tmp.Path(), Meta{FetchedAt: fetched}, abort, nil
 	}
 	bodyPath, _ := c.cachePaths(url)
-	if err := os.Rename(tmp.Name(), bodyPath); err != nil {
-		removeTmp()
+	err = tmp.Commit(filepath.Base(bodyPath), 0o600)
+	root.Close()
+	if err != nil {
 		return fail(err) // with a store, the returned path is always the store's copy
 	}
 	c.storeMeta(url, cacheMeta{URL: url, ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified")}, fetched)
@@ -409,7 +418,7 @@ func (c *Client) loadCached(url string) *cachedBody {
 	if path == "" {
 		return nil
 	}
-	b, err := os.ReadFile(path)
+	b, err := fsio.ReadOwn(path) // fsio-exempt fsio.ReadOwn: the store's copy, in the store the operator configured
 	if err != nil {
 		return nil
 	}
@@ -417,17 +426,18 @@ func (c *Client) loadCached(url string) *cachedBody {
 }
 
 // storedFile returns the path of url's stored body with its meta and fetch time, or "" when
-// there is no usable entry.
+// there is no usable entry. Both are the store's own files: a link or anything but a plain file in
+// their place is no entry, never followed.
 func (c *Client) storedFile(url string) (path string, m cacheMeta, at time.Time) {
 	if c.CacheDir == "" {
 		return "", cacheMeta{}, time.Time{}
 	}
 	bodyPath, metaPath := c.cachePaths(url)
-	mb, err := os.ReadFile(metaPath)
+	mb, err := fsio.ReadOwn(metaPath) // fsio-exempt fsio.ReadOwn: in the store the operator configured
 	if err != nil || json.Unmarshal(mb, &m) != nil || m.URL != url {
 		return "", cacheMeta{}, time.Time{}
 	}
-	if _, err := os.Stat(bodyPath); err != nil {
+	if st, err := os.Lstat(bodyPath); err != nil || !st.Mode().IsRegular() {
 		return "", cacheMeta{}, time.Time{}
 	}
 	at, _ = time.Parse(time.RFC3339, m.FetchedAt)
@@ -439,10 +449,12 @@ func (c *Client) storedFile(url string) (path string, m cacheMeta, at time.Time)
 // body first and the meta last, so a half-written entry is never used. A failed write
 // only loses the optimisation, never the fetch, so errors are dropped.
 func (c *Client) storeCached(url string, h http.Header, b []byte, at time.Time) {
+	// fsio-exempt os.MkdirAll: the store's root, the directory the operator configured
 	if c.CacheDir == "" || os.MkdirAll(c.CacheDir, 0o755) != nil {
 		return
 	}
 	bodyPath, _ := c.cachePaths(url)
+	// fsio-exempt fsio.WriteAtomic: in the store the operator configured
 	if fsio.WriteAtomic(bodyPath, b, 0o644) == nil {
 		c.storeMeta(url, cacheMeta{URL: url, ETag: h.Get("ETag"), LastModified: h.Get("Last-Modified")}, at)
 	}
@@ -453,6 +465,25 @@ func (c *Client) storeCached(url string, h http.Header, b []byte, at time.Time) 
 func (c *Client) Stored(url string) (path string, fetchedAt time.Time, lastModified string, ok bool) {
 	p, m, at := c.storedFile(url)
 	return p, at, m.LastModified, p != ""
+}
+
+// Kept reports whether the store holds a copy of url the source served or confirmed at or after since — read back
+// from the store, not taken from the writes that put it there, whose errors a fetch drops (they lose only the
+// optimisation). A caller that exists to fill the store (sync) checks it: a write refused or a file swapped under the
+// write leaves no such copy. The meta keeps whole seconds, so since counts from its second.
+func (c *Client) Kept(url string, since time.Time) error {
+	if c.CacheDir == "" {
+		return errors.New("fetch: no store")
+	}
+	p, _, at := c.storedFile(url)
+	switch {
+	case p == "":
+		return fmt.Errorf("fetch: the store kept no copy of %q", url)
+	case at.Before(since.Truncate(time.Second)):
+		return fmt.Errorf("fetch: the store kept no copy of %q from this fetch: its copy is from %s",
+			url, at.UTC().Format(time.RFC3339))
+	}
+	return nil
 }
 
 // Confirm records that url's stored copy is current as of now — what a 304 does — for a caller that
@@ -473,5 +504,5 @@ func (c *Client) storeMeta(url string, m cacheMeta, at time.Time) {
 		return
 	}
 	_, metaPath := c.cachePaths(url)
-	_ = fsio.WriteAtomic(metaPath, mb, 0o644)
+	_ = fsio.WriteAtomic(metaPath, mb, 0o644) // fsio-exempt fsio.WriteAtomic: in the store the operator configured
 }

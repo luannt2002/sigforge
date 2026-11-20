@@ -31,9 +31,10 @@ type Manifest struct {
 }
 
 // LoadManifest reads an existing manifest; a missing file yields an empty one so a
-// first fetch starts cleanly.
+// first fetch starts cleanly. The manifest is the one sync writes back, so it is never read through
+// a link: one in its place is an error, never a file copied into the next manifest.
 func LoadManifest(path string) (*Manifest, error) {
-	b, err := os.ReadFile(path)
+	b, err := fsio.ReadOwn(path) // fsio-exempt fsio.ReadOwn: the sync manifest the operator names
 	if errors.Is(err, os.ErrNotExist) {
 		return &Manifest{}, nil
 	}
@@ -66,5 +67,6 @@ func (m *Manifest) Save(path string) error {
 	if err != nil {
 		return err
 	}
+	// fsio-exempt fsio.WriteAtomic: the sync manifest the operator names
 	return fsio.WriteAtomic(path, append(b, '\n'), 0o644)
 }

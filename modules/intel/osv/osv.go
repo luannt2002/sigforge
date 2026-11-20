@@ -35,6 +35,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -42,6 +43,7 @@ import (
 	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/framework/fsio"
 	"github.com/luannt2002/sigforge/modules/intel/versioncmp"
 )
 
@@ -607,10 +609,25 @@ func storeDump(ctx context.Context, client *fetch.Client, eco, dumpURL string) (
 		}
 		return err
 	})
-	if cut != "" && (err != nil || meta.Stale || os.Rename(cut, path+".idx.gz") != nil) {
-		os.Remove(cut)
+	if cut != "" {
+		placeCut(cut, path, err == nil && !meta.Stale)
 	}
 	return path, meta, err
+}
+
+// placeCut moves the index cut from a new dump beside the stored dump at path, or removes it when the dump was not
+// kept — inside the store's directory, opened once, never by name (fsio.RenameIn: only the plain file the cut left,
+// checked to be what lands). An index not placed only costs the next run cutting it again.
+func placeCut(cut, path string, keep bool) {
+	// fsio-exempt os.OpenRoot: the store's directory, where the download was made
+	store, err := os.OpenRoot(filepath.Dir(cut))
+	if err != nil {
+		return
+	}
+	defer store.Close()
+	if name := filepath.Base(cut); !keep || fsio.RenameIn(store, name, filepath.Base(path)+".idx.gz") != nil {
+		store.Remove(name)
+	}
 }
 
 // indexOf reads the dump's index file when it was cut from this very dump, and otherwise
@@ -631,7 +648,9 @@ func dumpIndex(ctx context.Context, eco, zipPath string, st os.FileInfo, keep fu
 			return idx, nil
 		}
 	}
-	zf, err := os.Open(zipPath)
+	// fsio-exempt fsio.OpenOwn: the dump sigforge downloaded, in the store or the system's temporary directory;
+	// never read through a link put in its place
+	zf, err := fsio.OpenOwn(zipPath)
 	if err != nil {
 		return nil, err
 	}
@@ -644,6 +663,7 @@ func dumpIndex(ctx context.Context, eco, zipPath string, st os.FileInfo, keep fu
 // dump changed, and returns the stored size. Later runs read that index. Sync replaces the
 // stored dump only once the new one's index is cut from it and holds an advisory.
 func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
+	start := time.Now() // the clock the fetch stamps the store's copy with
 	eco, ok := Ecosystem(ecosystem)
 	switch {
 	case !ok:
@@ -663,6 +683,10 @@ func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
 			}
 			if done {
 				a.client.Confirm(dumpURL) // dump + overlay are current: a run within MaxAge reads them with no request
+				if err := a.client.Kept(dumpURL, start); err != nil {
+					// a sync is for the store: one it did not keep is a failure
+					return 0, fmt.Errorf("osv %s: %w", eco, err)
+				}
 				return a.cutIndex(ctx, eco, stored)
 			}
 		}
@@ -687,8 +711,11 @@ func (a *Adapter) Sync(ctx context.Context, ecosystem string) (int64, error) {
 	if err == nil && meta.Stale {
 		err = errors.New(meta.Err) // the store kept its copy: the source did not answer, or the check refused its answer
 	}
-	if cut != "" && (err != nil || os.Rename(cut, path+".idx.gz") != nil) {
-		os.Remove(cut)
+	if cut != "" {
+		placeCut(cut, path, err == nil)
+	}
+	if err == nil {
+		err = a.client.Kept(dumpURL, start) // a sync is for the store: a dump it did not keep is a failure
 	}
 	if err != nil {
 		return 0, fmt.Errorf("osv %s: %w", eco, err)
@@ -702,7 +729,7 @@ func (a *Adapter) cutIndex(ctx context.Context, eco, path string) (int64, error)
 	if err != nil {
 		return 0, fmt.Errorf("osv %s: %w", eco, err)
 	}
-	if f, err := os.Open(path + ".idx.gz"); err == nil {
+	if f, err := fsio.OpenOwn(path + ".idx.gz"); err == nil { // fsio-exempt fsio.OpenOwn: beside the dump, in the store
 		_, err = indexDecoder(f, dumpStamp(st))
 		f.Close()
 		if err == nil {

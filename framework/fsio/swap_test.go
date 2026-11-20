@@ -1,9 +1,6 @@
 package fsio
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -101,46 +98,7 @@ func TestWriteAtomicReportsASwapAtTheRename(t *testing.T) {
 	if st, serr := os.Stat(victim); serr != nil || st.Mode().Perm() != 0o600 {
 		t.Errorf("the link's target changed: %v, %v", st, serr)
 	}
-}
-
-// No code outside tests changes a file's mode or owner by path: a path is looked up again when used, and in a
-// directory another user can write it may by then name a file of theirs choosing. Modes are set on a file this
-// process opened (*os.File.Chmod). A call by path anywhere in the module fails here.
-func TestNoModeChangeByPath(t *testing.T) {
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		t.Fatalf("module root not found at %s: %v", root, err)
-	}
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() && (strings.HasPrefix(d.Name(), ".") || d.Name() == "testdata") && path != root {
-			return filepath.SkipDir
-		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if err != nil {
-			return err
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "os" && (sel.Sel.Name == "Chmod" || sel.Sel.Name == "Chown" || sel.Sel.Name == "Lchown") {
-				t.Errorf("%s: os.%s by path — set it on the open file instead", strings.TrimPrefix(path, root+"/"), sel.Sel.Name)
-			}
-			return true
-		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+	if _, lerr := os.Lstat(filepath.Join(dir, "db.json")); !os.IsNotExist(lerr) {
+		t.Errorf("what was swapped in at the rename was left at the name: %v", lerr) // as RenameIn: never left there
 	}
 }

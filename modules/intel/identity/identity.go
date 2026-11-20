@@ -40,13 +40,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/luannt2002/sigforge/framework/fetch"
+	"github.com/luannt2002/sigforge/framework/fsio"
 )
 
 // EnvCPEDictURL is the environment variable the operator uses to supply the NVD CPE
@@ -217,7 +217,9 @@ type dictFile struct {
 // CPE entry (the rule sync applies too), is an error.
 func readDictFile(path string) (dictFile, error) {
 	var d dictFile
-	f, err := os.Open(path)
+	// fsio-exempt fsio.OpenOwn: the dictionary sigforge downloaded, in the store or the system's temporary
+	// directory; never read through a link put in its place
+	f, err := fsio.OpenOwn(path)
 	if err != nil {
 		return d, err
 	}

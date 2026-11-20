@@ -65,3 +65,18 @@ func TestEnrichPrintsExcludedBy(t *testing.T) {
 		t.Errorf("%d excluded-by notes printed for %d results of B:\n%s", got, labeled, out)
 	}
 }
+
+// match and the enrich table show the edge layer, as they show a distro build.
+func TestTextShowsTheEdgeLayer(t *testing.T) {
+	offline(t)
+	db := filepath.Join(t.TempDir(), "db.json")
+	writeFile(t, db, `{"schema_version":"1.0.0","fingerprints":{"Cloudflare":{"cats":[31],"headers":{"cf-ray":[""]}}}}`)
+	stdinOf(t, `{"headers":{"cf-ray":["1"]}}`)
+	if out := captureStdout(t, func() { _ = cmdMatch([]string{"--db", db}) }); !strings.Contains(out, "Cloudflare  (confidence 100, edge layer)") {
+		t.Errorf("match must show the edge layer:\n%s", out)
+	}
+	stdinOf(t, `{"headers":{"cf-ray":["1"]}}`)
+	if out := captureStdout(t, func() { _ = cmdEnrich([]string{"--db", db}) }); !strings.Contains(out, "layer=edge") {
+		t.Errorf("the enrich table must show the edge layer:\n%s", out)
+	}
+}

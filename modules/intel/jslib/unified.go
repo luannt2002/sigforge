@@ -63,11 +63,7 @@ func ToUnified(res Result) unified.Result {
 		}
 	}
 	if res.Err != "" {
-		why := "Retire.js source failed: " + res.Err
-		if u.Err != "" {
-			why += "; " + u.Err // keep why the verdict is what it is
-		}
-		u.Err = why
+		u.Err = unified.JoinNotes("Retire.js source failed: "+res.Err, u.Err) // keep why the verdict is what it is
 	}
 	return u
 }

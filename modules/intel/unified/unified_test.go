@@ -88,3 +88,15 @@ func TestLookedUpAndConcluded(t *testing.T) {
 		}
 	}
 }
+
+// JoinNotes joins the notes given, skipping the empty ones: never a separator around nothing.
+func TestJoinNotes(t *testing.T) {
+	for _, c := range []struct {
+		in   []string
+		want string
+	}{{nil, ""}, {[]string{"", ""}, ""}, {[]string{"a", ""}, "a"}, {[]string{"", "b"}, "b"}, {[]string{"a", "", "b"}, "a; b"}} {
+		if got := JoinNotes(c.in...); got != c.want {
+			t.Errorf("JoinNotes(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

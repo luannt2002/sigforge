@@ -18,6 +18,7 @@ reading of the contract.
 | `9-kev-from-sample` | KEV not configured | `kev: sample` — `known_exploited` absent means "not in the sample", not "not exploited" |
 | `10-version-conflict` | the page claims two versions (`conflict-db.json`) | a CVE hit downgraded to `potentially_affected` / `version_conflict`, the lead kept |
 | `11-distro-build` | the banner shows a distro's package build (`Apache/2.4.6 (CentOS)`) | a CVE hit downgraded to `potentially_affected` / `distro_build`, the lead kept, `distro: CentOS` |
+| `12-edge-layer` | a CDN in front (`CF-RAY`, `Server: cloudflare`) and `X-Powered-By: PHP/7.4.3` | Cloudflare's results carry `layer: edge`; PHP's keep their state and say the header may be the edge's — no `layer`, never `origin` |
 
 Cases 2–7 each carry their own (`state`, `reason`) pair. The sources are local stand-ins started by the test; their
 address is written `http://source.test`, and `fetched_at` is written `2000-01-01T00:00:00Z` (the real value is when the

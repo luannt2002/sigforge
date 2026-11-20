@@ -22,8 +22,13 @@ from, so a consumer never has to read a sentence — or an empty list — to tel
   build a page's version was read from, when the banner names it (`Apache/2.4.6 (CentOS)`, `nginx/1.18.0 (Ubuntu)`,
   `PHP/7.4.3-4ubuntu2.19`, `PHP/7.3.31-1~deb10u1`); read from header, cookie and meta values. The reason code
   `distro_build`.
-- `unified.NoteVersionUnreadable`; consumer fixtures of `enrich --json` in `cmd/sigforge/testdata/contract/` (eleven
-  cases, with a README), each held to a lossless round trip through `unified.Result`.
+- `Result.Layer` (`layer`) and `matcher.Detection.Layer`: `edge` for a CDN, reverse proxy or load balancer the response
+  passed through (every category of the tech among webappanalyzer's 31, 64, 65), so its leads are never read as the
+  origin's; never `origin`. Behind an edge, a version read from a response header or cookie says so in `error`. `match`
+  prints `edge layer`, the `enrich` table `layer=edge`.
+- `unified.JoinNotes`; `unified.NoteVersionUnreadable`; consumer fixtures of `enrich --json` in
+  `cmd/sigforge/testdata/contract/` (twelve cases, with a README), each held to a lossless round trip through
+  `unified.Result`.
 
 ### Changed behaviour
 - A CVE or end-of-life hit on a version a banner shows as a distro's package build is `potentially_affected`
@@ -59,8 +64,8 @@ from, so a consumer never has to read a sentence — or an empty list — to tel
   instead of interleaving its DB, sidecar and manifest with the first one's (which left a DB `verify` refused). The
   system lets the lock go when the run ends, however it ends — interrupted, killed, or stopped by a broken pipe — so a
   run that died never blocks the next one. `<DB>.lock` stays on disk, is never written, and is readable by every user,
-  so a publish under sudo once does not block the service user after; on Linux, macOS and the BSDs a symbolic link or
-  anything but a plain file there is refused, never followed.
+  so a publish under sudo once does not block the service user after; a symbolic link or anything but a plain file
+  there is refused, never followed (on Windows a link is followed, and nothing is written through it).
 - `match` and `enrich` refuse a page on stdin over 64 MiB (the ceiling of a fetched body) instead of reading any size.
 - OSV leads come in an order the dump's own order never changes: the matched leads by severity, then id, and the leads
   a version cannot be placed against after them, ordered the same way. Of two advisories that alias each other, a
@@ -71,18 +76,45 @@ from, so a consumer never has to read a sentence — or an empty list — to tel
 - The WordPress feed's "failed" result now says why; its "off" and "no slug" results are told apart; a kind it has no
   lookup for carries `unsupported` with the feed on too.
 - An OSV match drawn from a dump read in part carries `partial_answer`, as a match on one page of the CVE API does.
+- `rollback` of a DB archived as a link restores the same link (v0.5.0 wrote the link's content to a plain file):
+  a release published as links comes back as those links.
+- An end-of-life lead for a cycle the source marks ended without a date (`isEol: true` with no `eolFrom`) says
+  "reached end-of-life (the source gives no date)"; it read "reached end-of-life on true".
+- `sync` says a source is `ok` only once it has read back from the store the copy it just fetched; it printed `ok — N
+  bytes in the store` when the store had not kept it (the write refused, or a file swapped under it), and `sources`
+  then reported the source ok. Such a source is now FAILED, `sync` exits 1, and `sources` reports why.
+- What a `Detection` reports for a version several patterns capture (`versionClaims`, in a conflict) is the claim first
+  in field order, then by pattern; it was the one map iteration read first, so its `field` and `pattern` changed from
+  run to run.
 
 ### Security
-Three ways a user who can write the publish directory or the store made a run — under root, say — change, copy out
-or write into a file of that user's choosing, all present in v0.5.0 (`docs/snapshot-governance.md` §6):
+Ways a user who can write the publish directory or the store made a run — under root, say — change, copy out or
+write into a file of that user's choosing, all present in v0.5.0 (`docs/snapshot-governance.md` §6):
 - Every write set the new file's mode by path after closing it: the temporary file, swapped for a link meanwhile,
-  had its target's mode set to 0644 (measured on v0.5.0: 9 of 10 `merge` runs, 7 of 8 `sync` runs). The mode is now
-  set on the open file, writes stay inside the directory they opened, and a swapped temporary file is refused — at
-  the rename too, where the write fails if what landed is not the file it wrote.
+  had its target's mode set to 0644 (in one measurement on v0.5.0: 9 of 10 `merge` runs, 7 of 8 `sync` runs). The
+  mode is now set on the open file, every write works inside the directory it opened even once that directory's path
+  names another, and a swapped temporary file is refused — at the rename too, where the write fails if what landed is
+  not the file it wrote, and removes what landed.
 - `merge` copied what a link at the DB, sidecar or manifest pointed to into `<DB>.prev*`, mode 0644. A link is now
   archived as the same link, unread.
+- `rollback` copied what a link at `<DB>.prev.manifest.json` pointed to into `<DB>.manifest.json`, mode 0644;
+  `sync`, `watch` and `merge --fetch` read their status, state and sync manifest through a link and wrote what they
+  read back. Every file sigforge wrote and reads back — the store's copies, indexes, overlay and dictionary, `sync`'s
+  status, `watch`'s state, the sync manifest — is now opened without following a link and only as a plain file: a
+  link or a FIFO there is no entry (store, status) or an error (state, sync manifest), never read and never waited on.
+  `rollback` restores each archived file as the archive kept it — a link as the same link, never copied out — and
+  refuses anything else there before it writes any file; a refusal over an archived link no longer quotes what was
+  read through it (v0.5.0 printed the digest of what `.prev` pointed to, and the first word of what the archived
+  checksum pointed to when it read as a digest). What the operator names — `--db`, a merge source, `--sbom`,
+  the DB `verify` checks — is read as before, through a link and from a pipe.
+- A downloaded dump, the index cut from it, and the stored copies were created and renamed by name in the store; they
+  are now made inside the store's directory opened once, with the checks every other write makes — an index that is
+  not the plain file cut when it is moved beside its dump is dropped, and cut again by the next run.
 - An incremental OSV sync followed a link put in place of its overlay directory and wrote the changed records where
   it pointed. The overlay is now made and written inside the store; a link out of it is refused.
+- On AIX, files sigforge reads back were opened without `O_NOFOLLOW` / `O_NONBLOCK`, which the system has: a link or
+  a FIFO swapped in after the check was followed or waited on. They are now opened with both, as on the other Unix
+  systems.
 
 ### Changed meaning
 - `unknown_product` is no longer used for "no identity to ask with": that is `not_checked` with `no_identity`.

@@ -219,6 +219,12 @@ anything about the package, and listing it beside live ones would be a claim nob
   packager compiles into it (`Apache/2.4.38 (Debian)`, `nginx/1.18.0 (Ubuntu)`) or the package revision appended to
   the upstream version (`PHP/7.4.3-4ubuntu2.19`, `PHP/7.3.31-1~deb10u1`). Read from header, cookie and meta values only
   — a banner in a page's HTML (an error page footer) is not read. The matcher records it as `Detection.Distro`.
+- **`layer`** — `edge` on every result of a tech whose every category is an edge one — a CDN, reverse proxy or load
+  balancer (webappanalyzer categories 31, 64, 65) the response passed through: its leads are the edge's, never the
+  origin's. Absent when the layer is not established — a tech that can also be the origin (a web server that proxies,
+  a cache) or one with no category; never `origin`, which nothing a page shows can prove. When an edge stands in front,
+  a result of another tech whose `version` was read from a response header or cookie says in `error` that the edge may
+  have set it; its state is kept. The matcher records it as `Detection.Layer`.
 - **CVE answers compare the upstream release.** A `cpe` or `eol` result compares the version a page names with the
   upstream project's releases. A distro build can carry a fix without changing that version (a backport): when the
   banner names the distro, a hit is `potentially_affected` (`distro_build`) with its leads kept; when it does not, the

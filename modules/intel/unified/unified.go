@@ -297,6 +297,22 @@ type Result struct {
 	// Distro names the distro whose package build Version was read from ("Debian", "Ubuntu", "CentOS"…), when the
 	// banner said so: the package may carry fixes the upstream version does not, so the number alone settles nothing.
 	Distro string `json:"distro,omitempty"`
+	// Layer is "edge" when the result is of a tech that is an edge layer — a CDN, reverse proxy or load balancer the
+	// response passed through — whose leads are the edge's, not the origin's. Empty when the layer is not established;
+	// never "origin".
+	Layer string `json:"layer,omitempty"`
+}
+
+// JoinNotes joins the non-empty notes with "; " — the one way a result's notes are put together, so none ever reads
+// with a separator around nothing.
+func JoinNotes(notes ...string) string {
+	var out []string
+	for _, n := range notes {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return strings.Join(out, "; ")
 }
 
 // Unknown builds a not-looked-up / unavailable result for a scope+identity, so a

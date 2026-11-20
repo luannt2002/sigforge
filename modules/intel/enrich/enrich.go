@@ -216,6 +216,13 @@ func EnrichUnified(ctx context.Context, dets []matcher.Detection, db *schema.DB,
 
 func enrichDetections(ctx context.Context, dets []matcher.Detection, db *schema.DB, opt Options) []unified.Result {
 	out := make([]unified.Result, 0, len(dets)*2)
+	var edges []string // the edge layers the page's response passed through
+	for _, d := range dets {
+		if d.Layer == "edge" {
+			edges = append(edges, d.Tech)
+		}
+	}
+	slices.Sort(edges)
 	for _, d := range dets {
 		from := len(out)
 		cpes, cpeState, cpeEvidence := resolveCPEs(ctx, d, db, opt)
@@ -226,10 +233,11 @@ func enrichDetections(ctx context.Context, dets []matcher.Detection, db *schema.
 		}
 		out = append(out, platformResults(ctx, d, opt)...)
 		for i := from; i < len(out); i++ {
-			out[i].Tech, out[i].DetectionConfidence = d.Tech, d.Confidence
+			out[i].Tech, out[i].DetectionConfidence, out[i].Layer = d.Tech, d.Confidence, d.Layer
 			if out[i].Version != "" {
 				out[i].VersionFrom = d.VersionFrom
 				out[i] = applyDistroBuild(out[i], d)
+				out[i] = applyBehindEdge(out[i], d, edges)
 			}
 			out[i] = applyExcludedBy(out[i], d)
 		}
@@ -506,7 +514,19 @@ func applyVersionConflict(u unified.Result, d matcher.Detection) unified.Result 
 	case unified.StateNotAffectedByAdvisory:
 		u.State, u.Reason = unified.StateUnknownVersion, unified.ReasonVersionConflict // only one claimed version was asked; the others never were
 	}
-	u.Err = joinNote(u.Err, "version conflict: "+versionClaims(d))
+	u.Err = unified.JoinNotes(u.Err, "version conflict: "+versionClaims(d))
+	return u
+}
+
+// applyBehindEdge notes, on a result of a tech that is not itself an edge, that its version was read from a response
+// header or cookie while an edge layer stood in front: the edge may have set that value, not the origin. The state is
+// kept — the version is still the site's claim — and the layer is not guessed.
+func applyBehindEdge(u unified.Result, d matcher.Detection, edges []string) unified.Result {
+	if d.Layer != "" || len(edges) == 0 || (d.VersionFrom != "header" && d.VersionFrom != "cookie") {
+		return u
+	}
+	u.Err = unified.JoinNotes(u.Err, "version read from a response "+d.VersionFrom+" behind "+strings.Join(edges, ", ")+
+		": the edge may have set it, not the origin")
 	return u
 }
 
@@ -524,7 +544,7 @@ func applyDistroBuild(u unified.Result, d matcher.Detection) unified.Result {
 		u.State, u.Reason = unified.StatePotentiallyAffected, unified.ReasonDistroBuild
 	}
 	if len(u.Leads) > 0 {
-		u.Err = joinNote(u.Err, "version from a package build of "+d.Distro+": "+d.Distro+
+		u.Err = unified.JoinNotes(u.Err, "version from a package build of "+d.Distro+": "+d.Distro+
 			" may have backported the fix or still support the release, so check its own advisories for the package")
 	}
 	return u
@@ -537,7 +557,7 @@ func applyExcludedBy(u unified.Result, d matcher.Detection) unified.Result {
 	if len(d.ExcludedBy) == 0 {
 		return u
 	}
-	u.Err = joinNote(u.Err, "excluded by: "+strings.Join(d.ExcludedBy, ", "))
+	u.Err = unified.JoinNotes(u.Err, "excluded by: "+strings.Join(d.ExcludedBy, ", "))
 	return u
 }
 
@@ -557,17 +577,6 @@ func first(xs []string) string {
 		return ""
 	}
 	return xs[0]
-}
-
-func joinNote(a, b string) string {
-	switch {
-	case a == "":
-		return b
-	case b == "":
-		return a
-	default:
-		return a + "; " + b
-	}
 }
 
 func appendDistinct(xs []string, s string) []string {

@@ -26,9 +26,12 @@ type sourceStatus struct {
 	Err         string `json:"error,omitempty"`
 }
 
+// readStatus reads sync's own status file — never through a link put in its place, which sync would otherwise copy
+// into the status it writes back: anything but a plain file there is no status yet.
 func readStatus(dir string) map[string]sourceStatus {
 	m := map[string]sourceStatus{}
-	if b, err := os.ReadFile(filepath.Join(dir, statusFile)); err == nil {
+	// fsio-exempt fsio.ReadOwn: sync's status, in the store the operator configured
+	if b, err := fsio.ReadOwn(filepath.Join(dir, statusFile)); err == nil {
 		_ = json.Unmarshal(b, &m)
 	}
 	return m
@@ -50,6 +53,7 @@ func recordSyncStatus(dir string, outcomes map[string]error) {
 		m[name] = s
 	}
 	if b, err := json.MarshalIndent(m, "", "  "); err == nil {
+		// fsio-exempt fsio.WriteAtomic: sync's status, in the store the operator configured
 		_ = fsio.WriteAtomic(filepath.Join(dir, statusFile), b, 0o644)
 	}
 }

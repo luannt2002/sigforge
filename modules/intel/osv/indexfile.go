@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/luannt2002/sigforge/framework/fsio"
 )
 
 // A dump is reduced once and its rows kept beside it in the store (<dump>.idx.gz), so a run
@@ -84,7 +86,7 @@ func buildIndex(ctx context.Context, eco string, r io.ReaderAt, size int64, keep
 // readIndexFile loads the rows keep accepts from the index cut from the dump with stamp. Any
 // error — missing, cut from another dump, another format, damaged — means: cut it again.
 func readIndexFile(path, stamp, eco string, keep func(*record) bool) (*Index, error) {
-	f, err := os.Open(path)
+	f, err := fsio.OpenOwn(path) // fsio-exempt fsio.OpenOwn: the index sigforge cut, beside the dump in the store
 	if err != nil {
 		return nil, err
 	}
@@ -135,25 +137,33 @@ func indexDecoder(f *os.File, stamp string) (*gob.Decoder, error) {
 	return dec, nil
 }
 
-// indexWriter streams rows to a temp file renamed into place on success. A nil writer (no
-// cache path, or the file could not be created) ignores every call.
+// indexWriter streams rows to a temporary file in the store's directory, opened once, and commits it at path on
+// success (fsio.CreateIn, Commit: never by name). A nil writer (no cache path, or the file could not be created)
+// ignores every call.
 type indexWriter struct {
-	path string
-	f    *os.File
-	gz   *gzip.Writer
-	enc  *gob.Encoder
-	err  error
+	path  string
+	store *os.Root
+	tmp   *fsio.Temp
+	gz    *gzip.Writer
+	enc   *gob.Encoder
+	err   error
 }
 
 func newIndexWriter(path, stamp string) *indexWriter {
 	if path == "" {
 		return nil
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	// fsio-exempt os.OpenRoot: the store's directory, beside the dump it indexes
+	store, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
 		return nil
 	}
-	w := &indexWriter{path: path, f: f, gz: gzip.NewWriter(f)}
+	tmp, err := fsio.CreateIn(store)
+	if err != nil {
+		store.Close()
+		return nil
+	}
+	w := &indexWriter{path: path, store: store, tmp: tmp, gz: gzip.NewWriter(tmp.File)}
 	w.enc = gob.NewEncoder(w.gz)
 	w.err = w.enc.Encode(indexHeader{Format: indexFormat, Dump: stamp})
 	return w
@@ -178,16 +188,15 @@ func (w *indexWriter) finish(ok bool) {
 	if w == nil {
 		return
 	}
+	defer w.store.Close()
 	if err := w.gz.Close(); w.err == nil {
 		w.err = err
 	}
-	if err := w.f.Close(); w.err == nil {
-		w.err = err
-	}
-	if ok && w.err == nil && os.Rename(w.f.Name(), w.path) == nil {
+	if !ok || w.err != nil {
+		w.tmp.Abort()
 		return
 	}
-	os.Remove(w.f.Name())
+	_ = w.tmp.Commit(filepath.Base(w.path), 0o600) // a failed commit leaves no index: the next run cuts it again
 }
 
 func rowOf(r *record) indexRow {

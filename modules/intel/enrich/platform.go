@@ -138,7 +138,7 @@ func keepDoubtsApart(r unified.Result) []unified.Result {
 			why = append(why, l.Note)
 		}
 	}
-	d.State, d.Leads, d.Err = unified.StatePotentiallyAffected, doubt, strings.TrimSuffix(strings.Join(why, "; ")+"; "+r.Err, "; ")
+	d.State, d.Leads, d.Err = unified.StatePotentiallyAffected, doubt, unified.JoinNotes(append(why, r.Err)...)
 	d.Reason = unified.ReasonVersionUnplaced
 	if len(sure) == 0 {
 		return []unified.Result{d}

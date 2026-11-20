@@ -623,3 +623,74 @@ func TestReferencesIgnoreTheirSuffix(t *testing.T) {
 		}
 	}
 }
+
+// Three headers claim the SAME version through different patterns while a fourth disagrees: the claim reported for
+// that version — its field and pattern — is fixed (field order, then pattern), never the one map iteration happened to
+// read first.
+func TestOneVersionClaimedTwiceKeepsTheSameClaim(t *testing.T) {
+	d := db(map[string]schema.Fingerprint{
+		"Acme": {Headers: map[string]schema.StringList{
+			"X-Acme-A": {`a/([\d.]+)\;version:\1`},
+			"X-Acme-B": {`b/([\d.]+)\;version:\1`},
+			"X-Acme-C": {`c/([\d.]+)\;version:\1`},
+			"X-Acme-D": {`d/([\d.]+)\;version:\1`},
+		}},
+	})
+	page := Page{Headers: map[string][]string{"x-acme-a": {"a/2.0"}, "x-acme-b": {"b/2.0"}, "x-acme-c": {"c/2.0"}, "x-acme-d": {"d/3.0"}}}
+	for i := 0; i < 100; i++ {
+		a, ok := find(Match(d, page), "Acme")
+		if !ok || len(a.VersionClaims) != 2 {
+			t.Fatalf("run %d: claims %+v ok=%v, want two", i, a.VersionClaims, ok)
+		}
+		if c := a.VersionClaims[0]; c.Version != "2.0" || c.Field != "header" || c.Pattern != `a/([\d.]+)` {
+			t.Fatalf("run %d: claim kept for 2.0 is %+v, want the header claim of the first pattern", i, c)
+		}
+	}
+}
+
+// The claim kept for a version does not depend on the order the claims were collected in: Match collects them in field
+// order today, so through Match alone the ranks and the field-name tie-break never decide.
+func TestDistinctClaimsKeepsTheSameClaimInAnyOrder(t *testing.T) {
+	cases := []struct {
+		name   string
+		claims []VersionClaim
+		want   VersionClaim
+	}{
+		{"cookie read before header", []VersionClaim{
+			{Version: "2.0", Field: "cookie", Pattern: "c"}, {Version: "2.0", Field: "header", Pattern: "h"}},
+			VersionClaim{Version: "2.0", Field: "header", Pattern: "h"}},
+		{"html read before meta", []VersionClaim{
+			{Version: "2.0", Field: "html", Pattern: "a"}, {Version: "2.0", Field: "meta", Pattern: "z"}},
+			VersionClaim{Version: "2.0", Field: "meta", Pattern: "z"}},
+		{"two unlisted fields share a rank: field name first, then pattern", []VersionClaim{
+			{Version: "2.0", Field: "x-b", Pattern: "a"}, {Version: "2.0", Field: "x-a", Pattern: "b"}},
+			VersionClaim{Version: "2.0", Field: "x-a", Pattern: "b"}},
+	}
+	for _, c := range cases {
+		for _, claims := range [][]VersionClaim{c.claims, {c.claims[1], c.claims[0]}} {
+			got := distinctClaims(claims)
+			if len(got) != 1 || got[0] != c.want {
+				t.Errorf("%s: distinctClaims(%+v) = %+v, want [%+v]", c.name, claims, got, c.want)
+			}
+		}
+	}
+}
+
+// A version a header and a cookie both claim, in conflict with another: the claim kept is the header's — field order,
+// not field name ("cookie" sorts first).
+func TestClaimKeptByFieldOrderNotFieldName(t *testing.T) {
+	d := db(map[string]schema.Fingerprint{
+		"Acme": {
+			Headers: map[string]schema.StringList{"X-Acme": {`h/([\d.]+)\;version:\1`}, "X-Acme-Other": {`o/([\d.]+)\;version:\1`}},
+			Cookies: map[string]schema.StringList{"acme": {`c/([\d.]+)\;version:\1`}},
+		},
+	})
+	page := Page{Headers: map[string][]string{"x-acme": {"h/2.0"}, "x-acme-other": {"o/3.0"}}, Cookies: []string{"acme=c/2.0"}}
+	a, ok := find(Match(d, page), "Acme")
+	if !ok || len(a.VersionClaims) != 2 {
+		t.Fatalf("claims %+v ok=%v, want two", a.VersionClaims, ok)
+	}
+	if c := a.VersionClaims[0]; c.Version != "2.0" || c.Field != "header" {
+		t.Errorf("claim kept for 2.0 is %+v, want the header's", c)
+	}
+}

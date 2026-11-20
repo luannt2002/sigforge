@@ -255,7 +255,7 @@ func buildMerged(cmd string, srcs sourceFlag, fetches fetchFlag, manifestPath st
 	}
 	return &schema.DB{
 		SchemaVersion: schema.SchemaVersion,
-		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt:   now().UTC().Format(time.RFC3339),
 		Fingerprints:  merge.Merge(base.Fingerprints, sources...),
 	}, syncMan, nil
 }
@@ -286,10 +286,12 @@ func publish(out string, merged *schema.DB) error {
 	if err := archivePrev(out); err != nil {
 		return err
 	}
+	// fsio-exempt fsio.WriteAtomic: the DB the operator names, in its directory
 	if err := fsio.WriteAtomic(out, content, 0o644); err != nil {
 		return err
 	}
 	sum := merge.Checksum(content)
+	// fsio-exempt fsio.WriteAtomic: the DB the operator names, in its directory
 	if err := fsio.WriteAtomic(merge.SidecarPath(out), merge.FormatSidecar(sum, filepath.Base(out)), 0o644); err != nil {
 		return err
 	}
@@ -297,6 +299,7 @@ func publish(out string, merged *schema.DB) error {
 	if err != nil {
 		return err
 	}
+	// fsio-exempt fsio.WriteAtomic: the DB the operator names, in its directory
 	return fsio.WriteAtomic(merge.ManifestPath(out), man, 0o644)
 }
 
@@ -320,9 +323,9 @@ var lockFile = tryLock
 // release closes the file or the run ends, however it ends (Ctrl-C, a broken pipe, a kill), so a run that died never
 // blocks the next one. The file is a lock target only: sigforge never writes it, never removes it (removing it while
 // held would let another run lock a new file of the same name), and changes its mode only when this run created it
-// (0644, so every user who may publish the DB can lock it read-only). On Linux, macOS and the BSDs a symbolic link or
-// anything but a plain file at <out>.lock is refused, never followed (elsewhere a link is followed; nothing is written
-// through it). A second run while it is held exits naming the holder's PID as the system
+// (0644, so every user who may publish the DB can lock it read-only). Anything but a plain file at <out>.lock is refused,
+// never followed — except on Windows, where a link is followed and nothing is written through it. A second run while it
+// is held exits naming the holder's PID as the system
 // reports it (Linux), or "another run". release must stay reachable until the publish is done — every caller defers
 // it: an unreachable *os.File is closed by its finalizer, which lets the lock go.
 func lockPublish(out string) (release func(), err error) {
@@ -366,7 +369,7 @@ func lockPublish(out string) (release func(), err error) {
 // not copy out — and a plain file is read through the file opened, checked to be the one
 // looked at.
 func archivePrev(out string) error {
-	root, err := os.OpenRoot(filepath.Dir(out))
+	root, err := os.OpenRoot(filepath.Dir(out)) // fsio-exempt os.OpenRoot: the directory of the DB the operator names
 	if err != nil {
 		return fmt.Errorf("merge: archive: %w", err)
 	}
@@ -412,6 +415,7 @@ func archiveOne(root *os.Root, src, dst string) error {
 		return errors.New("not a plain file") // a FIFO would hold the run on open; a directory has no content to keep
 	}
 	archiveLooked(root, src)
+	// fsio-exempt (*os.Root).Open: the plain file looked at above, checked to be that file once open
 	f, err := root.Open(src)
 	if err != nil {
 		return err
@@ -432,6 +436,11 @@ func archiveOne(root *os.Root, src, dst string) error {
 // and parses clean through schema validation — a corrupt or missing archive is never
 // rolled back blind.
 //
+// Each archived file is restored as archivePrev kept it — the inverse of the archive: a link as the same link, read
+// through only to be checked (never waited on) and its content never copied out; a plain file through the file opened,
+// never through a link. Anything else there is refused, and all three are read and checked before any is written, so a
+// refused rollback leaves the DB, its sidecar and its manifest as they were.
+//
 // Honest limit: this is a single-step, file-based rollback (one .prev generation), not a
 // versioned history. The next merge overwrites .prev, and rolling back twice is a no-op.
 func cmdRollback(args []string) error {
@@ -444,42 +453,123 @@ func cmdRollback(args []string) error {
 		return fmt.Errorf("rollback: %w", err)
 	}
 	defer release()
-	prev := out + ".prev"
-	data, err := fsio.Read(prev)
-	if err != nil {
-		return fmt.Errorf("rollback: no previous snapshot %q — nothing to roll back", prev)
-	}
-	sidecar, err := fsio.Read(merge.SidecarPath(prev))
-	if err != nil {
-		return fmt.Errorf("rollback: previous snapshot has no checksum %q — refusing blind rollback", merge.SidecarPath(prev))
-	}
-	want, err := merge.ParseSidecar(sidecar)
+	root, err := os.OpenRoot(filepath.Dir(out)) // fsio-exempt os.OpenRoot: the directory of the DB the operator names
 	if err != nil {
 		return fmt.Errorf("rollback: %w", err)
 	}
-	if got := merge.Checksum(data); got != want {
-		return fmt.Errorf("rollback: previous snapshot is CORRUPT (checksum mismatch) — refusing to restore\n  want %s\n  got  %s", want, got)
+	defer root.Close()
+	base := filepath.Base(out)
+	prev := base + ".prev"
+	data, err := readArchived(root, prev, true)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("rollback: no previous snapshot %q — nothing to roll back", out+".prev")
 	}
-	db, err := schema.Parse(data)
 	if err != nil {
-		return fmt.Errorf("rollback: previous snapshot fails schema validation — refusing to restore: %w", err)
+		return fmt.Errorf("rollback: %w — refusing to restore", err)
+	}
+	sidecar, err := readArchived(root, merge.SidecarPath(prev), true)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("rollback: previous snapshot has no checksum %q — refusing blind rollback",
+			merge.SidecarPath(out+".prev"))
+	}
+	if err != nil {
+		return fmt.Errorf("rollback: %w — refusing to restore", err)
+	}
+	// What is read through an archived link is checked, never shown: a refused rollback says what failed, and quotes
+	// the digests and the parse error only when both files are sigforge's own.
+	var links []string
+	for _, t := range []string{data.target, sidecar.target} {
+		if t != "" {
+			links = append(links, t)
+		}
+	}
+	refuse := func(what string, detail string) error {
+		if len(links) > 0 {
+			return fmt.Errorf("rollback: previous snapshot %s (the archive holds a link to %s) — refusing to restore", what,
+				strings.Join(links, ", "))
+		}
+		return fmt.Errorf("rollback: previous snapshot %s — refusing to restore%s", what, detail)
+	}
+	want, err := merge.ParseSidecar(sidecar.data)
+	if err != nil {
+		return refuse("has a checksum that does not read as one", ": "+err.Error())
+	}
+	if got := merge.Checksum(data.data); got != want {
+		return refuse("is CORRUPT (checksum mismatch)", fmt.Sprintf("\n  want %s\n  got  %s", want, got))
+	}
+	db, err := schema.Parse(data.data)
+	if err != nil {
+		return refuse("fails schema validation", ": "+err.Error())
+	}
+	man, err := readArchived(root, merge.ManifestPath(prev), false)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		man = nil // archived without a manifest: the current one stays
+	case err != nil:
+		return fmt.Errorf("rollback: %w — refusing to restore", err)
 	}
 	// Restore DB + sidecar (+ manifest when archived). Each write is atomic on its own; the
 	// three are not jointly transactional, but each flips old→new cleanly.
-	if err := fsio.WriteAtomic(out, data, 0o644); err != nil {
-		return err
-	}
-	if err := fsio.WriteAtomic(merge.SidecarPath(out), sidecar, 0o644); err != nil {
-		return err
-	}
-	if man, err := os.ReadFile(merge.ManifestPath(prev)); err == nil {
-		if err := fsio.WriteAtomic(merge.ManifestPath(out), man, 0o644); err != nil {
-			return err
+	for _, r := range []struct {
+		a    *archived
+		name string
+	}{{data, base}, {sidecar, merge.SidecarPath(base)}, {man, merge.ManifestPath(base)}} {
+		if r.a == nil {
+			continue
+		}
+		if err := r.a.restore(root, r.name); err != nil {
+			return fmt.Errorf("rollback: %w", err)
 		}
 	}
 	fmt.Printf("ok: rolled back %s to the previous snapshot — schema %s, %d fingerprints (checksum + schema verified)\n",
 		out, db.SchemaVersion, len(db.Fingerprints))
 	return nil
+}
+
+// archivedLooked runs between looking at an archived file and reading it: a test swaps the file there.
+var archivedLooked = func(root *os.Root, name string) {}
+
+// archived is one file archivePrev kept: the link it was (target), or the bytes of the plain file it was.
+type archived struct {
+	target string
+	data   []byte
+}
+
+// readArchived reads the archived file name of root's directory as archivePrev kept it. A link is read through only
+// when check asks for its bytes (the DB and its checksum, to be checked), never waiting on what it points to; a plain
+// file is read through the file opened, never through a link; anything else is refused.
+func readArchived(root *os.Root, name string, check bool) (*archived, error) {
+	st, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	archivedLooked(root, name)
+	switch {
+	case st.Mode()&fs.ModeSymlink != 0:
+		target, err := root.Readlink(name)
+		if err != nil || !check {
+			return &archived{target: target}, err
+		}
+		at := target
+		if !filepath.IsAbs(at) {
+			at = filepath.Join(root.Name(), at) // as the link resolves it: from its own directory
+		}
+		// fsio-exempt fsio.ReadPlain: an archived link's target, read only to be checked, never copied out
+		b, err := fsio.ReadPlain(at)
+		return &archived{target: target, data: b}, err
+	case st.Mode().IsRegular():
+		b, err := fsio.ReadOwnIn(root, name)
+		return &archived{data: b}, err
+	}
+	return nil, fmt.Errorf("%s is not a plain file", filepath.Join(root.Name(), name))
+}
+
+// restore puts a back at name of root's directory: the same link, or its bytes.
+func (a *archived) restore(root *os.Root, name string) error {
+	if a.target != "" {
+		return fsio.SymlinkAtomicIn(root, name, a.target)
+	}
+	return fsio.WriteAtomicIn(root, name, a.data, 0o644)
 }
 
 // runFetches resolves, fetches and normalizes each --fetch source, stamps the
@@ -882,6 +972,9 @@ func cmdMatch(args []string) error {
 		if d.Distro != "" { // the version is the upstream number of a package that may carry backported fixes
 			fmt.Printf(", %s package", d.Distro)
 		}
+		if d.Layer != "" { // a layer the response passed through: its identity is not the origin's
+			fmt.Printf(", %s layer", d.Layer)
+		}
 		if len(d.ExcludedBy) > 0 { // the lead is kept, so the contradiction must be visible
 			fmt.Printf(", excluded by %s", strings.Join(d.ExcludedBy, ", "))
 		}
@@ -989,14 +1082,18 @@ const EnvCacheMaxAge = feedset.EnvCacheMaxAge
 // body cap, so it is streamed to the store — as the identity resolver itself reads it — like an OSV dump.
 // It puts a new copy in the store only once the parser a run reads the catalog with accepts it and finds an entry in it.
 func syncCatalog(ctx context.Context, client *fetch.Client, s syncSource, u string) (int64, error) {
+	start := time.Now() // the clock the fetch stamps the store's copy with
 	if s.env != identity.EnvCPEDictURL {
 		b, err := client.GetChecked(ctx, u, s.check)
+		if err == nil {
+			err = client.Kept(u, start) // a sync is for the store: an answer the store did not keep is a failure
+		}
 		return int64(len(b)), err
 	}
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	path, meta, release, err := client.DownloadChecked(dctx, u, 2<<30, func(p string) error {
-		f, err := os.Open(p)
+		f, err := fsio.OpenOwn(p) // fsio-exempt fsio.OpenOwn: the file the download just made, in the store
 		if err != nil {
 			return err
 		}
@@ -1011,10 +1108,13 @@ func syncCatalog(ctx context.Context, client *fetch.Client, s syncSource, u stri
 	if err == nil && meta.Stale {
 		err = errors.New(meta.Err) // the store kept its copy: the source did not answer, or the check refused its answer
 	}
+	if err == nil {
+		err = client.Kept(u, start)
+	}
 	if err != nil {
 		return 0, err
 	}
-	st, err := os.Stat(path)
+	st, err := os.Lstat(path)
 	if err != nil {
 		return 0, err
 	}
@@ -1175,6 +1275,7 @@ func buildEnrichInput(packages []string, sbomPath string, wpPlugins, wpThemes, j
 		addPkg(r)
 	}
 	if sbomPath != "" {
+		// fsio-exempt os.ReadFile: --sbom is the operator's input, read through their link
 		b, err := os.ReadFile(sbomPath)
 		if err != nil {
 			return inp, 0, err
@@ -1229,6 +1330,9 @@ func printEnrich(results []unified.Result) {
 		}
 		if r.Freshness != unified.FreshnessUnknown {
 			fmt.Printf(" freshness=%s", r.Freshness)
+		}
+		if r.Layer != "" {
+			fmt.Printf(" layer=%s", r.Layer)
 		}
 		fmt.Println()
 		if r.Err != "" {
@@ -1343,10 +1447,13 @@ func cmdVerify(args []string) error {
 		return fmt.Errorf("verify: want exactly one FILE")
 	}
 	dbPath := args[0]
-	data, err := fsio.Read(dbPath)
+	// verify writes nothing and prints a verdict, so it reads the DB, its sidecar and its manifest through the
+	// operator's links — a release published as links is checked as it is served.
+	data, err := fsio.Read(dbPath) // fsio-exempt fsio.Read: the operator's DB; verify writes nothing
 	if err != nil {
 		return err
 	}
+	// fsio-exempt fsio.Read: beside the operator's DB; verify writes nothing
 	sidecar, err := fsio.Read(merge.SidecarPath(dbPath))
 	if err != nil {
 		return fmt.Errorf("verify: no checksum sidecar %q — integrity NOT verified (this is not 'ok')", merge.SidecarPath(dbPath))
@@ -1368,7 +1475,7 @@ func cmdVerify(args []string) error {
 	// produced it and that it describes THIS DB; a missing manifest is a warning (integrity
 	// still checked), never a clean "ok".
 	manPath := merge.ManifestPath(dbPath)
-	manBytes, manErr := fsio.Read(manPath)
+	manBytes, manErr := fsio.Read(manPath) // fsio-exempt fsio.Read: beside the operator's DB; verify writes nothing
 	if manErr != nil {
 		fmt.Printf("ok: %s — sha256 matches sidecar, schema %s, %d fingerprints\n", dbPath, db.SchemaVersion, len(db.Fingerprints))
 		fmt.Printf("WARNING: no manifest %q — compatibility/provenance NOT verified (integrity checked, but this is not a trusted snapshot)\n", manPath)

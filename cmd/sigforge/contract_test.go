@@ -95,6 +95,9 @@ func TestContractFixtures(t *testing.T) {
 		{"11-distro-build", []string{"--json"}, []string{cve.EnvVar + "=" + srv.URL + "/cve"}, func() {
 			page = `{"headers":{"Server":["Apache/2.4.6 (CentOS)"]}}` // the upstream number of a distro's package build
 		}},
+		{"12-edge-layer", []string{"--json"}, []string{cve.EnvVar + "=" + srv.URL + "/cve"}, func() {
+			page = `{"headers":{"CF-RAY":["8a1b"],"Server":["cloudflare"],"X-Powered-By":["PHP/7.4.3"]}}` // PHP seen through a CDN
+		}},
 	}
 	normalize := regexp.MustCompile(`"fetched_at": "[^"]*"`)
 	seen := map[[2]string]string{}
@@ -215,8 +218,8 @@ func TestEnrichTextNamesTheTechOfAResultWithNoIdentity(t *testing.T) {
 // concluded that gives no reason.
 func TestContractFixturesRoundTrip(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "contract", "[0-9]*.json"))
-	if err != nil || len(files) < 11 {
-		t.Fatalf("want the 11 contract fixtures, got %d (%v)", len(files), err)
+	if err != nil || len(files) < 12 {
+		t.Fatalf("want the 12 contract fixtures, got %d (%v)", len(files), err)
 	}
 	results, clean, noReason := 0, 0, 0
 	for _, f := range files {
@@ -239,6 +242,9 @@ func TestContractFixturesRoundTrip(t *testing.T) {
 			}
 			if (!r.State.Concluded() || r.State == unified.StatePotentiallyAffected) && r.Reason == "" {
 				noReason++
+			}
+			if strings.HasPrefix(r.Err, "; ") || strings.HasSuffix(r.Err, "; ") || strings.Contains(r.Err, "; ; ") {
+				t.Errorf("%s: %s %s: a note joined around nothing: %q", f, r.Scope, r.Tech, r.Err)
 			}
 		}
 	}

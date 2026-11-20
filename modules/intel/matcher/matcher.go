@@ -62,6 +62,11 @@ type Detection struct {
 	// upstream version ("PHP/7.4.3-4ubuntu2.19"). The version stays the upstream number the banner shows; the package
 	// may carry fixes that number does not (a backport). Read from header, cookie and meta values only.
 	Distro string `json:"distro,omitempty"`
+	// Layer is "edge" when every category of the tech is an edge one — CDN (31), reverse proxy (64), load balancer
+	// (65): the response passed through it, and what it is says nothing of the origin behind it. Empty when the layer
+	// is not established — a tech that can also be the origin (a web server that proxies, a cache) or one with no
+	// category. Never "origin": nothing a page shows proves which layer answered.
+	Layer string `json:"layer,omitempty"`
 	// ExcludedBy names the resolved techs that exclude this one; a tech present only through
 	// labeled techs — implied by them, or admitted by a requires/requiresCategory gate they
 	// meet — carries their labels too. The lead is kept and labeled, not dropped, so the
@@ -156,6 +161,7 @@ func Match(db *schema.DB, page Page) []Detection {
 			Version:     h.version,
 			VersionFrom: h.from,
 			Distro:      h.distro,
+			Layer:       layerOf(h.fp.Cats),
 			Confidence:  conf,
 			Categories:  h.fp.Cats,
 			Provenance:  h.fp.Provenance,
@@ -388,25 +394,35 @@ func versionCompatible(a, b string) bool {
 	return a == b || strings.HasPrefix(a+".", b+".") || strings.HasPrefix(b+".", a+".")
 }
 
-// distinctClaims returns the claims with distinct version strings, sorted so the
-// conflict report is reproducible; the first field/pattern seen for a version is kept.
+// distinctClaims returns one claim per distinct version, sorted by version so the conflict report is reproducible.
+// Of the claims of one version, the one kept comes first in field order, then by field and pattern — never the one
+// map iteration read first; its distro comes from every claim of the version.
 func distinctClaims(claims []VersionClaim) []VersionClaim {
-	seen := make(map[string]bool, len(claims))
-	out := make([]VersionClaim, 0, len(claims))
+	kept := make(map[string]VersionClaim, len(claims))
 	for _, c := range claims {
-		if !seen[c.Version] {
-			seen[c.Version] = true
-			c.Distro = claimDistro(claims, c.Version) // every claim of the version decides, not the one read first
-			out = append(out, c)
+		if k, ok := kept[c.Version]; !ok || claimFirst(c, k) {
+			kept[c.Version] = c
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Version != out[j].Version {
-			return out[i].Version < out[j].Version
-		}
-		return fieldRank(out[i].Field) < fieldRank(out[j].Field)
-	})
+	out := make([]VersionClaim, 0, len(kept))
+	for _, c := range kept {
+		c.Distro = claimDistro(claims, c.Version)
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	return out
+}
+
+// claimFirst orders two claims of one version: field order, then field name (fields the order does not list share a
+// rank), then pattern.
+func claimFirst(a, b VersionClaim) bool {
+	if ra, rb := fieldRank(a.Field), fieldRank(b.Field); ra != rb {
+		return ra < rb
+	}
+	if a.Field != b.Field {
+		return a.Field < b.Field
+	}
+	return a.Pattern < b.Pattern
 }
 
 // sortEvidence orders evidence by field, pattern then matched string so a page's
@@ -821,4 +837,21 @@ func parseMetas(html string) map[string][]string {
 
 func alnum(c byte) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// edgeCategories are the categories of a layer a response passes through on its way from the origin: CDN, reverse
+// proxy, load balancer.
+var edgeCategories = map[int]bool{31: true, 64: true, 65: true}
+
+// layerOf is "edge" for a tech whose every category is an edge one, "" otherwise (see Detection.Layer).
+func layerOf(cats []int) string {
+	if len(cats) == 0 {
+		return ""
+	}
+	for _, c := range cats {
+		if !edgeCategories[c] {
+			return ""
+		}
+	}
+	return "edge"
 }

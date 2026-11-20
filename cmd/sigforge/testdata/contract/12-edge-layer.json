@@ -1,0 +1,81 @@
+{
+  "case": "12-edge-layer",
+  "args": [
+    "--json"
+  ],
+  "env": [
+    "SIGFORGE_SOURCE_CVE_URL"
+  ],
+  "exit": 0,
+  "results": [
+    {
+      "state": "potentially_affected",
+      "scope": "cpe",
+      "identity": "cpe:2.3:a:cloudflare:cloudflare:*:*:*:*:*:*:*:*",
+      "leads": [
+        {
+          "id": "CVE-2099-2222",
+          "cve": [
+            "CVE-2099-2222"
+          ]
+        }
+      ],
+      "source": "cve",
+      "freshness": "live",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "cpe_state": "attested",
+      "cpe_evidence": "source",
+      "tech": "Cloudflare",
+      "error": "no version detected: advisories for the product, not pinned to the running version",
+      "reason": "no_version",
+      "kev": "sample",
+      "detection_confidence": 100,
+      "layer": "edge"
+    },
+    {
+      "state": "not_checked",
+      "scope": "eol",
+      "source": "lifecycle",
+      "tech": "Cloudflare",
+      "reason": "source_off",
+      "detection_confidence": 100,
+      "layer": "edge"
+    },
+    {
+      "state": "affected_by_advisory",
+      "scope": "cpe",
+      "identity": "cpe:2.3:a:php:php:7.4.3:*:*:*:*:*:*:*",
+      "version": "7.4.3",
+      "leads": [
+        {
+          "id": "CVE-2099-2222",
+          "cve": [
+            "CVE-2099-2222"
+          ]
+        }
+      ],
+      "source": "cve",
+      "freshness": "live",
+      "fetched_at": "2000-01-01T00:00:00Z",
+      "cpe_state": "attested",
+      "cpe_evidence": "source",
+      "tech": "PHP",
+      "error": "version read from a response header behind Cloudflare: the edge may have set it, not the origin",
+      "kev": "sample",
+      "version_from": "header",
+      "detection_confidence": 100
+    },
+    {
+      "state": "not_checked",
+      "scope": "eol",
+      "identity": "php",
+      "version": "7.4.3",
+      "source": "lifecycle",
+      "tech": "PHP",
+      "error": "version read from a response header behind Cloudflare: the edge may have set it, not the origin",
+      "reason": "source_off",
+      "version_from": "header",
+      "detection_confidence": 100
+    }
+  ]
+}

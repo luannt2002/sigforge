@@ -148,6 +148,7 @@ func (l *StringList) UnmarshalJSON(b []byte) error {
 // DB). A missing or unreadable path returns an error the caller may treat as "use
 // the baseline only".
 func LoadFile(path string) (*DB, error) {
+	// fsio-exempt fsio.Read: the operator's DB (--db, a merge source), read through their link
 	b, err := fsio.Read(path)
 	if err != nil {
 		return nil, err

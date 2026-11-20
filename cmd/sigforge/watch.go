@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -106,8 +107,9 @@ func cmdWatch(args []string) error {
 	}
 
 	var prev watchState
-	b, err := os.ReadFile(*statePath)
-	first := os.IsNotExist(err)
+	// fsio-exempt fsio.ReadOwn: the state file the operator names; written back below
+	b, err := fsio.ReadOwn(*statePath)
+	first := errors.Is(err, os.ErrNotExist)
 	if err != nil && !first {
 		return fmt.Errorf("watch: %w", err)
 	}
@@ -177,6 +179,7 @@ func cmdWatch(args []string) error {
 	if err != nil {
 		return err
 	}
+	// fsio-exempt fsio.WriteAtomic: the state file the operator names
 	if err := fsio.WriteAtomic(*statePath, out, 0o644); err != nil {
 		return fmt.Errorf("watch: %w", err)
 	}

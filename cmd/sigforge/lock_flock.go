@@ -14,11 +14,13 @@ import (
 // symbolic link included, so it never creates through one — or opened as it is without following a symbolic link or
 // waiting on a FIFO. created says this run made it.
 func openLock(path string) (f *os.File, created bool, err error) {
+	// fsio-exempt os.OpenFile: a fresh lock target (O_EXCL), never read or written
 	f, err = os.OpenFile(path, os.O_RDONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err == nil {
 		return f, true, nil
 	}
 	if errors.Is(err, fs.ErrExist) {
+		// fsio-exempt os.OpenFile: the lock target, never through a link, never waited on; never read or written
 		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	}
 	if errors.Is(err, syscall.ELOOP) {
